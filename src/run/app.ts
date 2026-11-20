@@ -56,7 +56,10 @@ export function buildApp(opts: BuildAppOptions): BuiltApp {
   const app = new AgentApp({
     name: opts.config.appName,
     system,
-    tools: buildTools(agent, opts.assets),
+    // 生效模型必须一路传到技能 / 子 agent 的子循环：上游的 capability loop 只继承
+    // client（端点），刻意不继承 model —— 不在这里补上就会拿 opus 的名字打 DeepSeek，
+    // 成本也按 opus 单价记（见 tools.ts 的 SubloopDefaults）
+    tools: buildTools(agent, opts.assets, { model, maxIterations }),
     labels: {
       'harness.assets': opts.assets.fingerprint,
       'harness.agent': `${agent.name}@${agent.version}`,

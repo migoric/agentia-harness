@@ -112,10 +112,19 @@ function project() {
         reject(new Error(`init 失败 code=${code}`));
         return;
       }
-      // 显式钉模型：不写就吃缺省模型，成本断言会随上游价格表变动而漂
+      // 显式钉一个**非缺省**模型名：既让成本断言不随上游价格表漂移，又能抓到
+      // 「主 agent 用配置的模型、技能子循环偷偷回落到 claude-opus-5」这种回归
       writeFileSync(
         join(root, 'harness.config.json'),
-        `${JSON.stringify({ appName: 'offline', model: 'claude-opus-5' }, null, 2)}\n`,
+        `${JSON.stringify(
+          {
+            appName: 'offline',
+            model: 'deepseek-flash',
+            pricing: { 'deepseek-flash': { in: 5, out: 25 } },
+          },
+          null,
+          2,
+        )}\n`,
         'utf8',
       );
       resolve(root);
@@ -145,6 +154,19 @@ const root = await project();
     'run 的 token 计量非零（usage 从流里拼出来的）',
     typeof j.tokens === 'number' && j.tokens > 0,
     `tokens=${j.tokens}`,
+  );
+
+  // 真端点上踩出来的：上游 capability loop 继承 client 但不继承 model，
+  // 装配层不补的话技能那几回合会挂 claude-opus-5、按 opus 单价记账（40×）
+  const traceLines = readFileSync(join(root, '.workspace', 'traces.jsonl'), 'utf8')
+    .trim()
+    .split('\n');
+  const trace = JSON.parse(traceLines.at(-1));
+  const turns = trace.spans.filter((s) => s.kind === 'llm.turn');
+  check(
+    '技能子循环用工程生效模型，不回落到 claude-opus-5',
+    turns.length >= 3 && turns.every((s) => s.name === 'deepseek-flash'),
+    `turns=${turns.map((s) => s.name).join(', ')}`,
   );
   fake.stop();
 }

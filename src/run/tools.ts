@@ -8,6 +8,25 @@ import {
 import type { AgentAsset, AssetSet, SkillAsset } from '../assets/types.js';
 import { HarnessError } from '../errors.js';
 
+/**
+ * 子循环没指定模型时的兜底 —— 取本工程**实际生效**的模型（`config.model ??
+ * agent.model ?? agentia 缺省`），与传给主 app 的是同一个值。
+ *
+ * 上游 `runCapabilityLoop` 刻意「不继承主 run 的 model」：它继承 `ctx.client`（所以端点
+ * 不会分裂），但 `model` 只认调用方显式给的值，没给就用引擎缺省 `claude-opus-5`。
+ * 对换端点的工程这是双重的静默错误：
+ * 1. 技能 / 子 agent 拿着 `claude-opus-5` 这个名字去打 DeepSeek 的端点（严格端点会 404，
+ *    宽松端点会悄悄按另一档计价）；
+ * 2. 成本账按 Opus 单价算，本地实测一轮 1158 token 被记成 $0.02375，实际约 $0.0006
+ *    —— 40 倍，而且 `maxCostUsd` 会在技能那一步提前触发。
+ *
+ * 资产上的 `model` 优先于这里的兜底（某个技能可以故意用别的模型）。
+ */
+export interface SubloopDefaults {
+  readonly model?: string | undefined;
+  readonly maxIterations?: number | undefined;
+}
+
 /** 技能与子 agent 共用的入参形状：只收一段任务描述 */
 const TASK_SCHEMA: JsonSchema = {
   type: 'object',
@@ -39,7 +58,10 @@ const TASK_SCHEMA: JsonSchema = {
  * 3. **入参只有一个 task 字符串**。多字段 schema 会引诱模型编造参数；绝大多数技能
  *    要的就是一段任务描述，多余的结构化留给 agent 资产（system + tools）。
  */
-export function buildSkillTools(skills: readonly SkillAsset[]): AgentTool[] {
+export function buildSkillTools(
+  skills: readonly SkillAsset[],
+  defaults: SubloopDefaults = {},
+): AgentTool[] {
   assertNoCycles(skills);
   const byName = new Map(skills.map((s) => [s.name, s]));
   const built = new Map<string, AgentTool>();
@@ -68,13 +90,15 @@ export function buildSkillTools(skills: readonly SkillAsset[]): AgentTool[] {
         }
         const { task } = input as SkillInput;
         const subTools = asset.tools.map((n) => build(n));
+        const model = asset.model ?? defaults.model;
+        const maxIterations = asset.maxIterations ?? defaults.maxIterations;
         const r = await runCapabilityLoop(ctx, {
           name: asset.name,
           input: task,
           system: asset.body,
           ...(subTools.length > 0 ? { tools: subTools } : {}),
-          ...(asset.model !== undefined ? { model: asset.model } : {}),
-          ...(asset.maxIterations !== undefined ? { maxIterations: asset.maxIterations } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(maxIterations !== undefined ? { maxIterations } : {}),
         });
         if (!isSuccessStopReason(r.stopReason)) {
           const why = r.error === undefined ? r.stopReason : `${r.stopReason}: ${r.error.message}`;
@@ -111,8 +135,12 @@ interface SkillInput {
  * `spec.tools` 只被 `subagentToTool` 用来判断「要不要取工具」，真正的过滤由传进去的
  * `resolveTools` 完成 —— 所以这里把能力名原样写进去，而不是拼 provider token 路径。
  */
-export function buildTools(agent: AgentAsset, set: AssetSet): AgentTool[] {
-  const skillByName = new Map(buildSkillTools(set.skills).map((t) => [t.name, t]));
+export function buildTools(
+  agent: AgentAsset,
+  set: AssetSet,
+  defaults: SubloopDefaults = {},
+): AgentTool[] {
+  const skillByName = new Map(buildSkillTools(set.skills, defaults).map((t) => [t.name, t]));
   const agentByName = new Map(set.agents.map((a) => [a.name, a]));
   const built = new Map<string, AgentTool>();
   const allSkills = set.skills.map((s) => s.name);
@@ -156,6 +184,8 @@ export function buildTools(agent: AgentAsset, set: AssetSet): AgentTool[] {
         buildAgent(requireAgent(n, `agent "${a.name}"`), [...trail, a.name]),
       ),
     ];
+    const model = a.model ?? defaults.model;
+    const maxIterations = a.maxIterations ?? defaults.maxIterations;
     const tool = subagentToTool(
       {
         name: a.name,
@@ -167,8 +197,8 @@ export function buildTools(agent: AgentAsset, set: AssetSet): AgentTool[] {
           schema: TASK_SCHEMA,
           system: a.body,
           ...(children.length > 0 ? { tools: [...skillsOf(a), ...a.subagents] } : {}),
-          ...(a.model !== undefined ? { model: a.model } : {}),
-          ...(a.maxIterations !== undefined ? { maxIterations: a.maxIterations } : {}),
+          ...(model !== undefined ? { model } : {}),
+          ...(maxIterations !== undefined ? { maxIterations } : {}),
         },
       },
       () => children,

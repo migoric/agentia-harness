@@ -26,7 +26,7 @@ npm run harness -- run "压一下这段文字" --root examples/starter
 
 | 字段 | 作用 | 少了会怎样 |
 | --- | --- | --- |
-| `model` | 发给端点的模型名 | 吃 agentia 缺省（`claude-opus-5`），端点会 404 |
+| `model` | 发给端点的模型名，**所有子循环也用它** | 吃 agentia 缺省（`claude-opus-5`）：真端点未必 404，但会按 Opus 单价记账（实测约 40×） |
 | `endpoint.baseURL` | 端点地址（替代 `ANTHROPIC_BASE_URL`） | 直连 `api.anthropic.com`，401 |
 | `endpoint.apiKeyEnv` | 「key 在哪个环境变量里」——**只是名字** | 报「缺少模型凭据」，开跑前就停（退出码 2） |
 | `pricing` | 价格表，成本读数靠它 | 成本是「未知」：报告里没有 `$`，成本门退回 token，`rsi --max-cost` 不生效 |
@@ -49,6 +49,18 @@ npm run harness -- run "压一下这段文字" --root examples/starter
 **三、`cacheWrite` 没写** ⇒ 走缺省 `1.25×`。DeepSeek 不单独收缓存写费，缺省值会
 让估算**偏高**（成本门提前刹车，方向安全）。如果你的端点确实在 `usage` 里报
 `cache_creation_input_tokens`，按实际情况把它改成 `0` 或 `1`。
+
+## 真机实测（2026-11-21，DeepSeek 官方端点）
+
+```text
+harness run  … → [end_turn] 2394 token $0.00071 · 2 轮 · 7181ms · 技能：example
+harness eval … → 1/1 通过 · 6006 token $0.00285 · costKnown: true
+```
+
+这两条命令跑出了一个此前离线 e2e 没抓到的 bug：上游 `runCapabilityLoop` 继承
+`client` 但**不继承 `model`**，技能子循环拿着 `claude-opus-5` 去打 DeepSeek，
+一轮 1158 token 被记成 $0.02375（实际约 $0.0006）。已在装配层把工程生效模型
+传给技能与子 agent，并加了单测 + 离线 e2e 双重守门。
 
 ## 已知的兼容性观察
 

@@ -27,6 +27,11 @@
 
 ### 修复
 
+- **换端点后，技能与子 agent 子循环偷偷用回缺省模型**：agentia 的 capability loop
+  继承 `client` 却不继承 `model`，装配层不显式传就会拿 `claude-opus-5` 去打 DeepSeek；
+  真端点未必报错，但成本按 Opus 单价记（实测一轮 1158 token 记成 $0.02375，实际约
+  $0.0006），`maxCostUsd` 会提前刹车。现在把工程生效模型与迭代上限一路传给所有子循环
+  （资产自己的 `model` 仍优先）。真端点复跑后同样用量从 $0.024 降到 $0.00071。
 - **端点不报 usage 时成本被算成 `0`**：模型在价格表里时，上游按「0 token × 单价」
   算出 `costEstimate = 0`，与「真的一分没花」是同一个数 ⇒ `costKnown` 判成 true，
   预算闸与回归门一起静默失效。现在按 trace 里的 `usage.missing` 事件把这种情况折回

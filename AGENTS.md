@@ -125,6 +125,11 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
   「主 agent 走 DeepSeek、技能偷偷走官方端点」静默发生。所以 `endpoint` 段在 CLI 入口
   一次性落到 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`（`run/endpoint.ts`），
   **不覆盖**已存在的真实环境变量（与 `loadEnvFile` 同款语义）。
+- **子循环继承 client，但不继承 model**。上游 `runCapabilityLoop` 的设计如此
+  （见 `toolkit/capability-loop.ts` 的边界段）：端点不会分裂，**模型名会** —— 不给
+  `model` 就落到 `claude-opus-5`。harness 在 `buildApp` 把生效模型传给 `buildTools`，
+  再由技能 / 子 agent 装配透传（资产自己的 `model` 优先）。改这条要看
+  `tests/multi-agent.test.ts` 的模型继承用例与离线 e2e 的同名断言。
 - **`pricing` 的 `cacheRead` / `cacheWrite` 是相对 `in` 的乘数，不是绝对价**。把
   DeepSeek 的 $0.003（缓存读）当成乘数填进去，缓存命中那部分会便宜 100 倍，而成本
   数字看上去「很正常」。`tests/config.test.ts` 只守形状，口径靠人守 —— 改这块先读

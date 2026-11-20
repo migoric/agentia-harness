@@ -187,3 +187,70 @@ describe('委派的 trace 归因', () => {
     assert.deepEqual(out.skills, ['summary']);
   });
 });
+
+describe('子循环继承生效模型', () => {
+  const CONFIG = JSON.stringify({
+    model: 'deepseek-flash',
+    pricing: { 'deepseek-flash': { in: 0.15, out: 0.6 } },
+  });
+
+  it('技能与子 agent 都用主配置的模型，成本也按它的单价记', async () => {
+    const root = project({
+      'harness.config.json': CONFIG,
+      'agents/main.md': MAIN,
+      'agents/reviewer.md': REVIEWER,
+      'skills/summary/SKILL.md': SUMMARY,
+      'evals/.keep': '',
+    });
+    const { config, assets } = assetsOf(root);
+    const runner = createRunner(config, assets, 'main', false);
+    const client = scriptedClient([
+      toolUse('reviewer', { task: '审这段文字' }),
+      toolUse('summary', { task: '压成三条' }),
+      endTurn('三条要点'),
+      endTurn('审稿结论：可以'),
+      endTurn('最终：可以'),
+    ]);
+
+    const out = await runner.run('审一下这段文字', { client });
+    const turns = out.trace.spans.filter((s) => s.kind === 'llm.turn');
+    assert.equal(turns.length, 5, out.trace.spans.map((s) => s.kind).join(','));
+    assert.deepEqual(
+      [...new Set(turns.map((s) => s.name))],
+      ['deepseek-flash'],
+      '上游 capability loop 只继承 client、不继承 model —— 装配层不补，这里就会出现 claude-opus-5',
+    );
+    // 10 in / 5 out × $0.15/$0.60 每 1M = 每轮 $0.0000045，五轮 $0.0000225。
+    // 按 opus 单价（$5/$25）则是 $0.000875，相差近 40 倍
+    assert.ok(
+      (out.trace.totalUsage.costEstimate ?? Number.POSITIVE_INFINITY) < 0.0001,
+      `成本应按 deepseek-flash 单价记，实际 ${String(out.trace.totalUsage.costEstimate)}`,
+    );
+  });
+
+  it('资产自己声明的 model 仍然优先于工程兜底', async () => {
+    const root = project({
+      'harness.config.json': CONFIG,
+      'agents/main.md': '---\nname: main\ndescription: 主\ntools: [s]\n---\n正文\n',
+      'skills/s/SKILL.md': '---\nname: s\ndescription: S\nmodel: claude-haiku-4-5\n---\n摘要\n',
+      'evals/.keep': '',
+    });
+    const { config, assets } = assetsOf(root);
+    const runner = createRunner(config, assets, undefined, false);
+    const out = await runner.run('压一下', {
+      client: scriptedClient([
+        toolUse('s', { task: '压一下' }),
+        endTurn('三条要点'),
+        endTurn('结论'),
+      ]),
+    });
+
+    const turns = out.trace.spans.filter((s) => s.kind === 'llm.turn');
+    const sub = turns.find((s) => s.name === 'claude-haiku-4-5');
+    assert.ok(sub, `技能应保留自己的模型，实际各回合是 ${turns.map((s) => s.name).join(', ')}`);
+    assert.ok(
+      turns.some((s) => s.name === 'deepseek-flash'),
+      '主 agent 仍用工程生效模型',
+    );
+  });
+});
