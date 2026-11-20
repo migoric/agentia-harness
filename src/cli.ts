@@ -68,6 +68,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   serve                   起 HTTP 服务（POST /run、GET /health）
     --port <n>            端口（缺省 8787）
     --host <ip>           监听地址（缺省 127.0.0.1）
+    --timeout <ms>        单次 /run 的超时（超时按 504 返回）
 
 通用参数：
   --root <目录>           工程根（缺省 cwd）
