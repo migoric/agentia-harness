@@ -1,6 +1,6 @@
 {
   "name": "@migor/agentia-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Agent harness 工程基座：Markdown 资产库 + 评测台 + RSI 闭环，构建在 @migor/agentia 之上",
   "type": "module",
   "license": "MIT",

@@ -21,6 +21,14 @@ export interface RunOutcome {
   readonly trace: Trace;
   /** input + output + cache 相关 token 的总和 —— 成本的可比代理 */
   readonly tokens: number;
+  /**
+   * 本次运行的美元成本（来自 `trace.totalUsage.costEstimate`）；`undefined` = 无读数。
+   *
+   * 不用 `0` 表示「没读数」：agentia 对**不在价格表内**的模型给 `undefined`，
+   * 而那与「脚本客户端真没花钱」是两件事。回归门要靠这个区分决定用成本还是
+   * token 判「没变好还更贵」—— 把两者混成一个 0，预算判据就静默失效了。
+   */
+  readonly costUsd: number | undefined;
   readonly durationMs: number;
   readonly error: { readonly type: string; readonly message: string } | undefined;
   /** 本次实际调用过的技能（去重、按首次出现序） */
@@ -67,6 +75,7 @@ export class Runner {
       iterations: result.iterations,
       trace: result.trace,
       tokens: u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens,
+      costUsd: u.costEstimate ?? undefined,
       durationMs: Date.now() - started,
       error:
         result.error === undefined

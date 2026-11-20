@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,5 +91,65 @@ describe('用法错误', () => {
     const r = run(['run'], dir);
     assert.equal(r.code, 1);
     assert.match(r.out, /run 需要任务描述/);
+  });
+});
+
+describe('harness patch（L2）', () => {
+  const DIFF = [
+    '--- a/calc.ts',
+    '+++ b/calc.ts',
+    '@@ -1 +1 @@',
+    '-export const sum = (a: number, b: number) => a + b;',
+    '+export const sum = (a: number, b: number) => a + b + 1;',
+    '',
+  ].join('\n');
+
+  function gitRepo(): string {
+    const dir = tmp();
+    const git = (args: string[]): void => {
+      execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    };
+    git(['init', '-q']);
+    git(['config', 'user.email', 'harness@test']);
+    git(['config', 'user.name', 'harness']);
+    writeFileSync(
+      join(dir, 'calc.ts'),
+      'export const sum = (a: number, b: number) => a + b;\n',
+      'utf8',
+    );
+    writeFileSync(join(dir, '.gitignore'), '.workspace\n', 'utf8');
+    writeFileSync(join(dir, 'change.diff'), DIFF, 'utf8');
+    git(['add', '-A']);
+    git(['commit', '-qm', 'init']);
+    return dir;
+  }
+
+  it('缺省只验证不落盘；--yes 才落盘；--revert 逐字回滚', () => {
+    const dir = gitRepo();
+    const original = readFileSync(join(dir, 'calc.ts'), 'utf8');
+    const verify = 'node -e process.exit(0)';
+
+    const check = run(['patch', 'change.diff', '--verify', verify], dir);
+    assert.equal(check.code, 0, check.out);
+    assert.match(check.out, /未落盘/);
+    assert.equal(readFileSync(join(dir, 'calc.ts'), 'utf8'), original);
+
+    const apply = run(['patch', 'change.diff', '--verify', verify, '--yes'], dir);
+    assert.equal(apply.code, 0, apply.out);
+    assert.match(readFileSync(join(dir, 'calc.ts'), 'utf8'), /a \+ b \+ 1/);
+
+    const back = run(['patch', '--revert'], dir);
+    assert.equal(back.code, 0, back.out);
+    assert.equal(readFileSync(join(dir, 'calc.ts'), 'utf8'), original);
+  });
+
+  it('验证失败退出码 1，并且一个字都不写', () => {
+    const dir = gitRepo();
+    const original = readFileSync(join(dir, 'calc.ts'), 'utf8');
+    const r = run(['patch', 'change.diff', '--verify', 'node -e process.exit(3)', '--yes'], dir);
+
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /BLOCK/);
+    assert.equal(readFileSync(join(dir, 'calc.ts'), 'utf8'), original);
   });
 });

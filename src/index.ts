@@ -7,10 +7,11 @@
  * |---|---|---|
  * | `assets/` | 把 Markdown 变成可装配、可锁版本的能力 | 无（纯文件） |
  * | `run/` + `evals/` | 装配、执行、断言、回归门 | agentia |
- * | `rsi/` | 采集→归因→提案→验证→采纳 | 上面两层 |
+ * | `rsi/` | 采集→归因→提案→验证→采纳（`code/` 是 L2：补丁验证与回滚） | 上面两层 |
  *
  * `rsi/` 不直接调用模型做「归因」，只在「提案」一步用模型 —— 归因必须确定，
- * 否则闭环的每一步都在猜。
+ * 否则闭环的每一步都在猜。L2（`rsi/code/`）连提案都不用模型：它只负责把外部给的
+ * diff 验证、留痕、落盘、回滚。
  */
 
 export { discoverAssets } from './assets/discover.js';
@@ -64,6 +65,20 @@ export {
   revertLast,
 } from './rsi/accept.js';
 export { attribute, classify, collectFailures } from './rsi/attribute.js';
+export {
+  type ApplyOptions,
+  applyCodePatch,
+  type CodeRevertResult,
+  revertLastCode,
+} from './rsi/code/apply.js';
+export { parsePatch } from './rsi/code/diff.js';
+export {
+  type SandboxOptions,
+  type SandboxResult,
+  verifyInSandbox,
+} from './rsi/code/sandbox.js';
+export type { CodeFileState, CodeJournal, CodePatch, CodeVerify } from './rsi/code/types.js';
+export { appendJournal, atomicWrite } from './rsi/journal.js';
 export { type CycleOptions, cyclesDir, runCycle } from './rsi/loop.js';
 export { LlmProposer, type ProposeContext, type Proposer } from './rsi/propose.js';
 export type {

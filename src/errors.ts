@@ -13,7 +13,15 @@ export type HarnessErrorCode =
   | 'eval.invalid'
   | 'rsi.no_signal'
   | 'rsi.gate_blocked'
-  | 'run.failed';
+  | 'run.failed'
+  /** 补丁本身不合法（空、二进制、路径逃逸、删文件） */
+  | 'code.invalid'
+  /** 沙箱验证没通过（测试挂了 / 超时 / 补丁应用不上） */
+  | 'code.verify_failed'
+  /** 落盘需要人工审批 —— 与「验证失败」区分：这条是流程要求，不是结果 */
+  | 'code.unapproved'
+  /** 工作区有本地改动 / 回滚前指纹不匹配（会覆盖别人的修改） */
+  | 'code.conflict';
 
 export class HarnessError extends Error {
   readonly code: HarnessErrorCode;

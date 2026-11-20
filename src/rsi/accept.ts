@@ -1,13 +1,17 @@
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { discoverAssets } from '../assets/discover.js';
 import { buildLock, writeLock } from '../assets/lockfile.js';
 import type { AssetSet } from '../assets/types.js';
 import { findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { appendJournal, atomicWrite, journalPath, readJournal } from './journal.js';
 import type { JournalEntry, Proposal, VerifyOutcome } from './types.js';
 import { renderFile } from './verify.js';
+
+// 审计线索只有一条：journal 的读写收在 `journal.ts`（代码补丁也写它）
+export { journalPath, readJournal };
 
 /**
  * 采纳与回滚。
@@ -100,7 +104,9 @@ export interface RevertResult {
  * 此时回滚会把中间那些改动一起抹掉 —— 拒绝，并让人自己决定。
  */
 export function revertLast(config: HarnessConfig): RevertResult {
-  const entries = readJournal(config).filter((e) => e.status === 'accepted');
+  // 只认文本资产：代码补丁有自己的回滚入口（`revertLastCode`），
+  // 混在一起会让一条资产回滚顺手把代码也退了
+  const entries = readJournal(config).filter((e) => e.status === 'accepted' && e.kind !== 'code');
   const last = entries[entries.length - 1];
   if (last === undefined) {
     throw new HarnessError('rsi.no_signal', 'journal 里没有可回滚的采纳记录');
@@ -134,34 +140,4 @@ export function revertLast(config: HarnessConfig): RevertResult {
   };
   appendJournal(config, reverted);
   return { entry: reverted, restored: last.before };
-}
-
-export function journalPath(config: HarnessConfig): string {
-  return join(config.workspaceDir, 'rsi', 'journal.jsonl');
-}
-
-export function readJournal(config: HarnessConfig): JournalEntry[] {
-  const path = journalPath(config);
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    return [];
-  }
-  return text
-    .split('\n')
-    .filter((l) => l.trim() !== '')
-    .map((l) => JSON.parse(l) as JournalEntry);
-}
-
-function appendJournal(config: HarnessConfig, entry: JournalEntry): void {
-  const path = journalPath(config);
-  mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf8');
-}
-
-function atomicWrite(path: string, text: string): void {
-  const tmp = `${path}.rsi-tmp`;
-  writeFileSync(tmp, text, 'utf8');
-  renameSync(tmp, path);
 }

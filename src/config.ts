@@ -25,6 +25,15 @@ export interface HarnessConfig {
   readonly model: string | undefined;
   readonly maxIterations: number | undefined;
   readonly maxCostUsd: number | undefined;
+  /**
+   * L2（代码补丁）的验证命令，缺省 `['npm', 'test']`。
+   *
+   * 存成数组而不是字符串：字符串要过 shell，而 shell 会把「参数里带空格」和
+   * 「多个命令」混成一个不可控的东西 —— 沙箱里跑的东西越简单越可信。
+   */
+  readonly codeVerify: readonly string[];
+  /** 验证命令的超时（毫秒），缺省 10 分钟 */
+  readonly codeVerifyTimeoutMs: number;
 }
 
 export const CONFIG_FILENAME = 'harness.config.json';
@@ -46,6 +55,7 @@ interface RawConfig {
   model?: unknown;
   maxIterations?: unknown;
   maxCostUsd?: unknown;
+  code?: unknown;
 }
 
 export function loadConfig(root: string): HarnessConfig {
@@ -70,7 +80,37 @@ export function loadConfig(root: string): HarnessConfig {
     model: readString(raw.model, 'model'),
     maxIterations: readNumber(raw.maxIterations, 'maxIterations'),
     maxCostUsd: readNumber(raw.maxCostUsd, 'maxCostUsd'),
+    ...readCode(raw.code),
   };
+}
+
+const CODE_DEFAULTS = { verify: ['npm', 'test'] as readonly string[], timeoutMs: 600_000 };
+
+/** `code` 段：形状错就炸（配置错必须响亮，否则会以「验证永远失败」的形式出现） */
+function readCode(v: unknown): { codeVerify: readonly string[]; codeVerifyTimeoutMs: number } {
+  if (v === undefined) {
+    return { codeVerify: CODE_DEFAULTS.verify, codeVerifyTimeoutMs: CODE_DEFAULTS.timeoutMs };
+  }
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    throw new HarnessError('config.invalid', '配置字段 "code" 应为对象');
+  }
+  const { verify, timeoutMs } = v as { verify?: unknown; timeoutMs?: unknown };
+  let cmd = CODE_DEFAULTS.verify;
+  if (verify !== undefined) {
+    if (
+      !Array.isArray(verify) ||
+      verify.length === 0 ||
+      !verify.every((x) => typeof x === 'string')
+    ) {
+      throw new HarnessError('config.invalid', '配置字段 "code.verify" 应为非空字符串数组');
+    }
+    cmd = verify as string[];
+  }
+  const timeout = readNumber(timeoutMs, 'code.timeoutMs') ?? CODE_DEFAULTS.timeoutMs;
+  if (timeout <= 0) {
+    throw new HarnessError('config.invalid', '配置字段 "code.timeoutMs" 必须为正数');
+  }
+  return { codeVerify: cmd, codeVerifyTimeoutMs: timeout };
 }
 
 function readJson(path: string): RawConfig {

@@ -32,6 +32,15 @@ export interface CaseResult {
   readonly passed: boolean;
   readonly failures: readonly string[];
   readonly tokens: number;
+  /**
+   * 这条用例花了多少美元；`undefined` = 没有读数（脚本客户端，或模型不在价格表内）。
+   *
+   * 与 `tokens` 并列而不是取代它：token 是**可比**的（跨模型、跨时间都稳定），
+   * 成本是**可决策**的（预算、报价、值不值得再跑一轮）。两者回答的不是一个问题。
+   * 这里刻意不用 `0` 表示「没读数」—— 那会让「免费」与「不知道」变成同一个数，
+   * 而回归门必须能区分它们。
+   */
+  readonly costUsd: number | undefined;
   readonly iterations: number;
   readonly durationMs: number;
   readonly stopReason: string;
@@ -62,6 +71,16 @@ export interface EvalReport {
   readonly passed: number;
   readonly passRate: number;
   readonly tokens: number;
+  /** 全轮美元成本；`costKnown` 为 false 时这个 0 不代表免费（见 `costKnown`） */
+  readonly costUsd: number;
+  /**
+   * 是否所有用例都给出了成本读数。
+   *
+   * 存在的理由：`costEstimate` 为 `undefined`（模型不在价格表内）与真 0 长得一样。
+   * 拿总和 > 0 当「有读数」是错的 —— 一轮里只要有一条没定价，总和就偏低，
+   * 而按偏低的总和判「更贵了」会漏掉真实的成本回退。所以由**逐条**读数推导。
+   */
+  readonly costKnown: boolean;
   readonly cases: readonly CaseResult[];
   /** 跑分时的全体资产指纹 —— 两个报告只有在指纹相同的语义下才可比 */
   readonly assetFingerprint: string;
@@ -76,11 +95,15 @@ export function summarize(
   agent: string,
 ): EvalReport {
   const passed = cases.filter((c) => c.passed).length;
+  const priced = cases.filter((c) => c.costUsd !== undefined);
   return {
     total: cases.length,
     passed,
     passRate: cases.length === 0 ? 0 : passed / cases.length,
     tokens: cases.reduce((sum, c) => sum + c.tokens, 0),
+    costUsd: priced.reduce((sum, c) => sum + (c.costUsd ?? 0), 0),
+    // 一条用例没定价就让整轮「成本不可比」—— 总和偏低会漏判成本回退
+    costKnown: cases.length > 0 && priced.length === cases.length,
     cases,
     assetFingerprint,
     agent,

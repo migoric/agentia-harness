@@ -81,6 +81,7 @@ function outcome(text: string, extra: Partial<RunOutcome> = {}): RunOutcome {
     iterations: 1,
     trace: emptyTrace(),
     tokens: 15,
+    costUsd: undefined,
     durationMs: 1,
     error: undefined,
     skills: [],
@@ -153,6 +154,57 @@ describe('check —— 断言', () => {
   });
 });
 
+describe('成本 —— 从 trace 读真实 USD', () => {
+  it('模型有定价时 RunOutcome.costUsd 等于各 llm.turn 的 costEstimate 之和', async () => {
+    const root = project();
+    // 定价表里有 claude-opus-5 —— 没配对模型时 costEstimate 恒为 undefined，
+    // 那样这个测试会「因为没读数而通过」，等于什么都没测
+    writeFileSync(
+      join(root, 'harness.config.json'),
+      JSON.stringify({ model: 'claude-opus-5' }),
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const runner = createRunner(config, assets, undefined, false);
+    const client = scriptedClient([
+      toolUse('summarize', { task: '压一下' }),
+      endTurn('要点一。'),
+      endTurn('结论：已给出'),
+    ]);
+
+    const out = await runner.run('压一下这段文字', { client });
+    const expected =
+      Math.round(
+        out.trace.spans
+          .filter((s) => s.kind === 'llm.turn')
+          .reduce((sum, s) => sum + (s.usage?.costEstimate ?? 0), 0) * 1e6,
+      ) / 1e6;
+
+    assert.ok(expected > 0, '定价模型 + 有 usage ⇒ 必须有成本读数，否则测试前提不成立');
+    assert.equal(out.costUsd, expected);
+  });
+
+  it('未定价模型 ⇒ costUsd 是 undefined（不是 0）', async () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'harness.config.json'),
+      JSON.stringify({ model: 'not-a-priced-model' }),
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const runner = createRunner(config, assets, undefined, false);
+    const out = await runner.run('压一下', { client: scriptedClient([endTurn('结论：好')]) });
+
+    assert.equal(
+      out.costUsd,
+      undefined,
+      '「不知道花了多少」与「花了 0」必须可区分，否则成本门静默失效',
+    );
+  });
+});
+
 describe('toolSequence —— 从真实 trace 还原工具调用', () => {
   it('技能调用在 trace 里留下 tool.input 事件（上游改名会在这里红）', async () => {
     const root = project();
@@ -200,6 +252,7 @@ function report(results: { n: string; passed: boolean }[], tokens: number, fp = 
     failures: r.passed ? [] : ['x'],
     // 总量记在第一条上：test 关心的是汇总值，不是分摊方式
     tokens: i === 0 ? tokens : 0,
+    costUsd: undefined,
     iterations: 1,
     durationMs: 1,
     stopReason: 'end_turn',
@@ -208,6 +261,38 @@ function report(results: { n: string; passed: boolean }[], tokens: number, fp = 
     subagents: [],
   }));
   return summarize(cases, fp, `main@1`);
+}
+
+/** 与 report 同形，但买单记在第一条上；`costUsd` 传 undefined = 没有读数 */
+function reportCost(
+  results: { n: string; passed: boolean }[],
+  tokens: number,
+  costUsd: number | undefined,
+  fp = 'A',
+): EvalReport {
+  const cases = results.map((r, i) => caseWith(i === 0 ? costUsd : 0, r.passed, r.n, tokens));
+  return summarize(cases, fp, `main@1`);
+}
+
+function caseWith(
+  costUsd: number | undefined,
+  passed: boolean,
+  name = 'a',
+  tokens = 10,
+): CaseResult {
+  return {
+    name,
+    passed,
+    failures: passed ? [] : ['x'],
+    tokens,
+    costUsd,
+    iterations: 1,
+    durationMs: 1,
+    stopReason: 'end_turn',
+    excerpt: '',
+    skills: [],
+    subagents: [],
+  };
 }
 
 describe('gate —— 回归门', () => {
@@ -283,6 +368,41 @@ describe('gate —— 回归门', () => {
     assert.ok(Math.abs(g.tokenDelta - 0.5) < 1e-9);
   });
 
+  it('通过率没变、成本涨超阈值 ⇒ 否决（优先级高于 token）', () => {
+    const b = reportCost([{ n: 'a', passed: true }], 100, 0.02);
+    const c = reportCost([{ n: 'a', passed: true }], 100, 0.03);
+    const g = gate(b, c);
+    assert.equal(g.ok, false);
+    assert.equal(g.code, 'cost_regression');
+    assert.equal(g.costBasis, 'cost');
+    assert.ok(Math.abs((g.costDelta ?? 0) - 0.5) < 1e-9);
+  });
+
+  it('成本不可比时退回 token 判据（不是「没涨」）', () => {
+    const b = reportCost([{ n: 'a', passed: true }], 100, undefined);
+    const c = reportCost([{ n: 'a', passed: true }], 150, undefined);
+    const g = gate(b, c);
+    assert.equal(g.code, 'token_regression');
+    assert.equal(g.costBasis, 'tokens');
+    assert.equal(g.costDelta, undefined);
+  });
+
+  it('成本可比时 token 涨不否决 —— 换模型是合法提案', () => {
+    const b = reportCost([{ n: 'a', passed: true }], 100, 0.02);
+    const c = reportCost([{ n: 'a', passed: true }], 300, 0.02);
+    const g = gate(b, c);
+    assert.equal(g.ok, true, `token 涨了 200% 但成本没变，该放行（实际：${g.reason}）`);
+    assert.equal(g.costBasis, 'cost');
+  });
+
+  it('只有一条用例没成本读数，整轮就不可比（总和偏低会漏判）', () => {
+    const b = summarize([caseWith(0.02, true), caseWith(0.02, false)], 'A', 'main@1');
+    const c = summarize([caseWith(0.03, true), caseWith(undefined, false)], 'B', 'main@1');
+    assert.equal(b.costKnown, true);
+    assert.equal(c.costKnown, false, '有一条没读数就不能拿总和当结论');
+    assert.equal(gate(b, c).costBasis, 'tokens');
+  });
+
   it('通过率提升时 token 涨也放行（用预算换能力）', () => {
     const b = report(
       [
@@ -330,6 +450,7 @@ describe('命中统计 —— 提案选目标的数据来源', () => {
       passed,
       failures: passed ? [] : ['x'],
       tokens: 10,
+      costUsd: undefined,
       iterations: 1,
       durationMs: 1,
       stopReason: 'end_turn',
@@ -361,6 +482,7 @@ describe('命中统计 —— 提案选目标的数据来源', () => {
           passed: true,
           failures: [],
           tokens: 1,
+          costUsd: undefined,
           iterations: 1,
           durationMs: 1,
           stopReason: 'end_turn',

@@ -1,5 +1,6 @@
 import type { GateResult } from '../evals/gate.js';
 import type { EvalReport } from '../evals/types.js';
+import type { CodeJournal } from './code/types.js';
 
 /**
  * Harness —— RSI 的数据模型。
@@ -105,6 +106,15 @@ export interface JournalEntry {
   /** 采纳前后的资产指纹（回滚时校验：中间被手改过就不许自动回退） */
   readonly assetsBefore: string;
   readonly assetsAfter: string;
+  /**
+   * `asset` = 文本资产补丁（L1）；`code` = 代码补丁（L2）。
+   *
+   * 可选是因为**老记录没有这个字段**（2026-11-20 之前只有 L1）。读取侧统一补成
+   * `asset`，这样「回滚哪一条」的判定不必到处写 `=== undefined` 的分支。
+   */
+  readonly kind?: 'asset' | 'code';
+  /** `kind === 'code'` 时才有：补丁本身与逐文件指纹 */
+  readonly code?: CodeJournal;
 }
 
 export interface CycleReport {

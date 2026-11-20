@@ -6,6 +6,36 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-20
+
+### 新增
+
+**L2：代码补丁通道（`rsi/code/` + `harness patch`）。** L1 能修「模型理解错了」，修不了
+「缺一个工具 / 校验太松 / 少判一个边界」—— 那些改动落在 TS 里。这一版把它补上，但补的
+不是「让模型改代码」，而是**让改代码这件事可验证、可审批、可回滚**：
+
+- `harness patch <diff>` 在 `git worktree` 沙箱里应用补丁并跑验证命令，缺省**不落盘**；
+  `--yes` 才落盘，`--revert` 逐文件校验指纹后反向应用。
+- 沙箱缺省在 `.workspace/sandbox/`（仓库内），用完即删：Node/npm 靠目录上溯解析依赖，
+  搬到 `/tmp` 会让 `npm test` 因「模块找不到」假阴性。
+- `parsePatch` 是补丁的唯一边界检查：绝对路径 / `..` / 二进制 / 无 hunk / 删除文件 /
+  `---` 与 `+++` 不成对，一律 `code.invalid`。
+- 落盘前只要求**补丁要动的文件**干净（不是整个工作区）：要求整树干净会让人开始绕过纪律。
+- `JournalEntry` 增加 `kind: 'asset' | 'code'`，两条通道共用一条审计线索；`rsi revert`
+  只回滚文本资产，`patch --revert` 只回滚代码，互不越界。
+- 新增错误码 `code.invalid` / `code.verify_failed` / `code.unapproved` / `code.conflict`：
+  「验证没过」与「没审批」是两件事，脚本要能分开处理。
+
+**成本归因（真实美元）。** 此前只有 token，而 token 只是成本的代理。
+
+- `RunOutcome.costUsd` / `CaseResult.costUsd` / `EvalReport.costUsd` 取自
+  `trace.totalUsage.costEstimate`；`undefined` = 没有读数（脚本客户端，或模型不在价格表内）。
+- `EvalReport.costKnown` 由**逐条**读数推导：任一条没定价就整轮不可比 —— 拿总和 `> 0`
+  当「有读数」会漏判成本回退。
+- 回归门判「没变好还更贵」时**优先用成本**（`costBasis: 'cost'`），成本不可比才退回 token
+  （`costBasis: 'tokens'`）。换模型是合法提案，而 token 跨模型不可比。
+- `harness report` / `eval` 的输出带上成本；无读数时刻意**不打印 `$0`**（那会被读成免费）。
+
 ## [0.1.0] - 2026-11-20
 
 首个可用版本。基于 `@migor/agentia` 的独立工程，不改上游。

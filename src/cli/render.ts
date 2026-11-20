@@ -77,16 +77,27 @@ function fmtMs(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
 }
 
+/** `undefined` = 无读数，打空串而不是 `$0.0000`（那会被读成「免费」） */
+function fmtCost(usd: number | undefined): string {
+  if (usd === undefined) return '';
+  return usd < 0.01 ? ` $${usd.toFixed(5)}` : ` $${usd.toFixed(3)}`;
+}
+
 export function renderReport(report: EvalReport): string {
   const lines: string[] = [];
   for (const c of report.cases) {
-    lines.push(`${c.passed ? 'PASS' : 'FAIL'}  ${c.name}  (${c.tokens} token, ${c.iterations} 轮)`);
+    lines.push(
+      `${c.passed ? 'PASS' : 'FAIL'}  ${c.name}  (${c.tokens} token${fmtCost(c.costUsd)}, ${c.iterations} 轮)`,
+    );
     for (const f of c.failures) lines.push(`      - ${f}`);
   }
   lines.push(
     `\n${report.passed}/${report.total} 通过（${(report.passRate * 100).toFixed(1)}%）· ` +
-      `${report.tokens} token · 资产 ${report.assetFingerprint}`,
+      `${report.tokens} token${report.costKnown ? fmtCost(report.costUsd) : ''} · 资产 ${report.assetFingerprint}`,
   );
+  if (!report.costKnown && report.costUsd > 0) {
+    lines.push('注意：部分用例没有成本读数（模型不在价格表内），总成本偏低，不可用于跨轮比较。');
+  }
   if (report.skillHits.length > 0) {
     lines.push('命中：');
     for (const h of report.skillHits) {
@@ -108,8 +119,8 @@ export function renderComparison(
   g: GateResult,
 ): string {
   const lines = [
-    `基线  ${baseline.passed}/${baseline.total}（${(baseline.passRate * 100).toFixed(1)}%）· ${baseline.tokens} token · ${baseline.assetFingerprint}`,
-    `候选  ${candidate.passed}/${candidate.total}（${(candidate.passRate * 100).toFixed(1)}%）· ${candidate.tokens} token · ${candidate.assetFingerprint}`,
+    `基线  ${baseline.passed}/${baseline.total}（${(baseline.passRate * 100).toFixed(1)}%）· ${baseline.tokens} token${baseline.costKnown ? fmtCost(baseline.costUsd) : ''} · ${baseline.assetFingerprint}`,
+    `候选  ${candidate.passed}/${candidate.total}（${(candidate.passRate * 100).toFixed(1)}%）· ${candidate.tokens} token${candidate.costKnown ? fmtCost(candidate.costUsd) : ''} · ${candidate.assetFingerprint}`,
     '',
     `门：${g.ok ? 'PASS' : 'BLOCK'} (${g.code}) —— ${g.reason}`,
   ];

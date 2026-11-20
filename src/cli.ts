@@ -4,6 +4,7 @@ import { loadEnvFile } from '@migor/agentia';
 import { parseArgs, strFlag } from './cli/args.js';
 import { lockCommand } from './cli/commands/assets.js';
 import { reportCommand, traceCommand } from './cli/commands/observe.js';
+import { patchCommand } from './cli/commands/patch.js';
 import { rsiCommand } from './cli/commands/rsi.js';
 import { evalCommand, runCommand } from './cli/commands/run.js';
 import { serveCommand } from './cli/commands/serve.js';
@@ -14,7 +15,7 @@ import { loadConfig } from './config.js';
 import { describeError, isHarnessError } from './errors.js';
 
 /**
- * CLI —— 七个命令，每个对应闭环的一段。
+ * CLI —— 八个命令，每个对应闭环的一段。
  *
  * 退出码是接口的一部分（CI 与脚本靠它判断）：
  * `0` = 正常，`1` = 断言/门未过，`2` = 用法、配置或资产错误。
@@ -48,6 +49,11 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --max-verify <n>      最多验证几个提案（缺省 3）
   rsi revert              回滚最近一次采纳
   rsi status              看采纳历史
+  patch <diff>             验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
+    --yes                 验证通过后落盘（代码补丁必须人工确认）
+    --verify "npm test"   覆盖配置里的验证命令
+    --timeout <ms>        验证命令超时（缺省 10 分钟）
+    --revert              回滚最近一次代码补丁
   serve                   起 HTTP 服务（POST /run、GET /health）
     --port <n>            端口（缺省 8787）
     --host <ip>           监听地址（缺省 127.0.0.1）
@@ -94,6 +100,8 @@ async function main(): Promise<number> {
       return lockCommand(ctx);
     case 'rsi':
       return rsiCommand(ctx, args._[0]);
+    case 'patch':
+      return patchCommand(ctx, args._[0]);
     case 'serve':
       return serveCommand(ctx);
     default:
