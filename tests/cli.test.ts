@@ -238,6 +238,7 @@ describe('CLI 参数严格化', () => {
       cases: [
         {
           name: 'c1',
+          task: '任务原文',
           passed: true,
           failures: [],
           tokens: 100,

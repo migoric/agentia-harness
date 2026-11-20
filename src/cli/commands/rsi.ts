@@ -5,7 +5,7 @@ import { acceptProposal, readJournal, revertLast } from '../../rsi/accept.js';
 import { runCycle } from '../../rsi/loop.js';
 import { readProposal, writeProposal } from '../../rsi/manual.js';
 import { LlmProposer } from '../../rsi/propose.js';
-import { verifyProposal } from '../../rsi/verify.js';
+import { isWorthAccepting, verifyProposal } from '../../rsi/verify.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
@@ -66,6 +66,11 @@ async function acceptFrom(ctx: CliContext): Promise<number> {
   const outcome = await verifyProposal({ ...shared, baseline, proposal });
   if (!outcome.gate.ok) {
     warn(`验证门未通过，拒绝采纳 ${proposal.id}：${outcome.gate.reason}`);
+    return 1;
+  }
+  // 与自动 RSI 同一道「必须真的变好」检查 —— 手写提案不许靠 no-op 改动混进 git 历史
+  if (!isWorthAccepting(outcome)) {
+    warn(`提案 ${proposal.id} 没有任何用例变好（仅"没变差"），拒绝采纳`);
     return 1;
   }
   if (boolFlag(ctx.flags, 'dry-run')) {

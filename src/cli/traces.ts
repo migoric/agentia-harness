@@ -49,11 +49,15 @@ export function findTrace(
 ): Trace {
   const hits = readTraces(config, opts.tail).filter((t) => t.traceId.startsWith(prefix));
   if (hits.length === 0) {
-    throw new HarnessError('run.failed', `${config.tracesPath} 里没有以 "${prefix}" 开头的 trace`);
+    // 前缀写错是用法错（2），不是「跑了但没达标」（1）
+    throw new HarnessError(
+      'config.invalid',
+      `${config.tracesPath} 里没有以 "${prefix}" 开头的 trace`,
+    );
   }
   if (opts.unique === true && hits.length > 1) {
     throw new HarnessError(
-      'run.failed',
+      'config.invalid',
       `"${prefix}" 匹配到 ${hits.length} 条 trace —— 请用更长的前缀精确定位（写文件不接受歧义）`,
     );
   }

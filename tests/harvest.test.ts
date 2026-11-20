@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import type { Trace } from '@migor/agentia';
+import { scriptedClient, type Trace } from '@migor/agentia';
+import { discoverAssets } from '../src/assets/discover.ts';
 import { loadConfig } from '../src/config.ts';
 import { harvestCase } from '../src/evals/harvest.ts';
 import { loadEvalCases } from '../src/evals/load.ts';
+import { runSuite } from '../src/evals/run.ts';
 import { runCli } from './support/cli.ts';
 
 const TRACE_ID = 'abc12345-dead-beef-0000-000000000001';
@@ -63,7 +65,7 @@ function trace(): Trace {
   };
 }
 
-/** 一个能被 CLI 直接用的工程：有资产、有一条落盘 trace、有一份 eval 报告 */
+/** 一个能被 CLI 直接用的工程：有资产、有一条落盘 trace（报告由 realEval 真实生成） */
 function project(): string {
   const root = mkdtempSync(join(tmpdir(), 'harvest-'));
   const w = (rel: string, text: string): void => {
@@ -75,14 +77,42 @@ function project(): string {
   w('skills/summarize/SKILL.md', '---\nname: summarize\ndescription: 摘要\n---\n压成三条。\n');
   w('evals/existing.md', '---\nname: existing\nexpect_ok: true\n---\n原来的任务\n');
   w('.workspace/traces.jsonl', `${JSON.stringify(trace())}\n`);
-  w(
-    'report.json',
-    JSON.stringify({
-      total: 1,
-      cases: [{ name: 'existing', task: '把这段话压成三条要点', traceId: TRACE_ID }],
-    }),
-  );
   return root;
+}
+
+/**
+ * 真跑一遍 eval 来产出报告 —— **不能手写 `task` 字段**。
+ *
+ * 之前的夹具往报告里塞了一个生产代码从不写入的 `task`，于是 `--from-report`
+ * 在测试里绿、在真实报告上 100% 失败（review 抓到的）。现在报告来自 runSuite，
+ * 顺带保证 `CaseResult.task` 这个契约真的存在。
+ */
+async function realEval(dir: string): Promise<string> {
+  const config = loadConfig(dir);
+  const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+  const report = await runSuite({
+    config,
+    assets,
+    keepTraces: true,
+    client: scriptedClient([
+      {
+        id: 'm',
+        model: 'm',
+        stop_reason: 'end_turn',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+        content: [{ type: 'text', text: '结论：合格' }],
+      },
+    ]),
+  });
+  const traceId = report.cases[0]?.traceId;
+  assert.ok(traceId !== undefined && traceId !== '');
+  writeFileSync(join(dir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  return traceId;
 }
 
 describe('harvestCase —— 纯函数', () => {
@@ -117,15 +147,19 @@ describe('harvestCase —— 纯函数', () => {
 });
 
 describe('harness harvest —— 子进程', () => {
-  it('--from-report 反查任务原文，生成可加载的用例', () => {
+  it('--from-report 反查真实报告里的任务原文，生成可加载的用例', async () => {
     const dir = project();
-    const r = runCli(['harvest', 'abc12345', '--from-report', 'report.json'], dir);
-    assert.equal(r.code, 0, r.out);
+    // 报告由真实 runSuite 产出；traceId 也取自它，才能证明是按 id 反查而不是碰巧
+    const traceId = await realEval(dir);
+    const r = runCli(['harvest', traceId, '--from-report', 'report.json'], dir);
+    assert.equal(r.code, 0, `${r.out}\n报告里的 traceId=${traceId}`);
+
     const config = loadConfig(dir);
-    const file = join(config.evalsDir, 'harvest-abc12345-dea.md');
-    assert.ok(existsSync(file), r.out);
-    const text = readFileSync(file, 'utf8');
-    assert.match(text, /把这段话压成三条要点/);
+    const made = readdirSync(config.evalsDir).filter((f) => f.startsWith('harvest-'));
+    assert.equal(made.length, 1, r.out);
+    const text = readFileSync(join(config.evalsDir, made[0] as string), 'utf8');
+    // existing.md 的任务原文就是「原来的任务」，生产报告必须把它带回来
+    assert.match(text, /原来的任务/);
     assert.equal(loadEvalCases(config.evalsDir).length, 2, '不能覆盖已有用例');
   });
 
@@ -145,7 +179,7 @@ describe('harness harvest —— 子进程', () => {
     assert.equal(first.code, 0, first.out);
     const second = runCli(['harvest', TRACE_ID, '--task', '任务 B'], dir);
     assert.equal(second.code, 2, second.out);
-    assert.match(second.out, /拒绝覆盖/);
+    assert.match(second.out, /拒绝生成同名用例/);
     assert.match(readFileSync(join(dir, 'evals', 'harvest-abc12345-dea.md'), 'utf8'), /任务 A/);
   });
 
@@ -167,7 +201,26 @@ describe('harness harvest —— 子进程', () => {
       'utf8',
     );
     const ambiguous = runCli(['harvest', 'abc12345', '--task', 'x'], dir);
-    assert.equal(ambiguous.code, 1, ambiguous.out);
+    assert.equal(ambiguous.code, 2, ambiguous.out);
     assert.match(ambiguous.out, /请用更长的前缀/);
+
+    // 前缀写错与歧义都是用法错，不该跟「跑了但没达标」混成退出码 1
+    const missing = runCli(['harvest', 'does-not-exist', '--task', 'x'], dir);
+    assert.equal(missing.code, 2, missing.out);
+    assert.match(missing.out, /没有以 "does-not-exist" 开头的 trace/);
+  });
+
+  it('已有同名用例（哪怕在子目录）时拒绝，避免下次 eval 一加载就重名', () => {
+    const dir = project();
+    const nested = join(dir, 'evals', 'nested');
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(
+      join(nested, 'CASE.md'),
+      '---\nname: harvest-abc12345-dea\nexpect_ok: true\n---\n原来的任务\n',
+      'utf8',
+    );
+    const r = runCli(['harvest', TRACE_ID, '--task', '任务'], dir);
+    assert.equal(r.code, 2, r.out);
+    assert.match(r.out, /已被 .* 占用/);
   });
 });

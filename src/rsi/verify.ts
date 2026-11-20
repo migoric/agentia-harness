@@ -35,6 +35,19 @@ export interface VerifyOptions extends SuiteTuning {
   readonly gateOptions?: GateOptions | undefined;
 }
 
+/**
+ * 门放行之后还要问的一句：**有没有用例真的变好？**
+ *
+ * `gate.ok` 只保证「没退步」：通过率不变、成本没涨时它也返回 true（reason 是
+ * 「无变化」）。把它当采纳许可，git 历史会被一堆「改了提示词但没任何用例变好」的
+ * no-op 污染 —— 下一轮再也分不清哪次改动真正起作用。
+ *
+ * 自动 RSI 与手写提案共用这一条：提案**来源**可以是人或模型，采纳标准不能变。
+ */
+export function isWorthAccepting(outcome: VerifyOutcome): boolean {
+  return outcome.gate.fixedCases.length > 0 || outcome.gate.passRateDelta > 0;
+}
+
 export async function verifyProposal(opts: VerifyOptions): Promise<VerifyOutcome> {
   const patched = applyPatch(opts.assets, opts.proposal.patch);
   const candidate = await runSuite({

@@ -88,7 +88,6 @@ export { LlmProposer, type ProposeContext, type Proposer } from './rsi/propose.j
 export type {
   AssetPatch,
   CycleReport,
-  FAILURE_KINDS,
   FailureKind,
   FailureMode,
   FailureSample,
@@ -98,7 +97,15 @@ export type {
   TargetHint,
   VerifyOutcome,
 } from './rsi/types.js';
-export { applyPatch, renderFile, type VerifyOptions, verifyProposal } from './rsi/verify.js';
+// 运行时常量（外部提案校验要用），不能放进下面的 export type —— 那会被 TS 整段擦掉
+export { FAILURE_KINDS } from './rsi/types.js';
+export {
+  applyPatch,
+  isWorthAccepting,
+  renderFile,
+  type VerifyOptions,
+  verifyProposal,
+} from './rsi/verify.js';
 export { type BuildAppOptions, type BuiltApp, buildApp, effectiveModel } from './run/app.js';
 export {
   applyEndpointEnv,

@@ -10,7 +10,7 @@ import { attribute, collectFailures } from './attribute.js';
 import { atomicWrite } from './journal.js';
 import type { Proposer } from './propose.js';
 import type { CycleBudget, CycleReport, Proposal, VerifyOutcome } from './types.js';
-import { verifyProposal } from './verify.js';
+import { isWorthAccepting, verifyProposal } from './verify.js';
 
 /**
  * 一轮 RSI —— 五步编排。
@@ -174,7 +174,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       rejected.push({ proposal, reason: outcome.gate.reason });
       continue;
     }
-    if (outcome.gate.fixedCases.length === 0 && outcome.gate.passRateDelta === 0) {
+    if (!isWorthAccepting(outcome)) {
       // 门放行但没有任何用例变好：这只是「没变坏」，不值得落盘（会污染 git 历史）
       rejected.push({ proposal, reason: '没有任何用例变好（仅"没变差"，不值得改动资产）' });
       continue;

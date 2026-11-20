@@ -255,7 +255,7 @@ frontmatter 里的未知 `expect_*`、CLI 的未知 flag、非数字的 `--timeo
 
 `harness harvest` 把链路变成回归用例。先跑 `harness eval --keep-traces --save report.json`
 把 trace 留下。trace 里**没有任务原文**（root span 只记模型与配置），所以必须给 `--task`，
-或用 `--from-report` 从那份报告按 traceId 反查；前缀匹配到多条时拒绝，写文件不接受歧义。生成的断言只有 `expect_ok: true`，注释里列出观察到的工具、技能与
+或用 `--from-report` 从那份报告按 traceId 反查（报告里带每条用例的 `task`）；前缀匹配到多条时拒绝，写文件不接受歧义。生成的断言只有 `expect_ok: true`，注释里列出观察到的工具、技能与
 收尾状态 —— trace 记的是**实际行为**，不是**正确行为**；把当时调过的工具固化成断言，等于把
 错误一起固化。结果类断言（`expect_contains` / `expect_matches`）要人补。已有的用例文件不会被覆盖。
 

@@ -217,6 +217,7 @@ describe('终端渲染', () => {
   it('报告对比列出逐条变化与门结论', () => {
     const mk = (name: string, passed: boolean): CaseResult => ({
       name,
+      task: '任务原文',
       passed,
       failures: passed ? [] : ['x'],
       tokens: 10,
@@ -285,6 +286,7 @@ describe('harness trace / report', () => {
       cases: [
         {
           name,
+          task: '任务原文',
           passed,
           failures: passed ? [] : ['断言不通过'],
           tokens: 100,

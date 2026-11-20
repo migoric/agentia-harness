@@ -45,6 +45,13 @@ export interface EvalCase {
 
 export interface CaseResult {
   readonly name: string;
+  /**
+   * 这条用例的任务原文。
+   *
+   * 存在理由：`harness harvest --from-report` 要按 traceId 反查任务，而 trace 里
+   * 没有任务原文 —— 报告是唯一能把它带回来的地方。缺了它，回流只能靠人手打一遍。
+   */
+  readonly task: string;
   readonly passed: boolean;
   readonly failures: readonly string[];
   readonly tokens: number;

@@ -159,6 +159,7 @@ async function runOne(
     // 装配/客户端层的异常也要变成「这条用例失败」，而不是让整轮崩掉
     return {
       name: c.name,
+      task: c.task,
       passed: false,
       failures: [
         `${timedOut ? '用例超时' : 'run 抛出'}: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
@@ -178,6 +179,7 @@ async function runOne(
   if (timedOut) failures.unshift(`用例超时（${opts.timeoutMs}ms）`);
   return {
     name: c.name,
+    task: c.task,
     passed: failures.length === 0,
     failures,
     tokens: out.tokens,

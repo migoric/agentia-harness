@@ -317,6 +317,7 @@ describe('toolSequence —— 从真实 trace 还原工具调用', () => {
 function report(results: { n: string; passed: boolean }[], tokens: number, fp = 'A'): EvalReport {
   const cases: CaseResult[] = results.map((r, i) => ({
     name: r.n,
+    task: '任务原文',
     passed: r.passed,
     failures: r.passed ? [] : ['x'],
     // 总量记在第一条上：test 关心的是汇总值，不是分摊方式
@@ -351,6 +352,7 @@ function caseWith(
 ): CaseResult {
   return {
     name,
+    task: '任务原文',
     passed,
     failures: passed ? [] : ['x'],
     tokens,
@@ -516,6 +518,7 @@ describe('命中统计 —— 提案选目标的数据来源', () => {
       subagents: string[],
     ): CaseResult => ({
       name,
+      task: '任务原文',
       passed,
       failures: passed ? [] : ['x'],
       tokens: 10,
@@ -548,6 +551,7 @@ describe('命中统计 —— 提案选目标的数据来源', () => {
       [
         {
           name: 'a',
+          task: '任务原文',
           passed: true,
           failures: [],
           tokens: 1,

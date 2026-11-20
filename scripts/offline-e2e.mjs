@@ -425,6 +425,15 @@ const root = await project();
     accepted.code === 0 && changed.includes('校准标记') && changed !== original,
     `code=${accepted.code}\n${accepted.out}\n端点日志:\n${fake.log()}`,
   );
+  // 上面的断言只看「文件改了」还不够 —— 若 baseline 根本没跑、直接拿 candidate 当
+  // 两份报告，gate 看到「无变化」也会放行。数端点日志：两遍评测各调一次技能。
+  const requests = (fake.log().match(/#\d+ /g) ?? []).length;
+  const skillCalls = (fake.log().match(/tool_use:example/g) ?? []).length;
+  check(
+    '手写提案确实跑了两遍评测（基线 + 候选各调一次技能，不是拿一份报告当两份）',
+    requests >= 6 && skillCalls >= 2,
+    `requests=${requests} skillCalls=${skillCalls}\n${fake.log()}`,
+  );
 
   const reverted = await cli(['rsi', 'revert', 'p-manual-offline'], {
     root: manual,
@@ -452,6 +461,21 @@ const root = await project();
       /基础版本已过期/.test(blocked.out) &&
       readFileSync(skillPath, 'utf8') === original,
     `code=${blocked.code}\n${blocked.out}`,
+  );
+
+  // 「没变差」不等于「变好了」：no-op 提案即便门放行，也必须被采纳门槛挡住
+  proposal.id = 'p-manual-noop';
+  proposal.patch.before = body;
+  proposal.patch.after = `${body}\n只改一个无关的字。`;
+  writeFileSync(join(manual, 'proposal.json'), `${JSON.stringify(proposal, null, 2)}\n`, 'utf8');
+  const noop = await cli(['rsi', 'accept', '--from', 'proposal.json'], {
+    root: manual,
+    base: fake.url,
+  });
+  check(
+    '手写提案与自动 RSI 同门槛：没有任何用例变好就拒绝，不用 no-op 污染 git 历史',
+    noop.code === 1 && /没有任何用例变好/.test(noop.out),
+    `code=${noop.code}\n${noop.out}`,
   );
 
   fake.stop();

@@ -64,6 +64,15 @@
   （CLI 从不传），与技能踩过同一个坑；它的模型调用也没进 `CycleBudget`。现在用与
   buildApp 同源的生效模型与价格表，并把提案花费（含「不可知」状态）回到轮次记录。
 - **RSI 轮次记录改为原子写**（与 journal 同款 tmp + rename）：半截审计记录比没有更糟。
+- **评测报告现在带每条用例的 `task`**：`harvest --from-report` 此前读的是报告里根本不存在
+  的字段，而测试夹具手写这个字段制造了假绿 —— 真实报告上那条路径 100% 失败。现在
+  `CaseResult.task` 由 `runOne` 透传，夹具也改成真实 `runSuite` 产出的报告。
+- **手写提案补上「必须变好」门槛**：此前只要 `gate.ok`（「无变化」也算）就采纳，而自动
+  RSI 还会拒绝「没有任何用例变好」的 no-op —— 同样的提案走两条路径结论不同。现在共用
+  `verify.ts` 的 `isWorthAccepting()`，手写提案不会用 no-op 污染 git 历史。
+- **`harvest` 写前查用例重名**（frontmatter 的 `name` 可能在子目录里已占用）；trace 前缀
+  找不到或有歧义统一按用法错退出码 2；`FAILURE_KINDS` 改为运行时值导出（此前放进
+  `export type`，`verbatimModuleSyntax` 会把整个导出擦掉）。
 - **端点不报 usage 时成本被算成 `0`**：模型在价格表里时，上游按「0 token × 单价」
   算出 `costEstimate = 0`，与「真的一分没花」是同一个数 ⇒ `costKnown` 判成 true，
   预算闸与回归门一起静默失效。现在按 trace 里的 `usage.missing` 事件把这种情况折回

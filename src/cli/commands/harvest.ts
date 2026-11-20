@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { HarnessError } from '../../errors.js';
 import { harvestCase } from '../../evals/harvest.js';
+import { loadEvalCases } from '../../evals/load.js';
 import type { EvalReport } from '../../evals/types.js';
 import { boolFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
@@ -45,6 +46,15 @@ export function harvestCommand(ctx: CliContext, prefix: string | undefined): num
   });
   const dir = ctx.config.evalsDir;
   mkdirSync(dir, { recursive: true });
+  // 文件名不冲突不代表用例不冲突：一目录一用例的布局里，name 来自 frontmatter。
+  // 写进子目录的 CASE.md 若已占用这个名字，本次能写成功，但下次 eval 一加载就重名报错。
+  const clash = loadEvalCases(dir).find((c) => c.name === made.name);
+  if (clash !== undefined) {
+    throw new HarnessError(
+      'eval.invalid',
+      `用例名 "${made.name}" 已被 ${clash.path} 占用 —— 拒绝生成同名用例`,
+    );
+  }
   const path = join(dir, `${made.name}.md`);
   try {
     writeFileSync(path, made.text, { encoding: 'utf8', flag: 'wx' });
@@ -64,6 +74,10 @@ function taskFromReport(ctx: CliContext, path: string, traceId: string): string 
     parsed = JSON.parse(readFileSync(resolve(ctx.root, path), 'utf8'));
   } catch (e) {
     throw new HarnessError('eval.invalid', `读不到或不是合法 JSON 的报告：${path}`, e);
+  }
+  // JSON.parse('null') / '[]' 都合法但不是报告；不挡住会变成原生 TypeError（退出码 1）
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new HarnessError('eval.invalid', `${path} 的报告应是 JSON 对象`);
   }
   const report = parsed as Partial<EvalReport>;
   if (!Array.isArray(report.cases)) {
