@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# 运行时产物：trace、检查点、跑分结果都是可再生的
+.workspace/
+.workspace-*/
+.tmp/
