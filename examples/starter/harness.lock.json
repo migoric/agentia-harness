@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "assets": {
+    "agent:main": {
+      "version": "1",
+      "fingerprint": "4382ffa88cc5"
+    },
+    "skill:example": {
+      "version": "1",
+      "fingerprint": "c6ceee6f367b"
+    }
+  }
+}

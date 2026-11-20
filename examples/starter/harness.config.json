@@ -1,0 +1,13 @@
+{
+  "appName": "starter",
+  "model": "deepseek-flash",
+  "endpoint": {
+    "baseURL": "https://api.deepseek.com/anthropic",
+    "apiKeyEnv": "DEEPSEEK_API_KEY"
+  },
+  "pricing": {
+    "deepseek-flash": { "in": 0.15, "out": 0.6, "cacheRead": 0.02 }
+  },
+  "maxIterations": 8,
+  "maxCostUsd": 0.5
+}

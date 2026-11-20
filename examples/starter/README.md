@@ -1,0 +1,59 @@
+# examples/starter —— 接一个非 Anthropic 端点的完整例子
+
+这个目录是 `harness init` 的产物，只改了一处：`harness.config.json` 里加上了
+`endpoint` 与 `pricing` 两段，指向 **DeepSeek 的 Anthropic 兼容端点**。
+
+它存在的理由：harness 的很多口径（成本读数、回归门的成本判据、RSI 的预算闸）
+**只在换了端点之后才暴露问题**。一个能直接跑通的例子比一段文档可信。
+
+## 怎么跑
+
+```bash
+cd examples/starter
+cp .env.example .env      # 填上 DEEPSEEK_API_KEY=sk-...
+harness eval              # 跑评测集（有失败用例则退出码 1）
+harness run "把这段话压成三条要点：……"
+```
+
+在本仓开发时可以不自带全局安装，用源码跑：
+
+```bash
+npm run harness -- eval --root examples/starter
+npm run harness -- run "压一下这段文字" --root examples/starter
+```
+
+## 这三段配置各自在做什么
+
+| 字段 | 作用 | 少了会怎样 |
+| --- | --- | --- |
+| `model` | 发给端点的模型名 | 吃 agentia 缺省（`claude-opus-5`），端点会 404 |
+| `endpoint.baseURL` | 端点地址（替代 `ANTHROPIC_BASE_URL`） | 直连 `api.anthropic.com`，401 |
+| `endpoint.apiKeyEnv` | 「key 在哪个环境变量里」——**只是名字** | 报「缺少模型凭据」，开跑前就停（退出码 2） |
+| `pricing` | 价格表，成本读数靠它 | 成本是「未知」：报告里没有 `$`，成本门退回 token，`rsi --max-cost` 不生效 |
+
+密钥永远不进 `harness.config.json`：那个文件会被提交，`.env` 不会（`init` 生成的
+`.gitignore` 已经包含它）。真实环境变量优先于 `.env`，所以 CI 里导出
+`DEEPSEEK_API_KEY` 即可，不用改文件。
+
+## 价格表的三个坑（都踩过）
+
+**一、`cacheRead` 是乘数不是绝对价。** DeepSeek 缓存读 $0.003/1M、输入 $0.15/1M
+⇒ 写 `0.02`（`0.003 / 0.15`）。写 `0.003` 会让缓存命中部分便宜 100 倍，而成本数字
+看上去「很正常」。
+
+**二、这里填的是 off-peak 价。** DeepSeek 在 UTC 01:00–04:00 与 06:00–10:00
+（周一至周五，中国法定节假日除外）按 **2 倍**计费。所以高峰期跑出来的真实账单可能是
+估算的两倍。这不影响**同一时段内**的横向比较（报告与回归门比的是相对变化），但不要把
+`costUsd` 直接当发票。
+
+**三、`cacheWrite` 没写** ⇒ 走缺省 `1.25×`。DeepSeek 不单独收缓存写费，缺省值会
+让估算**偏高**（成本门提前刹车，方向安全）。如果你的端点确实在 `usage` 里报
+`cache_creation_input_tokens`，按实际情况把它改成 `0` 或 `1`。
+
+## 已知的兼容性观察
+
+- DeepSeek 两个型号默认开 thinking，输出 token 会明显多于非 thinking 模式；
+  `expect_max_tokens` 这类断言要留够余量。
+- harness 不主动请求 thinking，但会把端点返回的 `thinking` 块**原样带进下一轮**
+  （agentia 的 SSE 组装会累积 `signature`）。若端点对「回传的 thinking 块」有额外要求，
+  第一个出问题的位置会是 `harness run` 的第一次工具调用。
