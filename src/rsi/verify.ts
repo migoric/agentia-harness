@@ -95,15 +95,26 @@ export function applyPatch(assets: AssetSet, patch: AssetPatch): AssetSet {
 }
 
 /**
- * 生成「落盘后的文件内容」：frontmatter 头逐字保留，只换正文。
+ * 生成「落盘后的文件内容」：frontmatter 头与正文之间的**空行、结尾换行风格**逐字保留，
+ * 只替换正文段。
  *
- * 不重新序列化 frontmatter 是有意的：那会丢掉注释、字段顺序和引号风格，
- * 让 RSI 的 diff 里混进一堆与改进无关的噪声。
+ * 这里踩过一次坑：早先的实现是 `head + '\n' + body + '\n'`，当原文件在 `---` 之后
+ * 有空行时，渲染结果会比磁盘少一个字节 —— 于是 `acceptProposal` 的「验证后是否被改动」
+ * 校验把**自己**渲染的差异当成了「有人手改」，采纳被误拒。修法不是放宽容差
+ * （那会真的漏掉手改），而是让渲染对原排版透明。
  */
 export function renderFile(path: string, body: string): string {
   const text = readFileSync(path, 'utf8');
   const fm = parseFrontmatter(text, path);
   const lines = text.split(/\r?\n/);
-  const head = lines.slice(0, fm.headerLines).join('\n');
-  return `${head}\n${body.trim()}\n`;
+  const head = lines.slice(0, fm.headerLines);
+  const tail = lines.slice(fm.headerLines);
+
+  // frontmatter 之后的前导空行原样保留
+  const firstContent = tail.findIndex((l) => l.trim() !== '');
+  const leading = firstContent === -1 ? [] : tail.slice(0, firstContent);
+  // 结尾是否带换行（split 会留下空串）—— 保留原风格，不擅自补
+  const hadTrailingNewline = tail.length > 0 && tail[tail.length - 1] === '';
+
+  return [...head, ...leading, body.trim(), ...(hadTrailingNewline ? [''] : [])].join('\n');
 }

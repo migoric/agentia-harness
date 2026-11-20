@@ -139,6 +139,22 @@ describe('applyPatch —— 内存改写', () => {
     assert.match(out, /新正文\n$/);
     assert.doesNotMatch(out, /你是执行者/);
   });
+
+  it('renderFile 对「frontmatter 后有空行」的排版透明（曾少渲染一个空行，害采纳被误拒）', () => {
+    const root = project();
+    const path = join(root, 'agents/pad.md');
+    const original = '---\nname: pad\ndescription: 带空行\n---\n\n原正文\n';
+    writeFileSync(path, original, 'utf8');
+
+    // 用当前正文渲染回来，必须与原文件**逐字相同**
+    assert.equal(renderFile(path, '原正文'), original);
+
+    // 换正文时，那个空行要留着
+    assert.equal(
+      renderFile(path, '新正文'),
+      '---\nname: pad\ndescription: 带空行\n---\n\n新正文\n',
+    );
+  });
 });
 
 describe('闭环：验证 → 采纳 → 回滚', () => {
