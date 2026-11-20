@@ -251,17 +251,37 @@ L1 改的是提示词，能修的是「模型理解错了」。有些失败改�
 - **没有自己的预算账本**：累计成本靠外层 run 或宿主推进。
 - **server 是缝不是产品**：只有 `/run` 与 `/health`。要会话、审批、SSE，用 agentia 的 `transport/`。
 - **依赖走本地路径**：`@migor/agentia` 用 `file:../agentia`（上游尚未发 npm）。发版前需改成版本号。
+- **没在真模型上跑过**：本仓没有模型凭据。`run` / `eval` / `rsi` 走的是**真实 HTTP 客户端**
+  （fetch、SSE 拼装、重试、usage→成本），但对面是本地假端点（`scripts/fake-anthropic.mjs`），
+  不是真模型。所以「提示词好不好」「模型会不会选对工具」这两类问题，本仓的测试答不了。
 
 ## 开发
 
 ```bash
-npm run check     # typecheck + lint + test + build（CI 跑的就是这个）
-npm test          # 单跑测试
+npm run check        # typecheck + lint + test + build（CI 跑的就是这个）
+npm test             # 单跑测试
+npm run e2e:offline  # 真实 HTTP 客户端 + 本地假端点，含故障注入（需先 build）
 npm run harness -- help
 ```
+
+### 离线 e2e：为什么有一条假端点
+
+单元测试里的模型客户端全是注入的 `scriptedClient`，而线上走 `createAnthropicClient()` ——
+两者之间隔着 fetch、SSE 拼装、重试退避、usage→成本换算。那层代码此前只能靠读代码相信。
+
+`scripts/fake-anthropic.mjs` 说 Anthropic Messages 协议（含 SSE 与 `tool_use` 往返），
+`scripts/offline-e2e.mjs` 用它把这条路径放到真 HTTP 上跑，并顺手点掉几条只在异常分支上
+才走的路：`500` 退避重试、`429 + retry-after`、流被截断、用例超时、端点不报 usage。
+CI 里有这一步。
+
+它跑出过一个真 bug：**端点不报 usage 时上游算出的 `costEstimate` 是 `0` 而不是
+`undefined`** —— 模型在价格表里，于是「不知道花了多少」与「一分没花」是同一个数，
+预算闸与成本门一起静默失效。现在按 trace 里的 `usage.missing` 事件判定（literal 复制，
+有测试守着改名）。
 
 工具链：Node ≥ 20、TypeScript 7（原生 `tsc`，与 `@migor/agentia` 同版本）、tsx 跑测试、biome 管 lint 与格式。类型检查是硬门，`strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` 全开。
 
 测试分七组：资产层、评测台与回归门、RSI 闭环（含真实 trace 归因）、多 agent 委派、
 CLI 与渲染端到端、L2 代码补丁（沙箱 / 审批 / 回滚）、HTTP 面（含并发峰值必须为 1）。
 另有 `tests/architecture.test.ts` 守分层与文件体量 —— 分层写在文档里等于没有，能执行才算。
+`npm run e2e:offline` 是第八组：它不在 `npm test` 里，因为它要 `dist/` 且起子进程。

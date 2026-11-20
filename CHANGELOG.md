@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **端点不报 usage 时成本被算成 `0`**：模型在价格表里时，上游按「0 token × 单价」
+  算出 `costEstimate = 0`，与「真的一分没花」是同一个数 ⇒ `costKnown` 判成 true，
+  预算闸与回归门一起静默失效。现在按 trace 里的 `usage.missing` 事件把这种情况折回
+  `undefined`（literal 复制，有测试守着上游改名）。
+
+### 工具
+
+- **离线 e2e**（`npm run e2e:offline`）：`scripts/fake-anthropic.mjs` 说 Anthropic
+  Messages 协议（SSE + `tool_use` 往返），驱动真实 `createAnthropicClient()` 跑
+  `run` / `eval` / `rsi`。覆盖此前只能靠读代码相信的一层：fetch、SSE 拼装、重试退避、
+  usage→成本换算。含故障注入（500 / 429+retry-after / 流截断 / 超时 / 不报 usage）
+  与完整 RSI 闭环（归因 → 提案 → 验证 → 采纳 → 回滚，逐字比对）。CI 已接入。
+
+  它立刻兑现了价值：上面那条成本 bug 就是它跑出来的。
+
 ## [0.2.0] - 2026-11-20
 
 ### 新增

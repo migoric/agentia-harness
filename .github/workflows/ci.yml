@@ -33,6 +33,12 @@ jobs:
       - run: npm run check
         working-directory: harness
 
+      # 真实客户端路径（fetch / SSE / 重试 / usage→成本）只有这一条能覆盖：
+      # 单元测试里的 client 全是注入的，那一层代码本来只能靠读代码相信
+      - name: 离线 e2e —— 用本地 wire 协议端点跑真实 HTTP 客户端
+        working-directory: harness
+        run: npm run e2e:offline
+
       # 资产锁是新工程的绿线：示例工程能 init 出来且一开始就一致
       - name: 冒烟 —— init 出来的工程 lock --check 必须是绿的
         working-directory: harness

@@ -185,6 +185,43 @@ describe('成本 —— 从 trace 读真实 USD', () => {
     assert.equal(out.costUsd, expected);
   });
 
+  it('端点不报 usage ⇒ costUsd 是 undefined（此时上游算出来的是 0，最容易被当成免费）', async () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'harness.config.json'),
+      JSON.stringify({ model: 'claude-opus-5' }),
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const runner = createRunner(config, assets, undefined, false);
+
+    // 定价模型 + 「没报计量」：上游拿 0 token × 单价算出 costEstimate = 0 ——
+    // 与「真的免费」同数，所以必须是 0 之外的另一个值
+    const client = scriptedClient([
+      {
+        ...endTurn('结论：好'),
+        usage: { input_tokens: 0, output_tokens: 0, unreported: true as const },
+      },
+    ]);
+    const out = await runner.run('压一下', { client });
+
+    assert.equal(
+      out.costUsd,
+      undefined,
+      '「没报读数」不能落成 0 —— 那会让预算闸与成本门一起静默失效',
+    );
+    assert.equal(out.tokens, 0, 'token 总量此时确实是 0，与成本未知是两件事');
+
+    // harness 读的是复制的字面量 `usage.missing`（该常量不在 agentia 公共导出面），
+    // 上游改名后会静默「读到 0 条」⇒ 成本又变回 0。这条断言就是那个变化的探针
+    const names = out.trace.spans.flatMap((s) => s.events.map((e) => e.name));
+    assert.ok(
+      names.includes('usage.missing'),
+      `上游可能改了事件名；实际事件: ${[...new Set(names)].join(', ') || '无'}`,
+    );
+  });
+
   it('未定价模型 ⇒ costUsd 是 undefined（不是 0）', async () => {
     const root = project();
     writeFileSync(

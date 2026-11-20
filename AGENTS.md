@@ -83,6 +83,8 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
 
 - 任何改动都要跑 `npm run check`（typecheck + lint + 全部测试 + build）。新增能力必须
   带来可断言的断言 —— 只测「没抛错」不算测试。
+- 动了 `run/`、`server/`、`integrations` 相关的东西，**再跑一次 `npm run e2e:offline`**：
+  它覆盖的是注入客户端碰不到的那一层（fetch / SSE / 重试 / usage→成本）。
 - **L2 的测试要断言「拒绝时文件没被动过」**，不能只断言「抛了 code.conflict」：
   靠 `git apply -R` 失败兜底与真的在动手前就拒绝，抛的是同一个错误码。
 - **超时与重试的语义别随便改**：超时靠 `Promise.race([work, gate.expired])` 由本层兑现，
@@ -102,7 +104,15 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
 - **临时目录不清理**：测试用 `mkdtemp` 建工程，交给系统回收，不做 `rmSync`
   （与被测代码的写盘时序有竞态）。
 - **无模型凭据时** `harness run` / `eval` / `rsi` 会失败在第一次模型调用上，
-  这不是 bug —— 单测全部用 `scriptedClient`，不需要网络。
+  这不是 bug —— 单测全部用 `scriptedClient`，不需要网络。要证明「线协议那一段没接错」，
+  跑 `npm run e2e:offline`（本地假端点 + 真实 HTTP 客户端）。
+- **「没报 usage」与「没定价」是两件事，但都会让 `costEstimate` 变成「看起来免费」**：
+  未定价是 `undefined`；**已定价 + 端点不报计量是 `0`**（0 token × 单价）。后者更阴险，
+  因为它长得像合法读数。`runner.ts` 靠 trace 里的 `usage.missing` 事件（literal 复制，
+  公共导出面没有）把这种情况折回 `undefined`。改这段先看 `evals.test.ts` 那条测试。
+- **`system` 在线上有两种形态**：纯字符串（技能走 `runCapabilityLoop`）与块数组
+  （`SystemPrompt` 加过 label 之后）。任何读 `system` 的代码（假端点、未来的 judge）
+  都要两种都认 —— 只认字符串会让主 agent 与提案器落进兜底分支。
 - **`scriptedClient` 的游标跟着「成功消费」走**。超时那条用例的后台调用还在飞时，
   下一个用例会拿到同一步 —— 要按请求内容分派（用函数步骤），别用固定顺序的脚本。
 - **成本是 `undefined` 不是 `0`**：模型不在价格表内时 `costEstimate` 缺省，`0` 会让成本门
