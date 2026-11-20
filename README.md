@@ -46,7 +46,7 @@ harness eval                         # 会失败 —— 因为没有模型凭据
 
 ```bash
 harness run "把这个仓库的未处理 issue 分个类"
-harness eval --save .workspace/base.json   # PASS/FAIL + 通过率 + token + 命中统计
+harness eval --save .workspace/base.json   # PASS/FAIL + 通过率 + token/成本 + 命中统计
 harness rsi --dry-run                # 看它想改什么，不落盘
 harness rsi                          # 真改（通过回归门才落盘）
 harness rsi --max-cost 0.5           # 本轮最多花 $0.5，超了直接收工
@@ -69,7 +69,7 @@ skills/*.md          技能：正文 = 子循环 system；description = 模型�
 evals/*.md           评测用例：frontmatter 是断言，正文是任务
 harness.config.json  可选，覆盖缺省目录
 harness.lock.json    资产版本锁（提交进 git）
-.workspace/          运行时产物：traces.jsonl、rsi/journal.jsonl（不提交）
+.workspace/          运行时产物：traces.jsonl、rsi/journal.jsonl、sandbox/（不提交）
 ```
 
 ## 资产格式
@@ -262,4 +262,6 @@ npm run harness -- help
 
 工具链：Node ≥ 20、TypeScript 7（原生 `tsc`，与 `@migor/agentia` 同版本）、tsx 跑测试、biome 管 lint 与格式。类型检查是硬门，`strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` 全开。
 
-测试分五组：资产层、评测台与回归门、RSI 闭环（含真实 trace 归因）、多 agent 委派、CLI 与渲染端到端。另有 `tests/architecture.test.ts` 守分层与文件体量 —— 分层写在文档里等于没有，能执行才算。
+测试分七组：资产层、评测台与回归门、RSI 闭环（含真实 trace 归因）、多 agent 委派、
+CLI 与渲染端到端、L2 代码补丁（沙箱 / 审批 / 回滚）、HTTP 面（含并发峰值必须为 1）。
+另有 `tests/architecture.test.ts` 守分层与文件体量 —— 分层写在文档里等于没有，能执行才算。
