@@ -5,7 +5,7 @@ import { type AssetSet, assetKey, findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { type GateOptions, gate } from '../evals/gate.js';
-import { runSuite } from '../evals/run.js';
+import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
 import { parseFrontmatter } from '../util/frontmatter.js';
 import { fingerprint } from '../util/hash.js';
@@ -24,7 +24,7 @@ import type { AssetPatch, Proposal, VerifyOutcome } from './types.js';
  * 3. **门在外部**：`gate()` 是纯函数、只吃两份报告。RSI 无法通过「改评分器」让自己
  *    通过 —— 评分器不在这条数据流上。
  */
-export interface VerifyOptions {
+export interface VerifyOptions extends SuiteTuning {
   readonly config: HarnessConfig;
   readonly assets: AssetSet;
   readonly baseline: EvalReport;
@@ -43,6 +43,10 @@ export async function verifyProposal(opts: VerifyOptions): Promise<VerifyOutcome
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     ...(opts.client !== undefined ? { client: opts.client } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    // 与基线**同一套**调优：否则门比较的不是同一个东西
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+    ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
   });
   return {
     proposal: opts.proposal,

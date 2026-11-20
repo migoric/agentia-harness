@@ -1,7 +1,7 @@
 import { type AgentStopReason, isSuccessStopReason } from '@migor/agentia';
 import type { EvalReport } from '../evals/types.js';
 import { fingerprint } from '../util/hash.js';
-import type { FailureKind, FailureMode, FailureSample } from './types.js';
+import type { FailureKind, FailureMode, FailureSample, TargetHint } from './types.js';
 
 /**
  * 采集 —— 从一份评测报告里取出失败样本。
@@ -9,6 +9,9 @@ import type { FailureKind, FailureMode, FailureSample } from './types.js';
  * 刻意只吃 `EvalReport` 而不去吃原始 trace 文件：报告里的用例名与断言失败文本
  * 已经是**面向失败**的投影，直接进归因；trace 留给「需要看某条具体链路」的时候
  * （`harness trace <id>`）。
+ *
+ * 但**资产命中必须一起取**：`CaseResult.skills` 是「这条失败该改哪个文件」的唯一
+ * 数据来源，丢了它提案就只能猜第一个 agent。
  */
 export function collectFailures(report: EvalReport): FailureSample[] {
   return report.cases
@@ -20,6 +23,8 @@ export function collectFailures(report: EvalReport): FailureSample[] {
       tokens: c.tokens,
       iterations: c.iterations,
       excerpt: c.excerpt,
+      skills: c.skills,
+      subagents: c.subagents,
     }));
 }
 
@@ -54,10 +59,43 @@ export function attribute(samples: readonly FailureSample[]): FailureMode[] {
       count: list.length,
       cases: [...new Set(list.map((s) => s.case))].sort(),
       samples: list.slice(0, 5),
+      targets: targetsOf(list),
     });
   }
   // 失败最多的先处理：一次改动能修好更多用例的价值更高
   return modes.sort((a, b) => b.count - a.count || a.id.localeCompare(b.id));
+}
+
+/**
+ * 这个失败模式该改哪些资产 —— 按「走过它的失败用例数」降序。
+ *
+ * 排序里有一条额外的偏好：**同样多的用例时技能优先于 agent**。理由是精确性 ——
+ * 一个被调用的技能出错，改技能正文比改整个 agent 的 system 影响面小得多，而
+ * 影响面小正是 RSI 敢动的前提。
+ */
+function targetsOf(samples: readonly FailureSample[]): TargetHint[] {
+  const byTarget = new Map<string, Set<string>>();
+  const add = (target: string, c: string): void => {
+    const set = byTarget.get(target);
+    if (set === undefined) byTarget.set(target, new Set([c]));
+    else set.add(c);
+  };
+  for (const s of samples) {
+    for (const n of s.skills) add(`skill:${n}`, s.case);
+    for (const n of s.subagents) add(`agent:${n}`, s.case);
+  }
+  return [...byTarget.entries()]
+    .map(([target, cases]) => ({ target, cases: [...cases].sort() }))
+    .sort(
+      (a, b) =>
+        b.cases.length - a.cases.length ||
+        rank(a.target) - rank(b.target) ||
+        a.target.localeCompare(b.target),
+    );
+}
+
+function rank(target: string): number {
+  return target.startsWith('skill:') ? 0 : 1;
 }
 
 /** 单条样本 → (kind, 归一化签名)。归一化是为了让「同样的坏法」能落到同一个桶里 */

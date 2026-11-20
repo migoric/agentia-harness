@@ -3,6 +3,7 @@ import { isSuccessStopReason } from '@migor/agentia';
 import type { AgentAsset, AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { buildApp } from './app.js';
+import { capabilityHits } from './trace-read.js';
 
 /**
  * 跑一次任务 —— harness 里所有东西（评测、RSI 验证、CLI、server）都走这一条路。
@@ -22,6 +23,10 @@ export interface RunOutcome {
   readonly tokens: number;
   readonly durationMs: number;
   readonly error: { readonly type: string; readonly message: string } | undefined;
+  /** 本次实际调用过的技能（去重、按首次出现序） */
+  readonly skills: readonly string[];
+  /** 本次实际委派过的子 agent（去重） */
+  readonly subagents: readonly string[];
 }
 
 export interface RunOptions {
@@ -33,6 +38,7 @@ export interface RunOptions {
 export class Runner {
   readonly agent: AgentAsset;
   private readonly built: ReturnType<typeof buildApp>;
+  private readonly skillNames: ReadonlySet<string>;
 
   constructor(
     config: HarnessConfig,
@@ -43,6 +49,7 @@ export class Runner {
   ) {
     this.built = buildApp({ config, assets, agent: agentName, persistTraces });
     this.agent = this.built.agent;
+    this.skillNames = new Set(assets.skills.map((s) => s.name));
   }
 
   async run(task: string, opts: RunOptions = {}): Promise<RunOutcome> {
@@ -52,6 +59,7 @@ export class Runner {
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     });
     const u = result.trace.totalUsage;
+    const hits = capabilityHits(result.trace, this.skillNames);
     return {
       text: result.finalText,
       ok: isSuccessStopReason(result.stopReason),
@@ -64,6 +72,8 @@ export class Runner {
         result.error === undefined
           ? undefined
           : { type: result.error.type, message: result.error.message },
+      skills: [...new Set(hits.skills)],
+      subagents: [...new Set(hits.subagents)],
     };
   }
 }

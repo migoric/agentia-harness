@@ -1,8 +1,10 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import type { GateOptions } from '../evals/gate.js';
-import { runSuite } from '../evals/run.js';
+import { runSuite, type SuiteTuning } from '../evals/run.js';
 import { acceptProposal } from './accept.js';
 import { attribute, collectFailures } from './attribute.js';
 import type { Proposer } from './propose.js';
@@ -21,7 +23,7 @@ import { verifyProposal } from './verify.js';
  * 代价是慢：一次只能试一个。这个代价是值的，因为 RSI 最贵的不是算力，是
  * **人重新信任一套自己看不懂的提示词**。
  */
-export interface CycleOptions {
+export interface CycleOptions extends SuiteTuning {
   readonly config: HarnessConfig;
   readonly assets: AssetSet;
   readonly agent?: string | undefined;
@@ -36,17 +38,40 @@ export interface CycleOptions {
 }
 
 export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
+  const cycleId = makeCycleId();
+  const dryRun = opts.dryRun === true;
+
+  /**
+   * 每一轮都落一份记录（含 dryRun）—— 这是 RSI 可审计的唯一物理依据。
+   *
+   * 写失败的策略是**让整轮失败**：一个「跑了但没记录」的 RSI 轮次比不跑更糟，
+   * 因为它动过（或差点动过）资产，事后却无从复盘。
+   */
+  const emit = (body: Omit<CycleReport, 'cycleId' | 'path'>): CycleReport => {
+    const path = persistCycle(opts.config, { cycleId, ...body });
+    return { ...body, cycleId, path };
+  };
+
   const baseline = await runSuite({
     config: opts.config,
     assets: opts.assets,
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     ...(opts.client !== undefined ? { client: opts.client } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    ...tuning(opts),
   });
 
   const samples = collectFailures(baseline);
   if (samples.length === 0) {
-    return { modes: [], proposals: [], verified: [], accepted: [], rejected: [], baseline };
+    return emit({
+      modes: [],
+      proposals: [],
+      verified: [],
+      accepted: [],
+      rejected: [],
+      baseline,
+      dryRun,
+    });
   }
 
   const modes = attribute(samples);
@@ -55,6 +80,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     assets: opts.assets,
     config: opts.config,
     ...(opts.client !== undefined ? { client: opts.client } : {}),
+    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
   });
 
   const maxVerify = opts.maxVerify ?? 3;
@@ -79,6 +105,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
         ...(opts.client !== undefined ? { client: opts.client } : {}),
         ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
         ...(opts.gateOptions !== undefined ? { gateOptions: opts.gateOptions } : {}),
+        ...tuning(opts),
       });
     } catch (e) {
       // 验证本身失败（补丁过期、装配错）不该让整轮崩掉：记下来，下一个提案继续
@@ -99,7 +126,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       rejected.push({ proposal, reason: '没有任何用例变好（仅"没变差"，不值得改动资产）' });
       continue;
     }
-    if (opts.dryRun === true) {
+    if (dryRun) {
       accepted.push(proposal);
       committed = true;
       continue;
@@ -113,5 +140,31 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     rejected.push({ proposal, reason: `超过本轮验证上限（${maxVerify}），下一轮再试` });
   }
 
-  return { modes, proposals, verified, accepted, rejected, baseline };
+  return emit({ modes, proposals, verified, accepted, rejected, baseline, dryRun });
+}
+
+/** 只把**给了值**的调优键往下传（显式 undefined 与不传不同，这里保持同一口径） */
+function tuning(o: SuiteTuning): SuiteTuning {
+  return {
+    ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
+    ...(o.concurrency !== undefined ? { concurrency: o.concurrency } : {}),
+    ...(o.retries !== undefined ? { retries: o.retries } : {}),
+  };
+}
+
+/** `2026-11-20T14-30-05-123Z`：ISO 直接当文件名，字典序即时间序 */
+function makeCycleId(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+export function cyclesDir(config: HarnessConfig): string {
+  return join(config.workspaceDir, 'rsi', 'cycles');
+}
+
+function persistCycle(config: HarnessConfig, report: Omit<CycleReport, 'path'>): string {
+  const dir = cyclesDir(config);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${report.cycleId}.json`);
+  writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  return path;
 }

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { runCli as run } from './support/cli.ts';
 
 /**
  * CLI 端到端：用真实子进程跑，断言**退出码**。
@@ -11,21 +11,6 @@ import { describe, it } from 'node:test';
  * 退出码是这个工具对 CI 的契约（`lock --check` 靠它拦「偷偷改提示词」），
  * 用函数内调用测不出「process.exitCode 有没有设对」。
  */
-const CLI = join(import.meta.dirname, '..', 'src', 'cli.ts');
-/**
- * 子进程的 cwd 是临时目录，`--import tsx` 在那个位置解析不到（node_modules 在
- * 本仓而不在它的祖先链上）。用 `import.meta.resolve` 拿到绝对 URL 再交给 --import。
- */
-const TSX = import.meta.resolve('tsx');
-
-function run(args: string[], cwd: string) {
-  const r = spawnSync(process.execPath, ['--import', TSX, CLI, ...args], {
-    cwd,
-    encoding: 'utf8',
-    env: { ...process.env, NO_COLOR: '1' },
-  });
-  return { code: r.status, out: `${r.stdout}${r.stderr}` };
-}
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'harness-cli-'));
@@ -85,7 +70,8 @@ describe('harness eval', () => {
     rmSync(join(dir, 'evals/example.md'));
 
     const r = run(['eval'], dir);
-    assert.equal(r.code, 1);
+    // 2 = 配置/用法错（没评测集是工程没配好），与「跑了但没达标」的 1 分开
+    assert.equal(r.code, 2);
     assert.match(r.out, /没有用例/);
     assert.doesNotMatch(r.out, /at Object\.<anonymous>/);
   });

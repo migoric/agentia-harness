@@ -5,13 +5,17 @@
  * 的补丁越不容易在解析层就失败。这里只支持四种形态：
  *
  * ```yaml
- * name: repo-triage          # 标量
+ * name: repo-triage          # 标量（行尾 # 之后是注释）
  * version: 3                 # 数字按字符串收（版本号不需要算术）
  * tools: [read_file, grep]   # 行内数组
  * tags:
  *   - a                      # 块数组
  *   - b
  * ```
+ *
+ * **支持行尾注释**：`#` 前面是空白或行首才算注释（YAML 的规则）。不支持它的代价很实在
+ * —— 资产是给人写的，而人在 `tools: [x]` 后面一定会加一句说明；若那会让解析直接失败，
+ * 人就会学会「不要写注释」，然后几个月后没人记得某个字段为什么在那儿。
  *
  * 其余一切（嵌套对象、多行字符串、锚点）**不支持且不静默忽略** —— 遇到不认识的
  * 行直接抛，避免「写了一个字段以为生效了，其实被丢掉」这类最难查的错。
@@ -40,7 +44,7 @@ export function parseFrontmatter(text: string, source: string): Frontmatter {
 
   for (let i = 1; i < end; i++) {
     const raw = lines[i] ?? '';
-    const line = raw.trim();
+    const line = stripComment(raw).trim();
     if (line === '') continue;
 
     if (line.startsWith('- ')) {
@@ -79,6 +83,31 @@ export function parseFrontmatter(text: string, source: string): Frontmatter {
       .replace(/^\n/, ''),
     headerLines: end + 1,
   };
+}
+
+/**
+ * 去掉行尾注释。
+ *
+ * 只认「`#` 前是空白或行首」这一种（YAML 规则）—— 否则 `url: https://x/#frag` 里的
+ * `#` 会被当成注释起点，那是一个比不支持注释更难查的坑。
+ */
+function stripComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /\s/.test(line[i - 1] ?? ''))) {
+      return line.slice(0, i);
+    }
+  }
+  return line;
 }
 
 function parseInlineArray(raw: string, source: string, lineNo: number): readonly string[] {

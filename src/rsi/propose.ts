@@ -22,6 +22,8 @@ export interface ProposeContext {
   readonly assets: AssetSet;
   readonly config: HarnessConfig;
   readonly client?: ModelClient | undefined;
+  /** 构造者要改的主 agent 名（`targets` 为空时的回退目标） */
+  readonly agent?: string | undefined;
   /** 最多给几个模式提方案（按失败数降序取前 N） */
   readonly maxModes?: number | undefined;
 }
@@ -45,7 +47,12 @@ const PROPOSER_SYSTEM = `你是一个 agent 提示词工程师。你的唯一工
 export class LlmProposer implements Proposer {
   constructor(
     private readonly config: HarnessConfig,
-    private readonly opts: { model?: string; maxModes?: number } = {},
+    private readonly opts: {
+      model?: string;
+      maxModes?: number;
+      /** 单条模式提不出方案时的回执（CLI 用它打印，而不是静默吞掉） */
+      onSkip?: (modeId: string, reason: string) => void;
+    } = {},
   ) {}
 
   async propose(ctx: ProposeContext): Promise<Proposal[]> {
@@ -54,37 +61,62 @@ export class LlmProposer implements Proposer {
     const out: Proposal[] = [];
     let seq = 0;
     for (const mode of modes) {
-      const target = this.pickTarget(ctx.assets, mode);
-      if (target === undefined) continue;
-      const asset = findAsset(ctx.assets, target);
-      if (asset === undefined) continue;
+      // 单个模式提不出方案（模型输出 NONE 或输出不像正文）**不该让整轮崩掉**：
+      // 后面还有别的失败模式等着被修，而一次崩溃会把已经花掉的评测成本一起浪费。
+      try {
+        const target = this.pickTarget(ctx, mode);
+        const after = await this.ask(mode, target.body, ctx);
+        if (after === null) continue; // 模型明确说改不出
+        this.assertSane(mode, target.body, after, target.key);
 
-      const after = await this.ask(mode, asset.body, ctx);
-      if (after === null) continue; // 模型明确说改不出
-      this.assertSane(mode, asset.body, after, target);
-
-      out.push({
-        id: `p-${Date.now()}-${seq++}`,
-        modeId: mode.id,
-        kind: mode.kind,
-        rationale: `${mode.signature}（${mode.count} 例：${mode.cases.join(', ')}）`,
-        patch: { target, before: asset.body, after },
-        layer: 'L1',
-      });
+        out.push({
+          id: `p-${Date.now()}-${seq++}`,
+          modeId: mode.id,
+          kind: mode.kind,
+          rationale: `${mode.signature}（${mode.count} 例：${mode.cases.join(', ')}）；目标 ${target.key}（${target.why}）`,
+          patch: { target: target.key, before: target.body, after },
+          layer: 'L1',
+        });
+      } catch (e) {
+        this.opts.onSkip?.(mode.id, e instanceof Error ? e.message : String(e));
+      }
     }
     return out;
   }
 
   /**
-   * 选改谁。首版只有一条规则：改**第一个 agent** 的正文。
+   * 选改谁 —— **按数据选**。
    *
-   * 为什么不是「按失败类型选技能」：`EvalReport` 里没有「哪条用例走了哪个技能」的
-   * 直接映射，硬猜会改错文件（而改错文件时评测反而可能通过 —— 更糟）。
-   * 等 trace 回流能给出技能命中统计之后，这里再按数据选。
+   * 优先取归因给出的 `targets`（「哪些资产被这些失败用例走过」）。只有在没有任何
+   * 资产被调用过时才回退到主 agent 的 system：那时候确实没别的可改，但这也说明
+   * 失败是「模型压根没用技能」，改主 system 的调用指引正好对路。
    */
-  private pickTarget(assets: AssetSet, _mode: FailureMode): string | undefined {
-    const agent = assets.agents[0];
-    return agent === undefined ? undefined : `agent:${agent.name}`;
+  private pickTarget(
+    ctx: ProposeContext,
+    mode: FailureMode,
+  ): { key: string; body: string; why: string } {
+    for (const hint of mode.targets) {
+      const asset = findAsset(ctx.assets, hint.target);
+      if (asset !== undefined) {
+        return {
+          key: hint.target,
+          body: asset.body,
+          why: `${hint.cases.length} 条失败用例走过它：${hint.cases.join(', ')}`,
+        };
+      }
+    }
+    const agent =
+      ctx.agent !== undefined
+        ? ctx.assets.agents.find((a) => a.name === ctx.agent)
+        : ctx.assets.agents[0];
+    if (agent === undefined) {
+      throw new HarnessError('asset.missing', '没有任何 agent 资产可改');
+    }
+    return {
+      key: `agent:${agent.name}`,
+      body: agent.body,
+      why: '没有任何资产被调用过，只能改主 system',
+    };
   }
 
   private async ask(

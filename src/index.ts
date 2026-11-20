@@ -40,8 +40,15 @@ export { CONFIG_FILENAME, type HarnessConfig, loadConfig } from './config.js';
 export { describeError, HarnessError, type HarnessErrorCode, isHarnessError } from './errors.js';
 export { type GateOptions, type GateResult, gate } from './evals/gate.js';
 export { loadEvalCases } from './evals/load.js';
-export { check, type RunSuiteOptions, runSuite, toolSequence } from './evals/run.js';
 export {
+  check,
+  type RunSuiteOptions,
+  runSuite,
+  type SuiteTuning,
+  toolSequence,
+} from './evals/run.js';
+export {
+  type AssetHit,
   type CaseResult,
   type EvalCase,
   type EvalExpect,
@@ -57,7 +64,7 @@ export {
   revertLast,
 } from './rsi/accept.js';
 export { attribute, classify, collectFailures } from './rsi/attribute.js';
-export { type CycleOptions, runCycle } from './rsi/loop.js';
+export { type CycleOptions, cyclesDir, runCycle } from './rsi/loop.js';
 export { LlmProposer, type ProposeContext, type Proposer } from './rsi/propose.js';
 export type {
   AssetPatch,
@@ -68,9 +75,11 @@ export type {
   JournalEntry,
   Proposal,
   ProposalStatus,
+  TargetHint,
   VerifyOutcome,
 } from './rsi/types.js';
 export { applyPatch, renderFile, type VerifyOptions, verifyProposal } from './rsi/verify.js';
 export { type BuildAppOptions, type BuiltApp, buildApp } from './run/app.js';
 export { createRunner, Runner, type RunOptions, type RunOutcome } from './run/runner.js';
-export { assertNoCycles, buildSkillTools } from './run/tools.js';
+export { assertNoCycles, buildSkillTools, buildTools } from './run/tools.js';
+export { type CapabilityHits, capabilityHits } from './run/trace-read.js';

@@ -39,6 +39,18 @@ describe('frontmatter', () => {
     assert.equal(fm.body.trim(), '正文');
   });
 
+  it('行尾 # 是注释；引号内与 URL 里的 # 不是', () => {
+    const fm = parseFrontmatter(
+      '---\nname: a # 名字\ntools: [x, y] # 工具\nurl: https://x/#frag\nquote: "a # b"\n---\n正文\n',
+      't.md',
+    );
+    assert.equal(scalar(fm, 'name', 't.md'), 'a');
+    assert.deepEqual(list(fm, 'tools'), ['x', 'y']);
+    // 这两条是「支持注释」这个特性的边界：剥错了比不剥更难查
+    assert.equal(scalar(fm, 'url', 't.md'), 'https://x/#frag');
+    assert.equal(scalar(fm, 'quote', 't.md'), 'a # b');
+  });
+
   it('没有 frontmatter 时整篇都是正文', () => {
     const fm = parseFrontmatter('就是正文\n', 't.md');
     assert.deepEqual(fm.data, {});

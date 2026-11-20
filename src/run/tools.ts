@@ -1,6 +1,25 @@
-import { type AgentTool, isSuccessStopReason, runCapabilityLoop } from '@migor/agentia';
-import type { SkillAsset } from '../assets/types.js';
+import {
+  type AgentTool,
+  isSuccessStopReason,
+  type JsonSchema,
+  runCapabilityLoop,
+  subagentToTool,
+} from '@migor/agentia';
+import type { AgentAsset, AssetSet, SkillAsset } from '../assets/types.js';
 import { HarnessError } from '../errors.js';
+
+/** 技能与子 agent 共用的入参形状：只收一段任务描述 */
+const TASK_SCHEMA: JsonSchema = {
+  type: 'object',
+  properties: {
+    task: {
+      type: 'string',
+      description: '交给它的任务描述。它看不到你的对话历史，上下文请一并写进来。',
+    },
+  },
+  required: ['task'],
+  additionalProperties: false,
+};
 
 /**
  * 技能资产 → 工具。
@@ -39,17 +58,7 @@ export function buildSkillTools(skills: readonly SkillAsset[]): AgentTool[] {
       name: asset.name,
       description: asset.description,
       capability: 'skill',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          task: {
-            type: 'string',
-            description: '交给这项技能的任务描述。技能看不到你的对话历史，上下文请一并写进来。',
-          },
-        },
-        required: ['task'],
-        additionalProperties: false,
-      },
+      inputSchema: TASK_SCHEMA,
       run: async (input, ctx) => {
         if (ctx === undefined) {
           throw new HarnessError(
@@ -83,6 +92,97 @@ export function buildSkillTools(skills: readonly SkillAsset[]): AgentTool[] {
 
 interface SkillInput {
   readonly task: string;
+}
+
+/**
+ * 装配一个 agent 能看到的工具表。
+ *
+ * 能力清单的语义（技能与 agent 同一套）：
+ * - `tools` **未声明** → 挂全部技能（缺省必须安全：安静地少挂能力是最难查的故障）；
+ * - `tools: [a, b]` → 只挂这些，这是精确清单，也是多 agent 工程「这个 agent 不该能干
+ *   那件事」的表达方式；
+ * - `tools: []` → 一个都不挂（纯文本 agent）；
+ * - `subagents: [x]` → 把 agent x 变成可委派的工具（未声明即不委派）。
+ *
+ * 委派走 `subagentToTool`（agentia 的既有原语）而不是自己拉 `runCapabilityLoop`：
+ * 它会在 trace 上写 `subagent` 属性与 `agentia.handoff.from/to`，于是「谁把活交给了谁」
+ * 是 trace 里的一等事实，而不是靠命名约定反推。
+ *
+ * `spec.tools` 只被 `subagentToTool` 用来判断「要不要取工具」，真正的过滤由传进去的
+ * `resolveTools` 完成 —— 所以这里把能力名原样写进去，而不是拼 provider token 路径。
+ */
+export function buildTools(agent: AgentAsset, set: AssetSet): AgentTool[] {
+  const skillByName = new Map(buildSkillTools(set.skills).map((t) => [t.name, t]));
+  const agentByName = new Map(set.agents.map((a) => [a.name, a]));
+  const built = new Map<string, AgentTool>();
+  const allSkills = set.skills.map((s) => s.name);
+
+  /** 未声明 = 全部（见上）；声明了就严格按清单 */
+  const skillsOf = (a: AgentAsset): readonly string[] => (a.toolsDeclared ? a.tools : allSkills);
+
+  const requireSkill = (name: string): AgentTool => {
+    const t = skillByName.get(name);
+    if (t === undefined) {
+      throw new HarnessError(
+        'asset.missing',
+        `引用不存在的技能 "${name}"（可用: ${[...skillByName.keys()].sort().join(', ') || '无'}）`,
+      );
+    }
+    return t;
+  };
+
+  const requireAgent = (name: string, from: string): AgentAsset => {
+    const a = agentByName.get(name);
+    if (a === undefined) {
+      throw new HarnessError(
+        'asset.missing',
+        `${from} 委派了不存在的 agent "${name}"（可用: ${[...agentByName.keys()].sort().join(', ') || '无'}）`,
+      );
+    }
+    return a;
+  };
+
+  const buildAgent = (a: AgentAsset, trail: readonly string[]): AgentTool => {
+    const cached = built.get(a.name);
+    if (cached !== undefined) return cached;
+    if (trail.includes(a.name)) {
+      throw new HarnessError('asset.invalid', `agent 委派成环: ${[...trail, a.name].join(' → ')}`);
+    }
+    // 子工具在**装配期**全部建好：环检测才有意义。若留到运行期再解析，A→B→A 会一直
+    // 跑到预算耗尽，而那一刻的 trace 里只有几十层同名 capability span。
+    const children = [
+      ...skillsOf(a).map(requireSkill),
+      ...a.subagents.map((n) =>
+        buildAgent(requireAgent(n, `agent "${a.name}"`), [...trail, a.name]),
+      ),
+    ];
+    const tool = subagentToTool(
+      {
+        name: a.name,
+        description: a.description,
+        inputSchema: TASK_SCHEMA,
+        spec: {
+          name: a.name,
+          description: a.description,
+          schema: TASK_SCHEMA,
+          system: a.body,
+          ...(children.length > 0 ? { tools: [...skillsOf(a), ...a.subagents] } : {}),
+          ...(a.model !== undefined ? { model: a.model } : {}),
+          ...(a.maxIterations !== undefined ? { maxIterations: a.maxIterations } : {}),
+        },
+      },
+      () => children,
+    );
+    built.set(a.name, tool);
+    return tool;
+  };
+
+  return [
+    ...skillsOf(agent).map(requireSkill),
+    ...agent.subagents.map((n) =>
+      buildAgent(requireAgent(n, `agent "${agent.name}"`), [agent.name]),
+    ),
+  ];
 }
 
 /**

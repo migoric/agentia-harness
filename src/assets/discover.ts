@@ -18,15 +18,14 @@ import type { AgentAsset, AssetKind, AssetSet, SkillAsset } from './types.js';
  * ```
  *
  * 校验口径：`description` 必需（它要进模型看到的工具列表，空描述等于模型看不见这个能力）；
- * `name` 同 kind 内必须唯一（重名会让模型在两个同名工具间随机选，是最难查的一类错）。
+ * `name` 在**两类之间**唯一（技能与 agent 共用同一个工具名空间，见 `assets/types.ts`）。
  */
 const ENTRY_FILES: Record<AssetKind, string> = { skill: 'SKILL.md', agent: 'AGENT.md' };
 
 export function discoverAssets(dirs: { skills: string; agents: string }): AssetSet {
   const skills = scan(dirs.skills, 'skill') as SkillAsset[];
   const agents = scan(dirs.agents, 'agent') as AgentAsset[];
-  assertUnique(skills, 'skill');
-  assertUnique(agents, 'agent');
+  assertToolNames(skills, agents);
   return { skills, agents, fingerprint: setFingerprint(skills, agents) };
 }
 
@@ -78,6 +77,7 @@ function parse(path: string, kind: AssetKind): SkillAsset | AgentAsset {
     path,
     model: scalar(fm, 'model', path),
     tools: list(fm, 'tools'),
+    toolsDeclared: fm.data.tools !== undefined,
     maxIterations: positiveInt(scalar(fm, 'maxIterations', path), path, 'maxIterations'),
   };
 
@@ -86,17 +86,29 @@ function parse(path: string, kind: AssetKind): SkillAsset | AgentAsset {
     ...base,
     kind: 'agent',
     maxCostUsd: positiveNum(scalar(fm, 'maxCostUsd', path), path, 'maxCostUsd'),
+    subagents: list(fm, 'subagents'),
   };
 }
 
-function assertUnique(assets: readonly { name: string; path: string }[], kind: AssetKind): void {
+/**
+ * 工具名唯一 —— 跨 kind 检查。
+ *
+ * 分开检查（skill 内唯一 + agent 内唯一）留下一个真实的坑：一个叫 `review` 的技能与
+ * 一个叫 `review` 的 agent 同时挂上主 agent，模型看到两个同名工具，选哪个看采样。
+ * 这类错在评测里表现为「同一提示词时好时坏」，最容易被误判成模型不稳定。
+ */
+function assertToolNames(
+  skills: readonly { name: string; path: string }[],
+  agents: readonly { name: string; path: string }[],
+): void {
   const seen = new Map<string, string>();
-  for (const a of assets) {
+  for (const a of [...skills, ...agents]) {
     const prev = seen.get(a.name);
     if (prev !== undefined) {
       throw new HarnessError(
         'asset.invalid',
-        `${kind} 重名 "${a.name}"：${prev} 与 ${a.path}（模型在两个同名工具间会随机选）`,
+        `工具名重名 "${a.name}"：${prev} 与 ${a.path}（技能与 agent 共用模型侧的工具名空间，` +
+          '重名会让模型在两个同名工具间随机选）',
       );
     }
     seen.set(a.name, a.path);

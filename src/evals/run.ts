@@ -3,20 +3,43 @@ import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { createRunner, type RunOutcome } from '../run/runner.js';
+import { combineAbort } from '../util/abort.js';
 import { loadEvalCases } from './load.js';
 import { type CaseResult, type EvalCase, type EvalReport, summarize } from './types.js';
 
 /**
  * 跑评测集。
  *
- * 两个刻意的纪律：
+ * 三个刻意的纪律：
  *
  * 1. **不落 trace**（`persistTraces: false`）。评测会跑几十上百次，落盘会把
  *    `traces.jsonl` 变成垃圾场；要留证据就跑 `--keep-traces`，由调用方显式要。
  * 2. **失败即记，不中断**。一条用例挂了不代表后面的没意义 —— RSI 要的是完整的
  *    失败分布，而不是「第一条就停」。
+ * 3. **只有「跑崩了」才重试**。断言不通过是**结果**，重试它就等于用采样次数掩盖
+ *    问题 —— 那样 RSI 会学到「多试几次就过了」，而不是「这条提示词要改」。
  */
-export interface RunSuiteOptions {
+/**
+ * 评测的调优旋钮 —— `runSuite` 与 `verifyProposal` 共用同一份形状。
+ *
+ * 抽出来是为了**不要两条口径**：RSI 的验证若比基线跑得更宽松（比如超时更长、
+ * 重试更多），门比较的就不是同一个东西，采纳记录会变成噪声。
+ */
+export interface SuiteTuning {
+  /** 单条用例超时（毫秒）。超时按失败记，不中断整轮 */
+  readonly timeoutMs?: number | undefined;
+  /**
+   * 同时在飞的用例数（缺省 1）。
+   *
+   * 缺省串行的理由不是保守：并发会让「一轮花了多少钱」与「哪个用例贵」这两件事
+   * 互相污染 —— 而 RSI 的成本归因全靠这个。要快就显式开，并接受归因变粗。
+   */
+  readonly concurrency?: number | undefined;
+  /** 只对「run 抛出」重试的次数（缺省 0） */
+  readonly retries?: number | undefined;
+}
+
+export interface RunSuiteOptions extends SuiteTuning {
   readonly config: HarnessConfig;
   readonly assets: AssetSet;
   readonly agent?: string | undefined;
@@ -42,10 +65,8 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
   }
 
   const runner = createRunner(opts.config, opts.assets, opts.agent, false);
-  const results: CaseResult[] = [];
-  for (const c of cases) {
-    results.push(await runOne(runner, c, opts));
-  }
+  const limit = Math.max(1, opts.concurrency ?? 1);
+  const results = await mapLimit(cases, limit, (c) => runOne(runner, c, opts));
   return summarize(
     results,
     opts.assets.fingerprint,
@@ -53,31 +74,95 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
   );
 }
 
+/**
+ * 有界并发，**保持输入顺序**。
+ *
+ * 顺序很重要：报告里用例的排列不该取决于谁先跑完，否则两次跑分的 diff 全是噪声。
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      const item = items[i];
+      if (item === undefined) return;
+      out[i] = await fn(item);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 async function runOne(
   runner: ReturnType<typeof createRunner>,
   c: EvalCase,
   opts: RunSuiteOptions,
 ): Promise<CaseResult> {
-  let out: RunOutcome;
-  try {
-    out = await runner.run(c.task, {
-      ...(opts.client !== undefined ? { client: opts.client } : {}),
-      ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-    });
-  } catch (e) {
-    // 装配/客户端层的异常也要变成"这条用例失败"，而不是让整轮崩掉
+  const retries = Math.max(0, opts.retries ?? 0);
+  let out: RunOutcome | undefined;
+  let lastError: unknown;
+  let timedOut = false;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const gate = combineAbort(opts.signal, opts.timeoutMs);
+    try {
+      const work = runner.run(c.task, {
+        ...(opts.client !== undefined ? { client: opts.client } : {}),
+        ...(gate.signal !== undefined ? { signal: gate.signal } : {}),
+      });
+      // race 输掉之后 work 仍可能 reject（abort 常常正好让下游抛）—— 挂个空 catch，
+      // 否则会变成 unhandled rejection 把进程带崩
+      work.catch(() => undefined);
+      out = await Promise.race([work, gate.expired]);
+      timedOut = gate.timedOut();
+      // 「跑崩了」在 agentia 里不一定表现为抛异常 —— 模型/客户端层的错会被收成
+      // `stopReason: 'error'`（带结构化 error）。那才是最该重试的一类。
+      //
+      // 刻意**不看** `error.retryable`：那是引擎内部自动重试的语义，它已经用过了
+      // （引擎自己重试过才把 run 收成 error）。这里的 `--retries` 是「外面再给一次
+      // 机会」，语义不同，混用会让「用户要求的重试」被上游一个字段静默取消。
+      if (out.stopReason === 'error' && attempt < retries) {
+        lastError = out.error;
+        out = undefined;
+        continue;
+      }
+      break;
+    } catch (e) {
+      lastError = e;
+      timedOut = gate.timedOut();
+      // 超时或被取消时重试没有意义（只会再等一轮同样长的时间），直接收工
+      if (timedOut || gate.signal?.aborted === true) break;
+    } finally {
+      gate.dispose();
+    }
+  }
+
+  if (out === undefined) {
+    // 装配/客户端层的异常也要变成「这条用例失败」，而不是让整轮崩掉
     return {
       name: c.name,
       passed: false,
-      failures: [`run 抛出: ${e instanceof Error ? e.message : String(e)}`],
+      failures: [
+        `${timedOut ? '用例超时' : 'run 抛出'}: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      ],
       tokens: 0,
       iterations: 0,
       durationMs: 0,
-      stopReason: 'threw',
+      stopReason: timedOut ? 'timeout' : 'threw',
       excerpt: '',
+      skills: [],
+      subagents: [],
     };
   }
+
   const failures = check(c, out);
+  if (timedOut) failures.unshift(`用例超时（${opts.timeoutMs}ms）`);
   return {
     name: c.name,
     passed: failures.length === 0,
@@ -87,6 +172,8 @@ async function runOne(
     durationMs: out.durationMs,
     stopReason: out.stopReason,
     excerpt: out.text.slice(0, 400),
+    skills: out.skills,
+    subagents: out.subagents,
   };
 }
 

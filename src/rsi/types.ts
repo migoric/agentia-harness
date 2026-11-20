@@ -33,6 +33,22 @@ export interface FailureSample {
   readonly tokens: number;
   readonly iterations: number;
   readonly excerpt: string;
+  /** 这条用例实际走过的技能 —— 归因据此判断「该改哪个文件」 */
+  readonly skills: readonly string[];
+  readonly subagents: readonly string[];
+}
+
+/**
+ * 「这个失败模式该改哪个资产」的候选，按走过它的用例数降序。
+ *
+ * 这是把「提案改谁」从猜测变成数据的那一步：此前只能改第一个 agent，因为报告里
+ * 没有「哪条用例走了哪个技能」的映射。现在有了，提案就不该再猜。
+ */
+export interface TargetHint {
+  /** `skill:name` / `agent:name` */
+  readonly target: string;
+  /** 有哪些失败用例走过它 */
+  readonly cases: readonly string[];
 }
 
 /** 聚类后的失败模式 —— 提案的输入单位 */
@@ -45,6 +61,8 @@ export interface FailureMode {
   readonly count: number;
   readonly cases: readonly string[];
   readonly samples: readonly FailureSample[];
+  /** 该改的资产候选（空 = 没有任何资产被调用过，只能改主 agent 的 system） */
+  readonly targets: readonly TargetHint[];
 }
 
 /** 一次资产改写：只允许改**正文**（frontmatter 由 harness 维护） */
@@ -90,6 +108,9 @@ export interface JournalEntry {
 }
 
 export interface CycleReport {
+  /** 本轮 id（时间戳 + 序号），也是落盘文件名 |
+   *  有它才能把「CLI 打印的这一轮」与「.workspace 里那份记录」对上 */
+  readonly cycleId: string;
   readonly modes: readonly FailureMode[];
   readonly proposals: readonly Proposal[];
   readonly verified: readonly VerifyOutcome[];
@@ -97,4 +118,8 @@ export interface CycleReport {
   readonly rejected: readonly { proposal: Proposal; reason: string }[];
   /** 本轮开始前的基线报告（未采集到失败时为 undefined） */
   readonly baseline: EvalReport | undefined;
+  /** 只验证不落盘（人审模式）—— 落盘记录里必须自证，否则事后分不清「采纳了没」 */
+  readonly dryRun: boolean;
+  /** 本轮记录的落盘路径（dryRun 也写：人审需要证据） */
+  readonly path: string;
 }

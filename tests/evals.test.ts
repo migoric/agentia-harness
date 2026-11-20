@@ -83,6 +83,8 @@ function outcome(text: string, extra: Partial<RunOutcome> = {}): RunOutcome {
     tokens: 15,
     durationMs: 1,
     error: undefined,
+    skills: [],
+    subagents: [],
     ...extra,
   };
 }
@@ -202,6 +204,8 @@ function report(results: { n: string; passed: boolean }[], tokens: number, fp = 
     durationMs: 1,
     stopReason: 'end_turn',
     excerpt: '',
+    skills: [],
+    subagents: [],
   }));
   return summarize(cases, fp, `main@1`);
 }
@@ -311,5 +315,63 @@ describe('gate —— 回归门', () => {
     const b = report([{ n: 'a', passed: true }], 100, 'SAME');
     const c = report([{ n: 'a', passed: true }], 100, 'SAME');
     assert.equal(gate(b, c).sameAssets, true);
+  });
+});
+
+describe('命中统计 —— 提案选目标的数据来源', () => {
+  it('summarize 按资产聚合用例，重复调用不重复计数', () => {
+    const mk = (
+      name: string,
+      passed: boolean,
+      skills: string[],
+      subagents: string[],
+    ): CaseResult => ({
+      name,
+      passed,
+      failures: passed ? [] : ['x'],
+      tokens: 10,
+      iterations: 1,
+      durationMs: 1,
+      stopReason: 'end_turn',
+      excerpt: '',
+      skills,
+      subagents,
+    });
+    const report = summarize(
+      [
+        // review 在一轮里被调两次 —— 只该记成「a 走过它」
+        mk('a', true, ['review', 'review'], []),
+        mk('b', false, ['review', 'summary'], ['writer']),
+      ],
+      'F',
+      'main@1',
+    );
+    assert.deepEqual(report.skillHits, [
+      { target: 'skill:review', cases: ['a', 'b'] },
+      { target: 'agent:writer', cases: ['b'] },
+      { target: 'skill:summary', cases: ['b'] },
+    ]);
+  });
+
+  it('没有任何命中时是空数组（不是 undefined）', () => {
+    const report = summarize(
+      [
+        {
+          name: 'a',
+          passed: true,
+          failures: [],
+          tokens: 1,
+          iterations: 1,
+          durationMs: 1,
+          stopReason: 'end_turn',
+          excerpt: '',
+          skills: [],
+          subagents: [],
+        },
+      ],
+      'F',
+      'main@1',
+    );
+    assert.deepEqual(report.skillHits, []);
   });
 });

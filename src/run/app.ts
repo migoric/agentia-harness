@@ -2,7 +2,7 @@ import { AgentApp, jsonlTraceSink, SystemPrompt, type TraceSink } from '@migor/a
 import type { AgentAsset, AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
-import { buildSkillTools } from './tools.js';
+import { buildTools } from './tools.js';
 
 /**
  * 装配：资产集 → 一个可跑的 `AgentApp`。
@@ -47,7 +47,7 @@ export function buildApp(opts: BuildAppOptions): BuiltApp {
   const app = new AgentApp({
     name: opts.config.appName,
     system,
-    tools: buildSkillTools(opts.assets.skills),
+    tools: buildTools(agent, opts.assets),
     labels: {
       'harness.assets': opts.assets.fingerprint,
       'harness.agent': `${agent.name}@${agent.version}`,

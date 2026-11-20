@@ -11,7 +11,8 @@ import { runSuite } from '../src/evals/run.ts';
 import { acceptProposal, readJournal, revertLast } from '../src/rsi/accept.ts';
 import { attribute, classify } from '../src/rsi/attribute.ts';
 import { runCycle } from '../src/rsi/loop.ts';
-import type { FailureSample, Proposal } from '../src/rsi/types.ts';
+import { LlmProposer } from '../src/rsi/propose.ts';
+import type { FailureMode, FailureSample, Proposal } from '../src/rsi/types.ts';
 import { applyPatch, renderFile, verifyProposal } from '../src/rsi/verify.ts';
 
 const USAGE = {
@@ -46,8 +47,23 @@ function project(): string {
   return root;
 }
 
-function sample(failures: string[], stopReason = 'end_turn', c = 'e1'): FailureSample {
-  return { case: c, failures, stopReason, tokens: 10, iterations: 2, excerpt: '输出' };
+function sample(
+  failures: string[],
+  stopReason = 'end_turn',
+  c = 'e1',
+  skills: string[] = [],
+  subagents: string[] = [],
+): FailureSample {
+  return {
+    case: c,
+    failures,
+    stopReason,
+    tokens: 10,
+    iterations: 2,
+    excerpt: '输出',
+    skills,
+    subagents,
+  };
 }
 
 describe('归因', () => {
@@ -357,5 +373,122 @@ describe('runCycle —— 五步编排', () => {
     // 关键：盘上没变
     assert.equal(readFileSync(agent.path, 'utf8'), original);
     assert.equal(existsSync(config.lockPath), false, 'dry-run 不该写锁');
+
+    // 但**记录必须落盘**：dry-run 也要能复盘「当时打算采纳什么」
+    assert.equal(report.path, join(config.workspaceDir, 'rsi', 'cycles', `${report.cycleId}.json`));
+    const saved = JSON.parse(readFileSync(report.path, 'utf8')) as {
+      cycleId: string;
+      dryRun: boolean;
+      accepted: unknown[];
+      modes: unknown[];
+    };
+    assert.equal(saved.cycleId, report.cycleId);
+    assert.equal(saved.dryRun, true);
+    assert.equal(saved.accepted.length, 1);
+    assert.ok(saved.modes.length > 0, '记录里要有失败模式，否则事后无法解释为什么提这个案');
+  });
+});
+
+describe('targets —— 提案改谁要有数据依据', () => {
+  it('按走过它的失败用例数排序，平手时技能优先于 agent', () => {
+    const modes = attribute([
+      sample(['正文缺少 "结论"'], 'end_turn', 'e1', ['review']),
+      sample(['正文缺少 "结论"'], 'end_turn', 'e2', ['review']),
+      sample(['正文缺少 "结论"'], 'end_turn', 'e3', ['review', 'other'], ['writer']),
+    ]);
+    const mode = modes[0];
+    assert.ok(mode !== undefined);
+    assert.deepEqual(
+      mode.targets.map((t) => t.target),
+      ['skill:review', 'skill:other', 'agent:writer'],
+    );
+    assert.deepEqual(mode.targets[0]?.cases, ['e1', 'e2', 'e3']);
+  });
+
+  it('没有任何资产被调用时 targets 为空（提案才会回退到主 system）', () => {
+    const mode = attribute([sample(['正文缺少 "结论"'])])[0];
+    assert.ok(mode !== undefined);
+    assert.deepEqual(mode.targets, []);
+  });
+});
+
+describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () => {
+  function skillProject(): string {
+    const root = mkdtempSync(join(tmpdir(), 'harness-propose-'));
+    const w = (rel: string, text: string): void => {
+      const p = join(root, rel);
+      mkdirSync(join(p, '..'), { recursive: true });
+      writeFileSync(p, text, 'utf8');
+    };
+    w('agents/main.md', '---\nname: main\ndescription: 主\n---\n你是执行者。\n');
+    w('skills/review/SKILL.md', '---\nname: review\ndescription: 审稿\n---\n你审稿，只给结论。\n');
+    return root;
+  }
+
+  function modeWith(target: string): FailureMode {
+    return {
+      id: 'm1',
+      kind: 'wrong_answer',
+      signature: '正文缺少内容',
+      count: 1,
+      cases: ['e1'],
+      samples: [],
+      targets: [{ target, cases: ['e1'] }],
+    };
+  }
+
+  it('targets 指向技能时改技能正文，而不是第一个 agent', async () => {
+    const root = skillProject();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const proposer = new LlmProposer(config);
+    const proposals = await proposer.propose({
+      modes: [modeWith('skill:review')],
+      assets,
+      config,
+      client: scriptedClient([endTurn('你审稿。输出必须以「结论：」开头。')]),
+    });
+    assert.equal(proposals.length, 1);
+    assert.equal(proposals[0]?.patch.target, 'skill:review');
+    assert.match(String(proposals[0]?.rationale), /1 条失败用例走过它/);
+  });
+
+  it('某条提案本身不合法 ⇒ 跳过并回执，其它模式照常产出', async () => {
+    const root = skillProject();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const skips: string[] = [];
+    const proposer = new LlmProposer(config, { onSkip: (id, why) => skips.push(`${id}|${why}`) });
+    const noisy: FailureMode = { ...modeWith('agent:main'), id: 'm-noisy' };
+    const good: FailureMode = { ...modeWith('skill:review'), id: 'm-good' };
+
+    const proposals = await proposer.propose({
+      modes: [noisy, good],
+      assets,
+      config,
+      // 第一条是 30 倍膨胀（assertSane 会拒），第二条正常
+      client: scriptedClient([endTurn('啰'.repeat(3000)), endTurn('你审稿。先给结论，再给依据。')]),
+    });
+
+    assert.equal(proposals.length, 1, '坏提案被跳过，好提案还在');
+    assert.equal(proposals[0]?.modeId, 'm-good');
+    assert.equal(skips.length, 1);
+    assert.match(String(skips[0]), /^m-noisy\|/);
+  });
+
+  it('模型说 NONE ⇒ 不产出提案（也不记为失败）', async () => {
+    const root = skillProject();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const skips: string[] = [];
+    const proposer = new LlmProposer(config, { onSkip: (id) => skips.push(id) });
+    const proposals = await proposer.propose({
+      modes: [modeWith('skill:review')],
+      assets,
+      config,
+      client: scriptedClient([endTurn('NONE')]),
+    });
+    assert.deepEqual(proposals, []);
+    assert.deepEqual(skips, [], 'NONE 是合法结论，不是错误');
   });
 });
