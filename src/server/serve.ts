@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
@@ -13,7 +14,7 @@ import { combineAbort } from '../util/abort.js';
  * （它已经做完了），别在这里长第二套。
  *
  * ```
- * POST /run    { "task": "..." }  →  { text, ok, stopReason, tokens, durationMs, traceId, skills }
+ * POST /run    { "task": "..." }  →  { text, ok, stopReason, tokens, costUsd, durationMs, traceId, skills }
  * GET  /health                    →  { ok, agent, assets, uptimeMs, queued }
  * ```
  *
@@ -37,6 +38,14 @@ export interface ServerOptions {
   readonly timeoutMs?: number | undefined;
   /** 请求体上限（字节），缺省 1 MiB */
   readonly maxBodyBytes?: number | undefined;
+  /**
+   * 注入模型客户端（测试与重放用）；不传走真实模型。
+   *
+   * 有这个口子不是为了「让部署更灵活」，是为了**HTTP 面能被测**：没有它，
+   * `/run` 的正常路径只能在有 API 凭据时验证，而「串行闸真的在生效吗」这类问题
+   * 恰恰只能在并发两个请求时看出来。
+   */
+  readonly client?: ModelClient | undefined;
 }
 
 export interface RunningServer {
@@ -62,6 +71,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     void handle(req, res, {
       runner,
       assets: opts.assets,
+      ...(opts.client !== undefined ? { client: opts.client } : {}),
       startedAt,
       timeoutMs,
       maxBody,
@@ -109,6 +119,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 interface HandlerCtx {
   readonly runner: Runner;
   readonly assets: AssetSet;
+  readonly client?: ModelClient | undefined;
   readonly startedAt: number;
   readonly timeoutMs: number;
   readonly maxBody: number;
@@ -146,7 +157,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
       const gate = combineAbort(undefined, c.timeoutMs);
       try {
         // 超时必须由这里兑现（race），不能只靠把 signal 传下去 —— 见 util/abort.ts
-        const work = c.queue(async () => c.runner.run(task, { signal: gate.signal }));
+        const work = c.queue(async () =>
+          c.runner.run(task, {
+            signal: gate.signal,
+            ...(c.client !== undefined ? { client: c.client } : {}),
+          }),
+        );
         work.catch(() => undefined); // 超时后它仍可能 reject，别让它变成 unhandled
         let out: RunOutcome;
         try {
@@ -162,6 +178,8 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
           ok: out.ok,
           stopReason: out.stopReason,
           tokens: out.tokens,
+          // 与 CLI 同一个口径：没有读数时是 null（「不知道」不是「免费」）
+          costUsd: out.costUsd ?? null,
           durationMs: out.durationMs,
           skills: out.skills,
           subagents: out.subagents,
@@ -183,6 +201,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
 
 function statusOf(e: unknown): number {
   if (e instanceof HarnessError) {
+    if (e.code === 'run.payload_too_large') return 413;
     if (e.code === 'asset.missing' || e.code === 'asset.invalid') return 500;
     return 422;
   }
@@ -196,7 +215,9 @@ async function readJson(req: IncomingMessage, limit: number): Promise<Record<str
     const buf = Buffer.from(c);
     size += buf.length;
     if (size > limit) {
-      throw new HarnessError('run.failed', `请求体超过 ${limit} 字节上限`);
+      // 413 而不是 422：这是「请求太大」，不是「请求内容不合法」——
+      // 客户端据此决定是截断重发还是改格式
+      throw new HarnessError('run.payload_too_large', `请求体超过 ${limit} 字节上限`);
     }
     chunks.push(buf);
   }

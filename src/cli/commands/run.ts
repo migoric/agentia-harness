@@ -21,6 +21,7 @@ export async function runCommand(ctx: CliContext, task: string): Promise<number>
       ok: out.ok,
       stopReason: out.stopReason,
       tokens: out.tokens,
+      costUsd: out.costUsd ?? null,
       iterations: out.iterations,
       durationMs: out.durationMs,
       skills: out.skills,
@@ -31,12 +32,18 @@ export async function runCommand(ctx: CliContext, task: string): Promise<number>
   } else {
     say(out.text);
     say(
-      `\n[${out.stopReason}] ${out.tokens} token · ${out.iterations} 轮 · ${out.durationMs}ms · trace ${out.trace.traceId}`,
+      `\n[${out.stopReason}] ${out.tokens} token${costSuffix(out.costUsd)} · ${out.iterations} 轮 · ${out.durationMs}ms · trace ${out.trace.traceId}`,
     );
     if (out.skills.length > 0) say(`技能：${out.skills.join(', ')}`);
     if (out.subagents.length > 0) say(`委派：${out.subagents.join(', ')}`);
   }
   return out.ok ? 0 : 1;
+}
+
+/** 没有成本读数时打空串，不打印 `$0` —— 那会被读成「免费」 */
+function costSuffix(usd: number | undefined): string {
+  if (usd === undefined) return '';
+  return usd < 0.01 ? ` $${usd.toFixed(5)}` : ` $${usd.toFixed(3)}`;
 }
 
 /**
