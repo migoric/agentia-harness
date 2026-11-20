@@ -333,6 +333,62 @@ describe('runCycle —— 五步编排', () => {
     assert.equal(report.accepted.length, 0);
   });
 
+  it('预算超限就收工：连提案都不提（提案那一步也要花钱）', async () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'harness.config.json'),
+      JSON.stringify({ model: 'claude-opus-5' }),
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+
+    const report = await runCycle({
+      config,
+      assets,
+      client: scriptedClient([endTurn('结论：合格')]),
+      maxCostUsd: 1e-9,
+      proposer: {
+        propose: () => {
+          throw new Error('预算已经超了，不该再调模型提方案');
+        },
+      },
+    });
+
+    assert.equal(report.costKnown, true);
+    assert.ok(report.costUsd > 1e-9, `基线就该花钱，实际 $${report.costUsd}`);
+    assert.equal(report.budget?.stopped, true);
+    assert.equal(report.proposals.length, 0);
+    assert.equal(report.modes.length, 0);
+  });
+
+  it('成本不可比时预算闸不生效，但记录里必须写明（不拿偏低数字假装闸住了）', async () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'harness.config.json'),
+      JSON.stringify({ model: 'not-a-priced-model' }),
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+
+    const report = await runCycle({
+      config,
+      assets,
+      client: scriptedClient([endTurn('结论：合格')]),
+      maxCostUsd: 0,
+      proposer: { propose: async () => [] },
+    });
+
+    assert.equal(report.costKnown, false);
+    assert.equal(
+      report.budget?.stopped,
+      false,
+      '不知道花了多少时不能声称「没超」也不能声称「超了」',
+    );
+    assert.equal(report.costUsd, 0);
+  });
+
   it('dry-run 只验证不落盘', async () => {
     const root = project();
     const config = loadConfig(root);

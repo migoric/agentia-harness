@@ -117,6 +117,22 @@ export interface JournalEntry {
   readonly code?: CodeJournal;
 }
 
+/**
+ * 预算闸 —— 一轮 RSI 最多花多少钱。
+ *
+ * 存在理由很具体：一轮闭环要跑**两遍以上**评测（基线 + 每个候选各一遍），而在真模型
+ * 上这是最贵的一步。没有上限时，「这轮花了 $12 结果什么都没采纳」是很容易发生的。
+ *
+ * `spentUsd` 只累加**已知**成本：模型没定价时它是偏低的，所以 `costKnown=false` 时
+ * 闸不生效（并如实记下来），而不是拿着偏低的数字假装闸住了。
+ */
+export interface CycleBudget {
+  readonly limitUsd: number;
+  readonly spentUsd: number;
+  /** true = 因超限提前收工（基线之后或验证中途） */
+  readonly stopped: boolean;
+}
+
 export interface CycleReport {
   /** 本轮 id（时间戳 + 序号），也是落盘文件名 |
    *  有它才能把「CLI 打印的这一轮」与「.workspace 里那份记录」对上 */
@@ -130,6 +146,12 @@ export interface CycleReport {
   readonly baseline: EvalReport | undefined;
   /** 只验证不落盘（人审模式）—— 落盘记录里必须自证，否则事后分不清「采纳了没」 */
   readonly dryRun: boolean;
+  /** 本轮累计美元成本（基线 + 已验证的候选） */
+  readonly costUsd: number;
+  /** 所有参与比较的报告都有成本读数；false 时 `costUsd` 偏低，预算闸不可用 */
+  readonly costKnown: boolean;
+  /** 预算闸的结论；没设上限时为 undefined */
+  readonly budget: CycleBudget | undefined;
   /** 本轮记录的落盘路径（dryRun 也写：人审需要证据） */
   readonly path: string;
 }

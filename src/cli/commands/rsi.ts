@@ -21,6 +21,8 @@ async function cycle(ctx: CliContext): Promise<number> {
   const maxModes = numFlag(ctx.flags, 'max-modes');
   const maxVerify = numFlag(ctx.flags, 'max-verify');
   const dryRun = boolFlag(ctx.flags, 'dry-run');
+  // `--max-cost` 覆盖配置：CI 里想临时收紧预算不必改文件
+  const maxCost = numFlag(ctx.flags, 'max-cost') ?? ctx.config.maxCostUsd;
 
   const report = await runCycle({
     config: ctx.config,
@@ -32,6 +34,7 @@ async function cycle(ctx: CliContext): Promise<number> {
       onSkip: (modeId, reason) => warn(`  跳过 ${modeId}: ${reason}`),
     }),
     ...(maxVerify !== undefined ? { maxVerify } : {}),
+    ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
     ...(dryRun ? { dryRun: true } : {}),
     ...tuningOf(ctx),
   });
@@ -50,6 +53,18 @@ async function cycle(ctx: CliContext): Promise<number> {
   for (const m of report.modes) {
     const target = m.targets[0]?.target ?? '（无资产命中）';
     say(`  [${m.kind}] ${m.signature}  ×${m.count} → 偏向改 ${target}`);
+  }
+  say(
+    report.costKnown
+      ? `\n本轮成本 $${report.costUsd.toFixed(4)}`
+      : `\n本轮成本未知（模型不在价格表内），token 只能当代理`,
+  );
+  if (report.budget !== undefined) {
+    const b = report.budget;
+    say(
+      `预算 $${b.spentUsd.toFixed(4)} / $${b.limitUsd.toFixed(4)}` +
+        (b.stopped ? ' —— 已超限，本轮提前收工' : ''),
+    );
   }
   say(`\n提出 ${report.proposals.length} 个提案，验证 ${report.verified.length} 个：`);
   for (const v of report.verified) {

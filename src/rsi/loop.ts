@@ -8,7 +8,7 @@ import { runSuite, type SuiteTuning } from '../evals/run.js';
 import { acceptProposal } from './accept.js';
 import { attribute, collectFailures } from './attribute.js';
 import type { Proposer } from './propose.js';
-import type { CycleReport, Proposal, VerifyOutcome } from './types.js';
+import type { CycleBudget, CycleReport, Proposal, VerifyOutcome } from './types.js';
 import { verifyProposal } from './verify.js';
 
 /**
@@ -35,6 +35,13 @@ export interface CycleOptions extends SuiteTuning {
   readonly dryRun?: boolean | undefined;
   /** 最多验证几个提案（超过的不跑评测，省成本） */
   readonly maxVerify?: number | undefined;
+  /**
+   * 本轮成本上限（美元）。超了就提前收工并如实记进记录。
+   *
+   * 与 `maxVerify` 是两个维度：那个限制**次数**，这个限制**钱**。设了上限后，
+   * 第一遍基线跑完就可能已经超了 —— 此时连提案都不必提，那一步也烧钱。
+   */
+  readonly maxCostUsd?: number | undefined;
 }
 
 export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
@@ -52,6 +59,12 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     return { ...body, cycleId, path };
   };
 
+  const limit = opts.maxCostUsd;
+  let spent = 0;
+  let costKnown = true;
+  const budgetOf = (stopped: boolean): CycleBudget | undefined =>
+    limit === undefined ? undefined : { limitUsd: limit, spentUsd: spent, stopped };
+
   const baseline = await runSuite({
     config: opts.config,
     assets: opts.assets,
@@ -60,6 +73,26 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     ...tuning(opts),
   });
+
+  spent += baseline.costUsd;
+  costKnown = costKnown && baseline.costKnown;
+
+  // 预算闸：基线就超了就直接收工。此时连提案都不提 —— 提案那一步要再调一次模型，
+  // 在「已经超预算」的前提下继续花钱是最没道理的
+  if (limit !== undefined && costKnown && spent > limit) {
+    return emit({
+      modes: [],
+      proposals: [],
+      verified: [],
+      accepted: [],
+      rejected: [],
+      baseline,
+      dryRun,
+      costUsd: spent,
+      costKnown,
+      budget: budgetOf(true),
+    });
+  }
 
   const samples = collectFailures(baseline);
   if (samples.length === 0) {
@@ -71,6 +104,9 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       rejected: [],
       baseline,
       dryRun,
+      costUsd: spent,
+      costKnown,
+      budget: budgetOf(false),
     });
   }
 
@@ -89,7 +125,16 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   const rejected: { proposal: Proposal; reason: string }[] = [];
   let committed = false;
 
+  let budgetStopped = false;
   for (const proposal of proposals.slice(0, maxVerify)) {
+    if (limit !== undefined && costKnown && spent > limit) {
+      budgetStopped = true;
+      rejected.push({
+        proposal,
+        reason: `本轮预算已用完（已花 $${spent.toFixed(4)} ≥ 上限 $${limit.toFixed(4)}），下一轮再试`,
+      });
+      continue;
+    }
     if (committed) {
       rejected.push({ proposal, reason: '本轮已采纳另一个提案（单变量原则），下一轮再试' });
       continue;
@@ -116,6 +161,8 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       continue;
     }
     verified.push(outcome);
+    spent += outcome.candidate.costUsd;
+    costKnown = costKnown && outcome.candidate.costKnown;
 
     if (!outcome.gate.ok) {
       rejected.push({ proposal, reason: outcome.gate.reason });
@@ -140,7 +187,18 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     rejected.push({ proposal, reason: `超过本轮验证上限（${maxVerify}），下一轮再试` });
   }
 
-  return emit({ modes, proposals, verified, accepted, rejected, baseline, dryRun });
+  return emit({
+    modes,
+    proposals,
+    verified,
+    accepted,
+    rejected,
+    baseline,
+    dryRun,
+    costUsd: spent,
+    costKnown,
+    budget: budgetOf(budgetStopped),
+  });
 }
 
 /** 只把**给了值**的调优键往下传（显式 undefined 与不传不同，这里保持同一口径） */

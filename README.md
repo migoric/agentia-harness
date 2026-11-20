@@ -49,6 +49,7 @@ harness run "把这个仓库的未处理 issue 分个类"
 harness eval --save .workspace/base.json   # PASS/FAIL + 通过率 + token + 命中统计
 harness rsi --dry-run                # 看它想改什么，不落盘
 harness rsi                          # 真改（通过回归门才落盘）
+harness rsi --max-cost 0.5           # 本轮最多花 $0.5，超了直接收工
 harness rsi status                   # 采纳历史
 harness rsi revert                   # 回滚最近一次
 ```

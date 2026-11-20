@@ -47,6 +47,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --dry-run             只验证不落盘（人审模式）
     --max-modes <n>       最多给几个失败模式提方案（缺省 3）
     --max-verify <n>      最多验证几个提案（缺省 3）
+    --max-cost <usd>      本轮成本上限（覆盖配置 maxCostUsd）
   rsi revert              回滚最近一次采纳
   rsi status              看采纳历史
   patch <diff>             验证一个代码补丁（在 git worktree 沙箱里跑验证命令）

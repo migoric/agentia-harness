@@ -36,6 +36,14 @@
   （`costBasis: 'tokens'`）。换模型是合法提案，而 token 跨模型不可比。
 - `harness report` / `eval` 的输出带上成本；无读数时刻意**不打印 `$0`**（那会被读成免费）。
 
+**RSI 轮次预算闸。** 一轮闭环要跑两遍以上评测，真模型上这是最贵的一步；没有上限时
+「花了 $12 什么都没采纳」很容易发生。
+
+- `harness rsi --max-cost <usd>`（或配置 `maxCostUsd`）设本轮上限；基线一跑完就超限
+  会**连提案都不提**（那一步也要调模型）。
+- `CycleReport.costUsd` / `costKnown` / `budget` 如实记录：成本不可比时闸不生效，并把
+  `costKnown: false` 写进记录 —— 不拿偏低的数字假装闸住了。
+
 ## [0.1.0] - 2026-11-20
 
 首个可用版本。基于 `@migor/agentia` 的独立工程，不改上游。
