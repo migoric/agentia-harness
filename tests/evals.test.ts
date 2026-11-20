@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -7,7 +7,8 @@ import { scriptedClient, type Trace } from '@migor/agentia';
 import { discoverAssets } from '../src/assets/discover.ts';
 import { loadConfig } from '../src/config.ts';
 import { gate } from '../src/evals/gate.ts';
-import { check, toolSequence } from '../src/evals/run.ts';
+import { loadEvalCases } from '../src/evals/load.ts';
+import { check, runSuite, toolSequence } from '../src/evals/run.ts';
 import { type CaseResult, type EvalCase, type EvalReport, summarize } from '../src/evals/types.ts';
 import { createRunner, type RunOutcome } from '../src/run/runner.ts';
 
@@ -563,5 +564,76 @@ describe('命中统计 —— 提案选目标的数据来源', () => {
       'main@1',
     );
     assert.deepEqual(report.skillHits, []);
+  });
+});
+
+describe('用例加载 —— 断言字段拼错必须响亮', () => {
+  function evalProject(header: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'harness-eval-load-'));
+    mkdirSync(join(dir, 'evals'), { recursive: true });
+    writeFileSync(
+      join(dir, 'evals', 'c.md'),
+      `---\nname: c\n${header}\n---\n\n压一下这段文字\n`,
+      'utf8',
+    );
+    return dir;
+  }
+
+  function assertEvalError(fn: () => unknown, pattern: RegExp): void {
+    assert.throws(fn, (e: unknown) => {
+      const err = e as { code?: string; message?: string };
+      assert.equal(err.code, 'eval.invalid', `错误码应是 eval.invalid，实际 ${String(err.code)}`);
+      assert.match(err.message ?? '', pattern);
+      return true;
+    });
+  }
+
+  it('expect_max_token 少个 s ⇒ 拒绝，而不是静默少一道门', () => {
+    const dir = evalProject('expect_contains: 结论\nexpect_max_token: 200');
+    assertEvalError(() => loadEvalCases(join(dir, 'evals')), /不认识的用例字段 "expect_max_token"/);
+  });
+
+  it('expect_matches 非法正则在加载期就炸（不能等用例跑到一半才崩）', () => {
+    const dir = evalProject("expect_matches: '['");
+    assertEvalError(() => loadEvalCases(join(dir, 'evals')), /不是合法正则/);
+  });
+
+  it('合法断言照常读入（严格化不误伤）', () => {
+    const dir = evalProject(
+      'expect_contains: 结论\nexpect_tools: [a, b]\nexpect_matches: 结论.*\nexpect_ok: true\nexpect_max_tokens: 200',
+    );
+    const cases = loadEvalCases(join(dir, 'evals'));
+    assert.equal(cases.length, 1);
+    assert.deepEqual(cases[0]?.expect.contains, ['结论']);
+    assert.deepEqual(cases[0]?.expect.tools, ['a', 'b']);
+    assert.equal(cases[0]?.expect.maxTokens, 200);
+  });
+});
+
+describe('trace 留证 —— 评测默认不落盘，--keep-traces 才落', () => {
+  it('缺省不写 traces.jsonl；keepTraces 后写并把 traceId 记进报告', async () => {
+    const root = project();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+
+    const plain = await runSuite({
+      config,
+      assets,
+      client: scriptedClient([endTurn('结论：合格')]),
+    });
+    assert.equal(existsSync(config.tracesPath), false, '评测跑几十次不该把 trace 撑爆');
+    assert.equal(plain.cases.length, 1);
+
+    const kept = await runSuite({
+      config,
+      assets,
+      keepTraces: true,
+      client: scriptedClient([endTurn('结论：合格')]),
+    });
+    assert.equal(existsSync(config.tracesPath), true);
+    const id = kept.cases[0]?.traceId;
+    assert.ok(id !== undefined && id.length > 0, '报告要给出可回查的 traceId');
+    const traces = readFileSync(config.tracesPath, 'utf8');
+    assert.match(traces, new RegExp(id as string));
   });
 });

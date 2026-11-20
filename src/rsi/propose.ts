@@ -1,8 +1,10 @@
-import { AgentApp, type ModelClient, SystemPrompt } from '@migor/agentia';
+import { AgentApp, type ModelClient, resolveDefaultModel, SystemPrompt } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import { findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { effectiveModel } from '../run/app.js';
+import { costOf } from '../run/cost.js';
 import type { FailureMode, Proposal } from './types.js';
 
 /**
@@ -30,6 +32,14 @@ export interface ProposeContext {
 
 export interface Proposer {
   propose(ctx: ProposeContext): Promise<Proposal[]>;
+  /**
+   * 本轮提案器自己花了多少钱（可选：手写的 / 外部提案器没有模型开销）。
+   *
+   * RSI 的 `--max-cost` 必须把它算进去：这一步也调模型，此前只记基线与候选两遍
+   * 评测，预算是系统性偏低的。没读数时给 `undefined` 并把 `costKnown` 置 false。
+   */
+  readonly costUsd?: number | undefined;
+  readonly costKnown?: boolean | undefined;
 }
 
 const PROPOSER_SYSTEM = `你是一个 agent 提示词工程师。你的唯一工作：读失败证据，改写**一个** Markdown 资产的正文，让失败消失，同时不破坏它已经做对的事。
@@ -45,6 +55,9 @@ const PROPOSER_SYSTEM = `你是一个 agent 提示词工程师。你的唯一工
 先想清楚「这条改动为什么能让这条用例从失败变通过」，再动笔。改不出有把握的方案时，输出单个词 NONE。`;
 
 export class LlmProposer implements Proposer {
+  private spentUsd = 0;
+  private known = true;
+
   constructor(
     private readonly config: HarnessConfig,
     private readonly opts: {
@@ -55,17 +68,28 @@ export class LlmProposer implements Proposer {
     } = {},
   ) {}
 
+  get costUsd(): number | undefined {
+    return this.known ? this.spentUsd : undefined;
+  }
+
+  get costKnown(): boolean {
+    return this.known;
+  }
+
   async propose(ctx: ProposeContext): Promise<Proposal[]> {
     const limit = this.opts.maxModes ?? ctx.maxModes ?? 3;
     const modes = ctx.modes.slice(0, limit);
     const out: Proposal[] = [];
+    this.spentUsd = 0;
+    this.known = true;
+    const model = this.effectiveModel(ctx);
     let seq = 0;
     for (const mode of modes) {
       // 单个模式提不出方案（模型输出 NONE 或输出不像正文）**不该让整轮崩掉**：
       // 后面还有别的失败模式等着被修，而一次崩溃会把已经花掉的评测成本一起浪费。
       try {
         const target = this.pickTarget(ctx, mode);
-        const after = await this.ask(mode, target.body, ctx);
+        const after = await this.ask(mode, target.body, ctx, model);
         if (after === null) continue; // 模型明确说改不出
         this.assertSane(mode, target.body, after, target.key);
 
@@ -119,21 +143,44 @@ export class LlmProposer implements Proposer {
     };
   }
 
+  /**
+   * 提案器与主 agent 用同一个模型口径。此前它只认构造参数的 `model`，
+   * CLI 从来不传 ⇒ 非 Anthropic 工程里提案器偷偷用 `claude-opus-5`，
+   * 既打错端点模型名，又按 Opus 单价记账（与技能子循环踩过的是同一个坑）。
+   */
+  private effectiveModel(ctx: ProposeContext): string {
+    if (this.opts.model !== undefined) return this.opts.model;
+    const agent =
+      ctx.agent !== undefined
+        ? ctx.assets.agents.find((a) => a.name === ctx.agent)
+        : ctx.assets.agents[0];
+    return agent === undefined
+      ? (this.config.model ?? resolveDefaultModel())
+      : effectiveModel(this.config, agent);
+  }
+
   private async ask(
     mode: FailureMode,
     current: string,
     ctx: ProposeContext,
+    model: string,
   ): Promise<string | null> {
     const app = new AgentApp({
       name: 'harness-proposer',
       system: new SystemPrompt().add('role', PROPOSER_SYSTEM),
-      ...(this.opts.model !== undefined ? { model: this.opts.model } : {}),
+      model,
+      ...(Object.keys(this.config.pricing).length > 0
+        ? { priceOverrides: { ...this.config.pricing } }
+        : {}),
       ...(this.config.maxCostUsd !== undefined ? { maxCostUsd: this.config.maxCostUsd } : {}),
     });
     const prompt = renderPrompt(mode, current);
     const { result } = await app.run([{ role: 'user', content: prompt }], {
       ...(ctx.client !== undefined ? { client: ctx.client } : {}),
     });
+    const c = costOf(result.trace);
+    if (c === undefined) this.known = false;
+    else this.spentUsd += c;
     const text = result.finalText.trim();
     if (text === 'NONE' || text === '') return null;
     return stripFence(text);

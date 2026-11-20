@@ -89,6 +89,29 @@ describe('配置 —— pricing 段', () => {
   });
 });
 
+describe('配置 —— 拼错字段与非法预算必须响亮', () => {
+  it('顶层未知键不静默忽略（modle 拼错不能变成「配了没用」）', () => {
+    assertConfigError(() => cfg({ modle: 'deepseek-flash' }), /不认识 "modle"/);
+    assertConfigError(() => cfg({ maxCost: 1 }), /不认识 "maxCost"/);
+  });
+
+  it('code 段未知键也不静默忽略（注释承诺过，实现此前漏了）', () => {
+    assertConfigError(() => cfg({ code: { verfiy: ['npm', 'test'] } }), /不认识 "verfiy"/);
+  });
+
+  it('maxCostUsd / maxIterations 必须为正数：0 在 agentia 里是「不设上限」', () => {
+    assertConfigError(() => cfg({ maxCostUsd: 0 }), /"maxCostUsd" 必须为正数/);
+    assertConfigError(() => cfg({ maxCostUsd: -1 }), /"maxCostUsd" 必须为正数/);
+    assertConfigError(() => cfg({ maxIterations: 0 }), /"maxIterations" 必须为正数/);
+  });
+
+  it('合法的预算照常读入（别把严格化做成一刀切拒绝）', () => {
+    const c = cfg({ maxCostUsd: 0.5, maxIterations: 8 });
+    assert.equal(c.maxCostUsd, 0.5);
+    assert.equal(c.maxIterations, 8);
+  });
+});
+
 describe('端点桥接 —— 配置 → 进程环境变量', () => {
   const touched = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY'];
   function withCleanEnv(fn: () => void): void {

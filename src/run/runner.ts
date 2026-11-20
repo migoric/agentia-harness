@@ -3,6 +3,7 @@ import { isSuccessStopReason } from '@migor/agentia';
 import type { AgentAsset, AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { buildApp } from './app.js';
+import { costOf, usageReported } from './cost.js';
 import { capabilityHits } from './trace-read.js';
 
 /**
@@ -43,33 +44,7 @@ export interface RunOutcome {
   readonly subagents: readonly string[];
 }
 
-/**
- * 上游「这一回合没报 usage」的事件名（`USAGE_MISSING_EVENT`）。
- *
- * 写字面量而不是 import：agentia 的公共导出面里没有它（与 `tool.input` 同款处境）。
- * 风险同样是「上游改名 ⇒ 静默读不到」，防线也只有同一条：`tests/evals.test.ts` 用
- * **真实调用产生的 trace** 断言这个事件在读不到 usage 时确实出现，改名会立刻红。
- */
-const USAGE_MISSING_EVENT = 'usage.missing';
-
 export type CostNote = 'unpriced' | 'unreported';
-
-/**
- * 这一轮里有没有回合「根本没报计量」。
- *
- * 为什么必须单独问一次：模型**在价格表里**时，上游拿「0 token × 单价」算出
- * `costEstimate = 0` —— 与「真的免费」是一个数。不区分的话 `costKnown` 会判成 true，
- * 预算闸与回归门就都静默失效了。这一条只有走真实 HTTP 客户端 + 端点不回 usage
- * 才会暴露，`scriptedClient` 因为压根不带 usage 字段，走的是另一条（本来就 undefined）的路径。
- */
-function usageReported(trace: Trace): boolean {
-  for (const span of trace.spans) {
-    for (const e of span.events) {
-      if (e.name === USAGE_MISSING_EVENT) return false;
-    }
-  }
-  return true;
-}
 
 export interface RunOptions {
   /** 注入模型客户端（评测用脚本客户端；不传给真实模型调用） */
@@ -120,7 +95,7 @@ export class Runner {
       tokens: u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens,
       // 端点没报计量时 `costEstimate` 是 **0** 而不是 undefined（上游按「0 token × 单价」算），
       // 直接透传会让预算闸以为这一轮免费 —— 所以先问「到底报没报读数」
-      costUsd: costNote === undefined ? u.costEstimate : undefined,
+      costUsd: costOf(result.trace),
       costNote,
       durationMs: Date.now() - started,
       error:

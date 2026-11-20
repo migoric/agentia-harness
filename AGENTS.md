@@ -136,3 +136,16 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
   agentia 的 `engine/usage.ts`。
 - **「没读数」有两种病因，别合并**：`unpriced`（没定价，改配置）与 `unreported`
   （端点没报计量，改不了配置）。合并成一句「没有成本」会把人引向错误的动作。
+- **拼错的键必须当场炸**：配置顶层 / `endpoint` / `pricing` / `code` 的未知键
+  （`config.ts` 的 `rejectUnknownKeys`）、eval frontmatter 的未知 `expect_*`
+  （`evals/load.ts`）、CLI 的未知 flag（`cli/args.ts` 的 `assertKnownFlags`）都拒绝。
+  `numFlag` 对非数字抛错而不是返回 `undefined` —— 后者会让 `--timeout abc` 变成
+  「不设超时」且命令返回 0。预算 / 迭代上限必须是正数，因为 `0` 在 agentia 里是
+  「不设上限」。新增配置字段或 CLI flag 时，记得同步白名单与 HELP。
+- **提案器与子循环一样要继承生效模型**：`LlmProposer` 用 `effectiveModel(config, agent)`
+  和 `config.pricing`（此前只认构造参数，CLI 从不传 ⇒ 另一个 `claude-opus-5` 静默错账）。
+  它的花费经 `costUsd` / `costKnown` 回到 `CycleBudget`，预算闸别再只记基线与候选。
+- **成本读数只有一个实现**：`run/cost.ts` 的 `costOf()` / `usageReported()`。
+  runner 与提案器都用它，别再各写一份 `usage.missing` 字面量。
+- **RSI 的 cycle JSON 与 journal 一样原子写**（`journal.ts` 的 `atomicWrite`）：
+  半截审计记录比没有更糟。

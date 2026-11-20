@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
@@ -7,6 +7,7 @@ import type { GateOptions } from '../evals/gate.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import { acceptProposal } from './accept.js';
 import { attribute, collectFailures } from './attribute.js';
+import { atomicWrite } from './journal.js';
 import type { Proposer } from './propose.js';
 import type { CycleBudget, CycleReport, Proposal, VerifyOutcome } from './types.js';
 import { verifyProposal } from './verify.js';
@@ -118,6 +119,11 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     ...(opts.client !== undefined ? { client: opts.client } : {}),
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
   });
+  // 提案也烧钱，而且发生在预算闸第一次检查之前 —— 此前只记基线与候选，
+  // `--max-cost` 是系统性偏低的（真模型上一轮提案器可能比一条用例还贵）
+  const proposalCost = opts.proposer.costUsd;
+  if (proposalCost !== undefined) spent += proposalCost;
+  costKnown = costKnown && (opts.proposer.costKnown ?? true);
 
   const maxVerify = opts.maxVerify ?? 3;
   const verified: VerifyOutcome[] = [];
@@ -223,6 +229,7 @@ function persistCycle(config: HarnessConfig, report: Omit<CycleReport, 'path'>):
   const dir = cyclesDir(config);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${report.cycleId}.json`);
-  writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  // 与 journal 同款：写到一半崩了不能留下半个 cycle JSON —— 那是 RSI 唯一的审计依据
+  atomicWrite(path, `${JSON.stringify(report, null, 2)}\n`);
   return path;
 }

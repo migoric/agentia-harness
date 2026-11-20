@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -546,5 +553,142 @@ describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () 
     });
     assert.deepEqual(proposals, []);
     assert.deepEqual(skips, [], 'NONE 是合法结论，不是错误');
+  });
+});
+
+describe('提案器的模型与成本口径', () => {
+  function projectWithModel(): {
+    root: string;
+    config: ReturnType<typeof loadConfig>;
+    assets: ReturnType<typeof discoverAssets>;
+  } {
+    const root = mkdtempSync(join(tmpdir(), 'harness-propose-model-'));
+    const w = (rel: string, text: string): void => {
+      const p = join(root, rel);
+      mkdirSync(join(p, '..'), { recursive: true });
+      writeFileSync(p, text, 'utf8');
+    };
+    w('agents/main.md', '---\nname: main\ndescription: 主\n---\n你是执行者。\n');
+    w('skills/review/SKILL.md', '---\nname: review\ndescription: 审稿\n---\n你审稿，只给结论。\n');
+    w(
+      'harness.config.json',
+      JSON.stringify({
+        model: 'deepseek-flash',
+        pricing: { 'deepseek-flash': { in: 0.15, out: 0.6 } },
+      }),
+    );
+    const config = loadConfig(root);
+    return {
+      root,
+      config,
+      assets: discoverAssets({ skills: config.skillsDir, agents: config.agentsDir }),
+    };
+  }
+
+  const MODE: FailureMode = {
+    id: 'm1',
+    kind: 'wrong_answer',
+    signature: '正文缺少内容',
+    count: 1,
+    cases: ['e1'],
+    samples: [],
+    targets: [{ target: 'skill:review', cases: ['e1'] }],
+  };
+
+  it('提案器用工程生效模型，并按配置价格表记账', async () => {
+    const { config, assets } = projectWithModel();
+    const seen: string[] = [];
+    const proposer = new LlmProposer(config);
+    const proposals = await proposer.propose({
+      modes: [MODE],
+      assets,
+      config,
+      client: scriptedClient([
+        (params: unknown) => {
+          seen.push((params as { model: string }).model);
+          return endTurn('你审稿。输出必须以「结论：」开头。');
+        },
+      ]),
+    });
+
+    assert.equal(proposals.length, 1);
+    assert.deepEqual(seen, ['deepseek-flash'], '提案器此前偷偷用 claude-opus-5');
+    assert.ok((proposer.costUsd ?? 0) > 0, '提案本身的花费要能读到');
+    assert.equal(proposer.costKnown, true);
+  });
+
+  it('模型没定价 ⇒ 提案花费标成「未知」而不是 0', async () => {
+    const { config, assets } = projectWithModel();
+    const unpriced = { ...config, pricing: {}, model: 'mystery-model' } as typeof config;
+    const proposer = new LlmProposer(unpriced);
+    await proposer.propose({
+      modes: [MODE],
+      assets,
+      config: unpriced,
+      client: scriptedClient([endTurn('你审稿。输出必须以「结论：」开头。')]),
+    });
+    assert.equal(proposer.costUsd, undefined);
+    assert.equal(proposer.costKnown, false);
+  });
+
+  it('RSI 预算把提案花费算进去（此前只记基线与候选）', async () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'harness.config.json'),
+      JSON.stringify({ model: 'claude-opus-5' }),
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const agent = assets.agents[0];
+    assert.ok(agent !== undefined);
+
+    const report = await runCycle({
+      config,
+      assets,
+      client: scriptedClient([endTurn('不合格')]),
+      maxCostUsd: 0.1,
+      proposer: {
+        costUsd: 0.5,
+        costKnown: true,
+        propose: async (ctx) => [
+          {
+            id: 'p-cost',
+            modeId: ctx.modes[0]?.id ?? 'm',
+            kind: 'wrong_answer',
+            rationale: 't',
+            layer: 'L1',
+            patch: { target: 'agent:main', before: agent.body, after: '必须以「结论：」开头。' },
+          },
+        ],
+      },
+    });
+
+    assert.ok(report.costUsd >= 0.5, `提案的 $0.5 必须进账，实际 $${report.costUsd}`);
+    assert.equal(report.budget?.stopped, true);
+    assert.equal(report.accepted.length, 0);
+  });
+});
+
+describe('轮次记录落盘', () => {
+  it('cycle JSON 是完整可读的，且不留 .rsi-tmp 半截文件', async () => {
+    const root = project();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const report = await runCycle({
+      config,
+      assets,
+      client: scriptedClient([endTurn('结论：合格')]),
+      proposer: { propose: async () => [] },
+    });
+
+    const parsed = JSON.parse(readFileSync(report.path, 'utf8')) as { cycleId: string };
+    assert.equal(parsed.cycleId, report.cycleId);
+    const dir = join(root, '.workspace', 'rsi', 'cycles');
+    assert.deepEqual(
+      readdirSync(dir).filter((f) => f.endsWith('.rsi-tmp')),
+      [],
+      '原子写成功后临时文件必须已 rename 掉',
+    );
   });
 });

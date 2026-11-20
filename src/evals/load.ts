@@ -4,6 +4,16 @@ import { HarnessError } from '../errors.js';
 import { list, parseFrontmatter, scalar } from '../util/frontmatter.js';
 import type { EvalCase, EvalExpect } from './types.js';
 
+/** 用例 frontmatter 白名单：多写一个断言键就静默少一道门，比配置拼错更难发现 */
+const CASE_KEYS: readonly string[] = [
+  'name',
+  'expect_contains',
+  'expect_tools',
+  'expect_matches',
+  'expect_ok',
+  'expect_max_tokens',
+];
+
 /**
  * 加载 `evals/` —— 一个文件一个用例，Markdown。
  *
@@ -53,6 +63,14 @@ function collect(dir: string): string[] {
 
 function parseCase(path: string): EvalCase {
   const fm = parseFrontmatter(readFileSync(path, 'utf8'), path);
+  for (const key of Object.keys(fm.data)) {
+    if (!CASE_KEYS.includes(key)) {
+      throw new HarnessError(
+        'eval.invalid',
+        `${path}: 不认识的用例字段 "${key}"（只认 ${CASE_KEYS.join(' / ')}）—— 拼错的断言会被静默丢掉`,
+      );
+    }
+  }
   const name = scalar(fm, 'name', path) ?? path.replace(/.*\//, '').replace(/\.md$/, '');
   const task = fm.body.trim();
   if (task === '') {
@@ -71,6 +89,16 @@ function parseCase(path: string): EvalCase {
   const maxTokensNum = maxTokens === undefined ? undefined : Number(maxTokens);
   if (maxTokensNum !== undefined && (!Number.isFinite(maxTokensNum) || maxTokensNum <= 0)) {
     throw new HarnessError('eval.invalid', `${path}: expect_max_tokens 应为正数`);
+  }
+
+  // 正则在加载期编译：`check()` 里才 new RegExp 的话，坏正则会让**用例跑到一半**
+  // 抛异常，而不是在评测开始前以 eval.invalid（退出码 2）响亮失败。
+  if (matches !== undefined) {
+    try {
+      new RegExp(matches);
+    } catch (e) {
+      throw new HarnessError('eval.invalid', `${path}: expect_matches 不是合法正则: ${matches}`, e);
+    }
   }
 
   const expect: EvalExpect = {

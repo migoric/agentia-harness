@@ -85,6 +85,7 @@ export async function evalCommand(ctx: CliContext): Promise<number> {
     assets: assetsOf(ctx),
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...(only !== undefined ? { only } : {}),
+    ...(boolFlag(ctx.flags, 'keep-traces') ? { keepTraces: true } : {}),
     ...tuning,
   });
 

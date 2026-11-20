@@ -201,11 +201,16 @@ harness eval            跑评测集；有失败退出码 1
   --save <文件>         存报告，供 report 对比
   --only <a,b>          只跑这些用例
   --timeout/--concurrency/--retries   见上表
+  --keep-traces         把 trace 落盘（默认不落；失败用例报告里带 traceId）
 harness report <基线.json> <候选.json>   两份报告比一次并过门；门不过退出码 1
+  --max-token-growth <r> / --max-cost-growth <r>   两种门阈值
 harness trace <traceId> 打印那次运行的 span 树（可用前缀；--tail n 只看最后 n 条）
 harness lock            按当前资产重写锁
 harness lock --check    校验资产与锁一致（CI 用），不一致退出码 1
 harness rsi             跑一轮闭环
+  --dry-run             只验证不落盘（记录仍写盘，供人审）
+  --max-cost <usd>      本轮总预算（含提案、基线、候选；覆盖配置 maxCostUsd）
+  --timeout/--concurrency/--retries   见上表
 harness rsi --dry-run   只验证不落盘（记录仍写盘，供人审）
 harness rsi revert      回滚最近一次采纳
 harness rsi status      采纳历史
@@ -218,6 +223,11 @@ harness patch <diff>    验证一个代码补丁（在 git worktree 沙箱里跑
 ```
 
 退出码是接口的一部分：`0` 正常、`1` 跑了但没达标（断言/门未过）、`2` 配置/资产/用法错。
+
+**拼错字段一律退出码 2**：配置顶层与 `endpoint` / `pricing` / `code` 的未知键、eval
+frontmatter 里的未知 `expect_*`、CLI 的未知 flag、非数字的 `--timeout` 都会被当场拒绝。
+这不是洁癖 —— 这些错此前都表现为「配了但没生效」，而症状会出现在成本或通过率上，
+没人会往拼写上想。预算与迭代上限还必须是正数：`0` 在 agentia 里是「不设上限」。
 
 `harness trace` 的存在理由：RSI 归因读的是**汇总**（失败模式、命中统计），人查问题读的是**链路**（谁调了谁、在哪一步炸的）。没有它，`.workspace/traces.jsonl` 只是一堆没人会去 grep 的日志。
 
@@ -277,9 +287,11 @@ L1 改的是提示词，能修的是「模型理解错了」。有些失败改�
 - **没有自己的预算账本**：累计成本靠外层 run 或宿主推进。
 - **server 是缝不是产品**：只有 `/run` 与 `/health`。要会话、审批、SSE，用 agentia 的 `transport/`。
 - **依赖走本地路径**：`@migor/agentia` 用 `file:../agentia`（上游尚未发 npm）。发版前需改成版本号。
-- **没在真模型上跑过**：本仓没有模型凭据。`run` / `eval` / `rsi` 走的是**真实 HTTP 客户端**
-  （fetch、SSE 拼装、重试、usage→成本），但对面是本地假端点（`scripts/fake-anthropic.mjs`），
-  不是真模型。所以「提示词好不好」「模型会不会选对工具」这两类问题，本仓的测试答不了。
+- **真模型验证只跑了 `run` / `eval`，没跑完整 `rsi` 采纳**：DeepSeek 官方端点上的实测数字
+  见 `examples/starter/README.md`。提示词质量、工具选择这类问题只有真模型答得了，本仓的
+  脚本测试答不了；离线 e2e 覆盖的是 fetch / SSE / 重试 / 成本换算那一层。
+- **评测默认不落 trace**：`harness eval --keep-traces` 才落盘，同时把 `traceId` 写进报告
+  （失败用例会打印出来）。缺省不落是纪律 —— 评测反复跑会把 `traces.jsonl` 撑成垃圾场。
 
 ## 开发
 

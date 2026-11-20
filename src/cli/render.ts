@@ -87,7 +87,9 @@ export function renderReport(report: EvalReport): string {
   const lines: string[] = [];
   for (const c of report.cases) {
     lines.push(
-      `${c.passed ? 'PASS' : 'FAIL'}  ${c.name}  (${c.tokens} token${fmtCost(c.costUsd)}, ${c.iterations} 轮)`,
+      `${c.passed ? 'PASS' : 'FAIL'}  ${c.name}  (${c.tokens} token${fmtCost(c.costUsd)}, ${c.iterations} 轮)` +
+        // 只给失败用例附上 traceId：成功用例也可以有，但打出来全是噪声
+        (c.passed || c.traceId === undefined ? '' : `  trace ${c.traceId}`),
     );
     for (const f of c.failures) lines.push(`      - ${f}`);
   }

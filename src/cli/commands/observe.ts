@@ -74,8 +74,12 @@ export function reportCommand(
   }
   const baseline = readReport(ctx.root, baselinePath);
   const candidate = readReport(ctx.root, candidatePath);
-  const growth = numFlag(ctx.flags, 'max-token-growth');
-  const g = gate(baseline, candidate, growth !== undefined ? { maxTokenGrowth: growth } : {});
+  const tokenGrowth = numFlag(ctx.flags, 'max-token-growth');
+  const costGrowth = numFlag(ctx.flags, 'max-cost-growth');
+  const g = gate(baseline, candidate, {
+    ...(tokenGrowth !== undefined ? { maxTokenGrowth: tokenGrowth } : {}),
+    ...(costGrowth !== undefined ? { maxCostGrowth: costGrowth } : {}),
+  });
   if (boolFlag(ctx.flags, 'json')) json(g);
   else say(renderComparison(baseline, candidate, g));
   return g.ok ? 0 : 1;

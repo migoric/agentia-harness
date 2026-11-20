@@ -24,6 +24,20 @@
   不生效），现在 `run` 会在结尾点明是哪一种。
 
 - **`examples/starter/`**：一个接 DeepSeek 端点、能直接跑的完整工程。
+- **`eval --keep-traces`**：注释里承诺过但一直没实现。现在可显式把每次评测的 trace
+  落盘，并把 `traceId` 写进报告（失败用例会打印），供 `harness trace <id>` 回查；
+  缺省仍不落盘。
+- **`report --max-cost-growth`**：门早已支持成本阈值，此前只有 token 阈值能从 CLI 调。
+
+### 严格化（拼错就退出码 2）
+
+此前这几类错全都表现为「配了但没生效」，症状出现在成本或通过率上，没人会往拼写上想：
+
+- 配置顶层 / `endpoint` / `pricing` / `code` 的未知键（后者注释承诺过、实现漏了）；
+- eval frontmatter 的未知 `expect_*`；非法 `expect_matches` 正则现在在加载期就炸，
+  不再等用例跑到一半；
+- CLI 未知 flag；`--timeout abc` 此前静默等于「不设超时」；
+- `maxCostUsd` / `maxIterations` 必须是正数 —— `0` 在 agentia 里是「不设上限」。
 
 ### 修复
 
@@ -32,6 +46,10 @@
   真端点未必报错，但成本按 Opus 单价记（实测一轮 1158 token 记成 $0.02375，实际约
   $0.0006），`maxCostUsd` 会提前刹车。现在把工程生效模型与迭代上限一路传给所有子循环
   （资产自己的 `model` 仍优先）。真端点复跑后同样用量从 $0.024 降到 $0.00071。
+- **RSI 提案器用回缺省模型、且花费不计入预算**：`LlmProposer` 只认构造参数的 `model`
+  （CLI 从不传），与技能踩过同一个坑；它的模型调用也没进 `CycleBudget`。现在用与
+  buildApp 同源的生效模型与价格表，并把提案花费（含「不可知」状态）回到轮次记录。
+- **RSI 轮次记录改为原子写**（与 journal 同款 tmp + rename）：半截审计记录比没有更糟。
 - **端点不报 usage 时成本被算成 `0`**：模型在价格表里时，上游按「0 token × 单价」
   算出 `costEstimate = 0`，与「真的一分没花」是同一个数 ⇒ `costKnown` 判成 true，
   预算闸与回归门一起静默失效。现在按 trace 里的 `usage.missing` 事件把这种情况折回

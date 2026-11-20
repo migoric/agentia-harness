@@ -100,10 +100,26 @@ interface RawConfig {
   pricing?: unknown;
 }
 
+/** 顶层键白名单：拼错一个键（如 `modle`）静默吃缺省是最难查的一类错 */
+const CONFIG_KEYS: readonly string[] = [
+  'skills',
+  'agents',
+  'evals',
+  'workspace',
+  'appName',
+  'model',
+  'maxIterations',
+  'maxCostUsd',
+  'code',
+  'endpoint',
+  'pricing',
+];
+
 export function loadConfig(root: string): HarnessConfig {
   const absRoot = resolve(root);
   const cfgPath = join(absRoot, CONFIG_FILENAME);
   const raw: RawConfig = existsSync(cfgPath) ? readJson(cfgPath) : {};
+  rejectUnknownKeys(raw, CONFIG_FILENAME, CONFIG_KEYS);
 
   const workspaceDir = joinPath(
     absRoot,
@@ -120,8 +136,8 @@ export function loadConfig(root: string): HarnessConfig {
     tracesPath: join(workspaceDir, 'traces.jsonl'),
     appName: readString(raw.appName, 'appName') ?? DEFAULTS.appName,
     model: readString(raw.model, 'model'),
-    maxIterations: readNumber(raw.maxIterations, 'maxIterations'),
-    maxCostUsd: readNumber(raw.maxCostUsd, 'maxCostUsd'),
+    maxIterations: positiveNumber(raw.maxIterations, 'maxIterations'),
+    maxCostUsd: positiveNumber(raw.maxCostUsd, 'maxCostUsd'),
     pricing: readPricing(raw.pricing),
     ...readEndpoint(raw.endpoint),
     ...readCode(raw.code),
@@ -228,7 +244,9 @@ function rejectUnknownKeys(v: object, where: string, allowed: readonly string[])
 const CODE_DEFAULTS = {
   verify: ['npm', 'test'] as readonly string[],
   timeoutMs: 600_000,
-}; /** `code` 段：形状错就炸（配置错必须响亮，否则会以「验证永远失败」的形式出现） */
+};
+
+/** `code` 段：形状错就炸（配置错必须响亮，否则会以「验证永远失败」的形式出现） */
 function readCode(v: unknown): { codeVerify: readonly string[]; codeVerifyTimeoutMs: number } {
   if (v === undefined) {
     return { codeVerify: CODE_DEFAULTS.verify, codeVerifyTimeoutMs: CODE_DEFAULTS.timeoutMs };
@@ -236,6 +254,7 @@ function readCode(v: unknown): { codeVerify: readonly string[]; codeVerifyTimeou
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
     throw new HarnessError('config.invalid', '配置字段 "code" 应为对象');
   }
+  rejectUnknownKeys(v, 'code', ['verify', 'timeoutMs']);
   const { verify, timeoutMs } = v as { verify?: unknown; timeoutMs?: unknown };
   let cmd = CODE_DEFAULTS.verify;
   if (verify !== undefined) {
@@ -305,4 +324,16 @@ function readNumber(v: unknown, key: string): number | undefined {
     throw new HarnessError('config.invalid', `配置字段 "${key}" 应为有限数字`);
   }
   return v;
+}
+
+/**
+ * 预算 / 步数必须是正数：`0` 和负数在 agentia 里是「不设上限」而不是「一步都不能走」，
+ * 写错的后果是护栏静默消失 —— 那比没有护栏更糟，因为报告里看不出来。
+ */
+function positiveNumber(v: unknown, key: string): number | undefined {
+  const n = readNumber(v, key);
+  if (n !== undefined && n <= 0) {
+    throw new HarnessError('config.invalid', `配置字段 "${key}" 必须为正数（收到 ${n}）`);
+  }
+  return n;
 }

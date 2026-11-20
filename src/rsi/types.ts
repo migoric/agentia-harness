@@ -146,7 +146,7 @@ export interface CycleReport {
   readonly baseline: EvalReport | undefined;
   /** 只验证不落盘（人审模式）—— 落盘记录里必须自证，否则事后分不清「采纳了没」 */
   readonly dryRun: boolean;
-  /** 本轮累计美元成本（基线 + 已验证的候选） */
+  /** 本轮累计美元成本（提案 + 基线 + 已验证的候选） */
   readonly costUsd: number;
   /** 所有参与比较的报告都有成本读数；false 时 `costUsd` 偏低，预算闸不可用 */
   readonly costKnown: boolean;

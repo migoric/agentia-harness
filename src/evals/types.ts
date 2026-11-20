@@ -46,6 +46,11 @@ export interface CaseResult {
   readonly stopReason: string;
   /** 断言失败时给出最终文本，便于人眼看（裁剪到 400 字） */
   readonly excerpt: string;
+  /**
+   * 本次运行的 traceId —— 报告与 `harness trace <id>` 的交叉引用。
+   * 跑崩 / 超时时没有可用 trace，此字段缺席（不是空串）。
+   */
+  readonly traceId?: string | undefined;
   /** 本次实际调用过的技能（去重）—— RSI 据此判断「该改哪个文件」 */
   readonly skills: readonly string[];
   /** 本次实际委派过的子 agent（去重） */

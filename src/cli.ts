@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { join, resolve } from 'node:path';
 import { loadEnvFile } from '@migor/agentia';
-import { parseArgs, strFlag } from './cli/args.js';
+import { assertKnownFlags, parseArgs, strFlag } from './cli/args.js';
 import { lockCommand } from './cli/commands/assets.js';
 import { reportCommand, traceCommand } from './cli/commands/observe.js';
 import { patchCommand } from './cli/commands/patch.js';
@@ -36,9 +36,11 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --timeout <ms>        单条用例超时（超时按失败记）
     --concurrency <n>     并发跑几条（缺省 1：串行，成本最好归因）
     --retries <n>         只对「跑崩了」重试几次（断言失败不重试）
+    --keep-traces         把每次运行的 trace 落盘（默认不落，供失败后回查链路）
   report <基线.json> <候选.json>
                           两份报告比一次并过回归门；门不过退出码 1
     --max-token-growth <r>  通过率不变时允许的 token 增幅（0.1 = 10%）
+    --max-cost-growth <r>   成本可比时允许的成本增幅（缺省跟随 token 阈值）
   trace <traceId>         打印那次运行的 span 树（可用前缀）
     --tail <n>            只看 traces.jsonl 最后 n 行（大文件用）
     --json                输出原始 trace
@@ -49,6 +51,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --max-modes <n>       最多给几个失败模式提方案（缺省 3）
     --max-verify <n>      最多验证几个提案（缺省 3）
     --max-cost <usd>      本轮成本上限（覆盖配置 maxCostUsd）
+    --timeout/--concurrency/--retries   见 eval 节
   rsi revert              回滚最近一次采纳
   rsi status              看采纳历史
   patch <diff>             验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
@@ -66,9 +69,27 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   --json                  机器可读输出
 `;
 
+/** 全局 flag —— 每个命令都收；其余按命令白名单给（拼错就退出码 2） */
+const GLOBAL_FLAGS = ['root', 'agent', 'json'] as const;
+const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  init: [],
+  run: [],
+  eval: ['save', 'only', 'keep-traces', 'timeout', 'concurrency', 'retries'],
+  report: ['max-token-growth', 'max-cost-growth'],
+  trace: ['tail'],
+  lock: ['check'],
+  rsi: ['dry-run', 'max-modes', 'max-verify', 'max-cost', 'timeout', 'concurrency', 'retries'],
+  patch: ['yes', 'verify', 'timeout', 'revert'],
+  serve: ['port', 'host', 'timeout'],
+};
+
 async function main(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
+  const allowed = cmd === undefined ? undefined : COMMAND_FLAGS[cmd];
+  if (cmd !== undefined && allowed !== undefined) {
+    assertKnownFlags(args.flags, [...GLOBAL_FLAGS, ...allowed], cmd);
+  }
   const root = resolve(strFlag(args.flags, 'root') ?? process.cwd());
 
   if (cmd === undefined || cmd === 'help' || cmd === '--help' || cmd === '-h') {

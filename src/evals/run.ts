@@ -45,6 +45,13 @@ export interface RunSuiteOptions extends SuiteTuning {
   readonly agent?: string | undefined;
   /** 注入模型客户端（测试与重放用）；不传走真实模型 */
   readonly client?: ModelClient | undefined;
+  /**
+   * 是否把每次评测运行的 trace 落盘（缺省不落）。
+   *
+   * 缺省不落是纪律：评测会跑几十上百次，落盘会把 `traces.jsonl` 变成垃圾场。
+   * 需要回查某条失败用例的链路时显式开，报告里的 `traceId` 才有用。
+   */
+  readonly keepTraces?: boolean | undefined;
   readonly signal?: AbortSignal | undefined;
   /** 只跑这些用例（按名） */
   readonly only?: readonly string[] | undefined;
@@ -64,7 +71,7 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
     throw new HarnessError('eval.invalid', `--only 没有匹配到任何用例: ${opts.only?.join(', ')}`);
   }
 
-  const runner = createRunner(opts.config, opts.assets, opts.agent, false);
+  const runner = createRunner(opts.config, opts.assets, opts.agent, opts.keepTraces === true);
   const limit = Math.max(1, opts.concurrency ?? 1);
   const results = await mapLimit(cases, limit, (c) => runOne(runner, c, opts));
   return summarize(
@@ -174,6 +181,7 @@ async function runOne(
     durationMs: out.durationMs,
     stopReason: out.stopReason,
     excerpt: out.text.slice(0, 400),
+    traceId: out.trace.traceId,
     skills: out.skills,
     subagents: out.subagents,
   };

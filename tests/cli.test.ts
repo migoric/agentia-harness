@@ -208,3 +208,68 @@ describe('凭据缺失只拦「真会调模型」的命令', () => {
     assert.equal(r.code, 1, `凭据过了之后应在调用阶段失败（退出码 1），实际 ${String(r.code)}`);
   });
 });
+
+describe('CLI 参数严格化', () => {
+  it('未知 flag 退出码 2，并点名拼错的那个（不再静默当成没传）', () => {
+    const dir = tmp();
+    const r = run(['eval', '--saveh', 'x.json'], dir);
+    assert.equal(r.code, 2, r.out);
+    assert.match(r.out, /不认识 --saveh/);
+  });
+
+  it('非数字 flag 退出码 2（--timeout abc 此前等于「不设超时」）', () => {
+    const dir = tmp();
+    const r = run(['eval', '--timeout', 'abc'], dir);
+    assert.equal(r.code, 2, r.out);
+    assert.match(r.out, /--timeout 需要数字/);
+  });
+
+  it('report 的 --max-cost-growth 真的接到门上', () => {
+    const dir = tmp();
+    const mk = (costUsd: number) => ({
+      total: 1,
+      passed: 1,
+      passRate: 1,
+      tokens: 100,
+      costUsd,
+      costKnown: true,
+      cases: [
+        {
+          name: 'c1',
+          passed: true,
+          failures: [],
+          tokens: 100,
+          costUsd,
+          iterations: 1,
+          durationMs: 1,
+          stopReason: 'end_turn',
+          excerpt: '',
+          skills: [],
+          subagents: [],
+        },
+      ],
+      assetFingerprint: 'a',
+      agent: 'main@1',
+      skillHits: [],
+    });
+    writeFileSync(join(dir, 'base.json'), JSON.stringify(mk(0.01)), 'utf8');
+    writeFileSync(join(dir, 'cand.json'), JSON.stringify(mk(0.0105)), 'utf8');
+
+    const loose = run(['report', 'base.json', 'cand.json'], dir);
+    assert.equal(loose.code, 0, loose.out);
+    const tight = run(['report', 'base.json', 'cand.json', '--max-cost-growth', '0.01'], dir);
+    assert.equal(tight.code, 1, tight.out);
+    assert.match(tight.out, /成本/);
+  });
+});
+
+it('eval --keep-traces 是合法 flag（此前只在注释里存在）', () => {
+  const dir = tmp();
+  run(['init'], dir);
+  const r = run(['eval', '--keep-traces'], dir, {
+    ANTHROPIC_API_KEY: undefined,
+    ANTHROPIC_BASE_URL: undefined,
+  });
+  assert.doesNotMatch(r.out, /不认识 --keep-traces/, r.out);
+  assert.notEqual(r.code, 2, r.out);
+});

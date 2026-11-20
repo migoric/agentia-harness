@@ -1,3 +1,5 @@
+import { HarnessError } from '../errors.js';
+
 /**
  * 命令行参数解析。
  *
@@ -46,11 +48,32 @@ export function boolFlag(flags: Flags, key: string): boolean {
   return flags[key] === true;
 }
 
+/**
+ * 未知 flag 一律退出码 2。此前 `--saveh report.json` 会被当成「没传 --save」，
+ * 命令还返回 0 ——  CI 以为报告存过了，事后才发现目录里什么都没有。
+ *
+ * 调用方传的是**本命令**的白名单（全局 flag 自行并入）。
+ */
+export function assertKnownFlags(flags: Flags, allowed: readonly string[], cmd: string): void {
+  for (const key of Object.keys(flags)) {
+    if (!allowed.includes(key)) {
+      throw new HarnessError(
+        'config.invalid',
+        `harness ${cmd} 不认识 --${key}（可用: ${[...allowed].sort().join(', ')}）`,
+      );
+    }
+  }
+}
+
 export function numFlag(flags: Flags, key: string): number | undefined {
-  const v = strFlag(flags, key);
-  if (v === undefined) return undefined;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : undefined;
+  const raw = flags[key];
+  if (raw === undefined) return undefined;
+  // 非数字此前返回 undefined ⇒ `--timeout abc` 等于「不超时」，而命令还报成功。
+  // 预算与超时都是安全门，写错必须响亮。
+  if (typeof raw !== 'string' || raw.trim() === '' || !Number.isFinite(Number(raw))) {
+    throw new HarnessError('config.invalid', `--${key} 需要数字（收到 ${String(raw)}）`);
+  }
+  return Number(raw);
 }
 
 /** 逗号分隔的列表；空串与缺席都返回 undefined（「没传」与「传了空」不是一回事） */
