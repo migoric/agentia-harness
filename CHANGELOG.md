@@ -28,6 +28,19 @@
   落盘，并把 `traceId` 写进报告（失败用例会打印），供 `harness trace <id>` 回查；
   缺省仍不落盘。
 - **`report --max-cost-growth`**：门早已支持成本阈值，此前只有 token 阈值能从 CLI 调。
+- **eval 断言扩到十类**：新增 `expect_not_contains` / `expect_skills` / `expect_max_iterations`
+  与 `expect_tool_counts`（精确调用次数）、`expect_tool_args`（入参子串）。此前「输出不得
+  包含 X」「某工具必须调两次且带某参数」这类回归无法表达。工具事件提取收在
+  `evals/tool-events.ts`，序列、次数、参数三种断言共用一份扫描，不再各扫一遍 trace。
+- **`harness harvest <traceId>`**：把失败 trace 回流成 `evals/harvest-*.md`。trace 里没有
+  任务原文，所以必须给 `--task` 或用 `--from-report` 从评测报告反查；前缀有歧义时拒绝，
+  已有用例不覆盖。自动生成的断言只有 `expect_ok: true` —— trace 记的是实际行为而非正确行为，
+  把当时调过的工具固化成断言等于把错误一起固化，结果类断言留给人补。
+- **手写提案的 CLI 入口**：`rsi propose --from <json>` 登记、`rsi accept --from <json>` 采纳。
+  提案来源可以是人，门不能变 —— 手写提案照样跑完整两遍评测与回归门，没有跳门的 `--yes`；
+  `patch.before` 与当前正文逐字不匹配时，在验证层的乐观锁处就被拒。
+- **`rsi revert [id]`**：指定 id 时必须是最近一条可回滚的采纳，否则拒绝。它是一道确认阀
+  （防止期间又采纳了别的而误退），不是「退任意一条」—— 回滚依据仍是 journal 里的 before。
 
 ### 严格化（拼错就退出码 2）
 
@@ -37,7 +50,8 @@
 - eval frontmatter 的未知 `expect_*`；非法 `expect_matches` 正则现在在加载期就炸，
   不再等用例跑到一半；
 - CLI 未知 flag；`--timeout abc` 此前静默等于「不设超时」；
-- `maxCostUsd` / `maxIterations` 必须是正数 —— `0` 在 agentia 里是「不设上限」。
+- `maxCostUsd` / `maxIterations` 必须是正数 —— `0` 在 agentia 里是「不设上限」；
+- 手写提案 JSON 的未知字段、非法 `kind` / `target` / `id`（id 会当文件名用）、空 `after`。
 
 ### 修复
 

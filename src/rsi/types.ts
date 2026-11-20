@@ -26,6 +26,17 @@ export type FailureKind =
   | 'stop_abnormal'
   | 'unknown';
 
+/** 外部提案校验用的枚举清单 —— 与上面的类型同源，避免两处各写一份而漂移 */
+export const FAILURE_KINDS = [
+  'wrong_answer',
+  'tool_misuse',
+  'tool_error',
+  'loop',
+  'budget',
+  'stop_abnormal',
+  'unknown',
+] as const satisfies readonly FailureKind[];
+
 /** 一条失败样本：来自某个 eval case 的一次真实运行 */
 export interface FailureSample {
   readonly case: string;

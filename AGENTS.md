@@ -149,3 +149,14 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
   runner 与提案器都用它，别再各写一份 `usage.missing` 字面量。
 - **RSI 的 cycle JSON 与 journal 一样原子写**（`journal.ts` 的 `atomicWrite`）：
   半截审计记录比没有更糟。
+- **工具事件只有一个出口**：`evals/tool-events.ts` 的 `toolInvocations()`。序列、次数、
+  参数三种断言共用同一份扫描；上游把 `tool.input` 改名时，靠真实 trace 的测试报警
+  （字面量不能 import，它不在 agentia 公共导出面）。
+- **trace 里没有任务原文**：root span 只记模型与配置。`harvest` 的 task 必须来自
+  `--task` 或 `--from-report` 反查，不要从 span 里猜；自动生成的断言只覆盖过程类回归，
+  结果类断言（`expect_contains` / `expect_matches`）必须留给人补。
+- **提案来源可以变，门不能变**：`rsi accept --from` 走的是与 LLM 提案相同的
+  `verifyProposal` + `gate`，**不要加跳门的 `--yes`**。手写提案的 id 会当文件名，
+  校验必须挡住路径逃逸；`patch.before` 与正文逐字不等时在乐观锁处就拒。
+- **`rsi revert <id>` 是确认阀，不是任意回滚**：只接受最近一条采纳的 id —— 回滚依据
+  仍是 journal 的 before，退中间一条会覆盖后续改动。原有指纹保护不能因为加了 id 而放松。

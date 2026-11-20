@@ -1,20 +1,80 @@
+import { resolve } from 'node:path';
 import { HarnessError } from '../../errors.js';
-import { readJournal, revertLast } from '../../rsi/accept.js';
+import { runSuite } from '../../evals/run.js';
+import { acceptProposal, readJournal, revertLast } from '../../rsi/accept.js';
 import { runCycle } from '../../rsi/loop.js';
+import { readProposal, writeProposal } from '../../rsi/manual.js';
 import { LlmProposer } from '../../rsi/propose.js';
-import { boolFlag, numFlag } from '../args.js';
+import { verifyProposal } from '../../rsi/verify.js';
+import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { tuningOf } from './run.js';
 
-/** `harness rsi [revert|status]` —— 闭环的三个入口 */
-export async function rsiCommand(ctx: CliContext, sub: string | undefined): Promise<number> {
-  if (sub === 'revert') return revert(ctx);
+/** `harness rsi [revert|status|propose|accept]` —— 闭环的入口 */
+export async function rsiCommand(
+  ctx: CliContext,
+  sub: string | undefined,
+  argsId?: string,
+): Promise<number> {
+  if (sub === 'revert') return revert(ctx, argsId);
   if (sub === 'status') return status(ctx);
+  if (sub === 'propose') return proposeFrom(ctx);
+  if (sub === 'accept') return acceptFrom(ctx);
   if (sub !== undefined) {
-    throw new HarnessError('config.invalid', `rsi 没有子命令 "${sub}"（可用: revert, status）`);
+    throw new HarnessError(
+      'config.invalid',
+      `rsi 没有子命令 "${sub}"（可用: revert, status, propose, accept）`,
+    );
   }
   return cycle(ctx);
+}
+
+function fromFlag(ctx: CliContext, sub: string): string {
+  const p = strFlag(ctx.flags, 'from');
+  if (p === undefined) {
+    throw new HarnessError('config.invalid', `rsi ${sub} 需要 --from <提案.json>`);
+  }
+  return resolve(ctx.root, p);
+}
+
+/** 登记一份手写的 L1 提案。只校验与落盘，不调模型、不改源文件 */
+function proposeFrom(ctx: CliContext): number {
+  const proposal = readProposal(fromFlag(ctx, 'propose'));
+  const path = writeProposal(ctx.config, proposal);
+  if (boolFlag(ctx.flags, 'json')) json({ id: proposal.id, path });
+  else say(`已登记手写提案 ${proposal.id} → ${path}`);
+  return 0;
+}
+
+/**
+ * 采纳手写提案。**同样跑完整的两遍评测 + 回归门** —— 来源可以变，门不能变。
+ *
+ * 没有 `--yes` 之类的跳门开关是刻意的：`acceptManually` 作为库 API 存在，但把它
+ * 暴露成 CLI 选项，等于给「评测门在 RSI 写权限之外」这条不变量开后门。
+ */
+async function acceptFrom(ctx: CliContext): Promise<number> {
+  const proposal = readProposal(fromFlag(ctx, 'accept'));
+  const assets = assetsOf(ctx);
+  const shared = {
+    config: ctx.config,
+    assets,
+    ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
+    ...tuningOf(ctx),
+  };
+  const baseline = await runSuite(shared);
+  const outcome = await verifyProposal({ ...shared, baseline, proposal });
+  if (!outcome.gate.ok) {
+    warn(`验证门未通过，拒绝采纳 ${proposal.id}：${outcome.gate.reason}`);
+    return 1;
+  }
+  if (boolFlag(ctx.flags, 'dry-run')) {
+    say(`dry-run：${proposal.id} 过了门，未落盘（${outcome.gate.reason}）`);
+    return 0;
+  }
+  const entry = acceptProposal(ctx.config, assets, outcome);
+  say(`已采纳 ${entry.proposalId} → ${entry.target}（${entry.reason}）`);
+  return 0;
 }
 
 async function cycle(ctx: CliContext): Promise<number> {
@@ -82,8 +142,8 @@ async function cycle(ctx: CliContext): Promise<number> {
   return report.accepted.length > 0 ? 0 : 1;
 }
 
-function revert(ctx: CliContext): number {
-  const r = revertLast(ctx.config);
+function revert(ctx: CliContext, id: string | undefined): number {
+  const r = revertLast(ctx.config, id);
   say(`已回滚 ${r.entry.proposalId}：${r.entry.target}`);
   return 0;
 }

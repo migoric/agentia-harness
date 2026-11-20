@@ -4,19 +4,35 @@
  * 一个 eval case = 一段任务 + 一组**从 trace 就能断言**的期望。刻意不用 LLM 当裁判：
  * 裁判本身不确定，RSI 就没法判断自己的改动是不是真的变好了（会把随机波动当成进步）。
  *
- * 断言分三类，覆盖「结果对不对」「过程对不对」：
- * - `contains` / `matches`：最终文本（结果）
- * - `tools`：主循环调用过的工具序列（过程）—— 断言「先查再改」这类顺序，只能从 trace 读
- * - `ok`：是否正常收尾（缺省 true）
+ * 断言覆盖「结果对不对」「过程对不对」：
+ * - 结果：`contains` / `notContains` / `matches` —— 最终文本
+ * - 过程：`tools`（顺序）、`toolCounts`（次数）、`toolArgs`（入参）、`skills`（命中能力）
+ * - 边界：`ok`（收尾状态）、`maxTokens`、`maxIterations`
+ *
+ * 全部是规则式判定，没有一条依赖模型 —— 裁判不确定，RSI 就会把随机波动当进步。
  */
+export interface ToolArgExpect {
+  readonly tool: string;
+  /** 入参文本里必须出现的子串 */
+  readonly substring: string;
+}
+
 export interface EvalExpect {
   readonly contains?: readonly string[];
+  readonly notContains?: readonly string[];
   readonly matches?: string;
   /** 必须出现的工具名，按出现顺序（子序列匹配，允许中间夹别的调用） */
   readonly tools?: readonly string[];
+  /** 工具名 → **精确**调用次数（与 `tools` 的子序列语义不同，刻意分开） */
+  readonly toolCounts?: Readonly<Record<string, number>>;
+  /** 某工具的入参必须包含某子串（至少一次） */
+  readonly toolArgs?: readonly ToolArgExpect[];
+  /** 必须命中的技能（去重集合的子集，不看次数） */
+  readonly skills?: readonly string[];
   readonly ok?: boolean;
   /** 最多允许多少 token（超了算失败）—— 用它把「靠堆循环混过去」挡在门外 */
   readonly maxTokens?: number;
+  readonly maxIterations?: number;
 }
 
 export interface EvalCase {

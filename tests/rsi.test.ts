@@ -276,8 +276,11 @@ describe('闭环：验证 → 采纳 → 回滚', () => {
     // journal 有一条
     assert.equal(readJournal(config).length, 1);
 
-    // 回滚逐字恢复原文件
-    const r = revertLast(config);
+    // 指定错误 id 时拒绝 —— 防止期间插入了新采纳而误退
+    assert.throws(() => revertLast(config, 'p-someone-else'), /最近一条可回滚的采纳是 p-good/);
+
+    // 指定正确 id 才回滚，逐字恢复原文件
+    const r = revertLast(config, 'p-good');
     assert.equal(r.entry.status, 'rejected');
     assert.equal(readFileSync(agent.path, 'utf8'), original);
   });

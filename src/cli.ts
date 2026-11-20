@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { loadEnvFile } from '@migor/agentia';
 import { assertKnownFlags, parseArgs, strFlag } from './cli/args.js';
 import { lockCommand } from './cli/commands/assets.js';
+import { harvestCommand } from './cli/commands/harvest.js';
 import { reportCommand, traceCommand } from './cli/commands/observe.js';
 import { patchCommand } from './cli/commands/patch.js';
 import { rsiCommand } from './cli/commands/rsi.js';
@@ -44,6 +45,9 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   trace <traceId>         打印那次运行的 span 树（可用前缀）
     --tail <n>            只看 traces.jsonl 最后 n 行（大文件用）
     --json                输出原始 trace
+  harvest <traceId>       把一条 trace 回流成 eval/<name>.md 回归用例
+    --task <文本>         任务原文（trace 里没存，必须外来）
+    --from-report <文件>  或从 eval --save 的报告按 traceId 反查任务原文
   lock                    按当前资产重写 harness.lock.json
   lock --check            校验资产与锁是否一致（CI 用），不一致退出码 1
   rsi                     跑一轮 RSI：采集→归因→提案→验证→采纳
@@ -52,8 +56,10 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --max-verify <n>      最多验证几个提案（缺省 3）
     --max-cost <usd>      本轮成本上限（覆盖配置 maxCostUsd）
     --timeout/--concurrency/--retries   见 eval 节
-  rsi revert              回滚最近一次采纳
+  rsi revert [id]         回滚最近一次采纳（给 id 可防期间插入新采纳）
   rsi status              看采纳历史
+  rsi propose --from <json>  登记手写 L1 提案（不调模型）
+  rsi accept --from <json>   手写提案也要过完整验证门才能采纳
   patch <diff>             验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
     --yes                 验证通过后落盘（代码补丁必须人工确认）
     --verify "npm test"   覆盖配置里的验证命令
@@ -77,8 +83,18 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   eval: ['save', 'only', 'keep-traces', 'timeout', 'concurrency', 'retries'],
   report: ['max-token-growth', 'max-cost-growth'],
   trace: ['tail'],
+  harvest: ['task', 'from-report'],
   lock: ['check'],
-  rsi: ['dry-run', 'max-modes', 'max-verify', 'max-cost', 'timeout', 'concurrency', 'retries'],
+  rsi: [
+    'dry-run',
+    'max-modes',
+    'max-verify',
+    'max-cost',
+    'from',
+    'timeout',
+    'concurrency',
+    'retries',
+  ],
   patch: ['yes', 'verify', 'timeout', 'revert'],
   serve: ['port', 'host', 'timeout'],
 };
@@ -126,10 +142,12 @@ async function main(): Promise<number> {
       return reportCommand(ctx, args._[0], args._[1]);
     case 'trace':
       return traceCommand(ctx, args._[0]);
+    case 'harvest':
+      return harvestCommand(ctx, args._[0]);
     case 'lock':
       return lockCommand(ctx);
     case 'rsi':
-      return rsiCommand(ctx, args._[0]);
+      return rsiCommand(ctx, args._[0], args._[1]);
     case 'patch':
       return patchCommand(ctx, args._[0]);
     case 'serve':
@@ -149,12 +167,13 @@ function isUsageError(e: unknown): boolean {
 /**
  * 这条命令会调模型吗？
  *
- * `rsi` 的两个只读子命令（`status` / `revert`）不调：把「看历史记录」也拦在
- * 「先配好 key」后面，会让人以为 RSI 的记录依赖凭据。
+ * `rsi` 的 `status` / `revert` / `propose` 不调：把「看历史记录、登记手写提案」
+ * 也拦在「先配好 key」后面，会让人以为这些操作依赖凭据。
  */
 function needsModel(cmd: string, sub: string | undefined): boolean {
   if (cmd === 'run' || cmd === 'eval' || cmd === 'serve') return true;
-  if (cmd === 'rsi') return sub !== 'revert' && sub !== 'status';
+  // `rsi propose` 只是校验+落盘一份 JSON，不调模型；`accept` 要跑两遍评测
+  if (cmd === 'rsi') return sub === undefined || sub === 'accept';
   return false;
 }
 

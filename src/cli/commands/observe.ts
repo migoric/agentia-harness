@@ -1,13 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { Trace } from '@migor/agentia';
 import { HarnessError } from '../../errors.js';
 import { gate } from '../../evals/gate.js';
 import type { EvalReport } from '../../evals/types.js';
 import { boolFlag, numFlag } from '../args.js';
 import type { CliContext } from '../context.js';
-import { json, say, warn } from '../output.js';
+import { json, say } from '../output.js';
 import { renderComparison, renderTrace } from '../render.js';
+import { readTraces } from '../traces.js';
 
 /**
  * `harness trace <id>` —— 把一次运行的 span 树打出来。
@@ -20,7 +20,7 @@ export function traceCommand(ctx: CliContext, id: string | undefined): number {
   if (id === undefined) {
     throw new HarnessError('config.invalid', 'trace 需要一个 traceId（可用前缀匹配）');
   }
-  const traces = readTraces(ctx.config.tracesPath, numFlag(ctx.flags, 'tail'));
+  const traces = readTraces(ctx.config, numFlag(ctx.flags, 'tail'));
   const hit = traces.filter((t) => t.traceId.startsWith(id)).at(-1);
   if (hit === undefined) {
     throw new HarnessError(
@@ -31,29 +31,6 @@ export function traceCommand(ctx: CliContext, id: string | undefined): number {
   if (boolFlag(ctx.flags, 'json')) json(hit);
   else say(renderTrace(hit));
   return 0;
-}
-
-function readTraces(path: string, tail: number | undefined): Trace[] {
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch {
-    throw new HarnessError('run.failed', `读不到 ${path} —— 还没跑过任何任务（或路径不对）`);
-  }
-  const lines = text.split('\n').filter((l) => l.trim() !== '');
-  const slice = tail !== undefined && tail > 0 ? lines.slice(-tail) : lines;
-  const out: Trace[] = [];
-  let bad = 0;
-  for (const line of slice) {
-    try {
-      out.push(JSON.parse(line) as Trace);
-    } catch {
-      // 半行（进程被杀）不该让整条命令失败 —— 但也不能装作没看见
-      bad++;
-    }
-  }
-  if (bad > 0) warn(`跳过 ${bad} 行无法解析的记录（可能是进程中途被杀写下的半行）`);
-  return out;
 }
 
 /**

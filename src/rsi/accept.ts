@@ -100,16 +100,26 @@ export interface RevertResult {
 /**
  * 回滚最近一次采纳。
  *
- * 防护：当前资产指纹必须等于当初采纳后的指纹。不等说明之后又有改动，
- * 此时回滚会把中间那些改动一起抹掉 —— 拒绝，并让人自己决定。
+ * 防护两层：
+ * 1. 给了 `id` 时必须是**最近一条**采纳的 id。指定 id 不是为了「退任意一条」——
+ *    当前实现只存了逐条 before 正文，退中间一条会覆盖后续改动；它是给人一个
+ *    「期间若又采纳了别的，就别误退」的确认阀。
+ * 2. 当前资产指纹必须等于当初采纳后的指纹。不等说明之后又有手改，此时回滚会
+ *    把中间那些改动一起抹掉 —— 拒绝，并让人自己决定。
  */
-export function revertLast(config: HarnessConfig): RevertResult {
+export function revertLast(config: HarnessConfig, id?: string): RevertResult {
   // 只认文本资产：代码补丁有自己的回滚入口（`revertLastCode`），
   // 混在一起会让一条资产回滚顺手把代码也退了
   const entries = readJournal(config).filter((e) => e.status === 'accepted' && e.kind !== 'code');
   const last = entries[entries.length - 1];
   if (last === undefined) {
     throw new HarnessError('rsi.no_signal', 'journal 里没有可回滚的采纳记录');
+  }
+  if (id !== undefined && last.proposalId !== id) {
+    throw new HarnessError(
+      'rsi.no_signal',
+      `指定回滚 ${id}，但最近一条可回滚的采纳是 ${last.proposalId} —— 拒绝（期间若有新采纳，先退最近那条）`,
+    );
   }
 
   const current = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });

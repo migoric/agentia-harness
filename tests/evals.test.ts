@@ -637,3 +637,157 @@ describe('trace 留证 —— 评测默认不落盘，--keep-traces 才落', () 
     assert.match(traces, new RegExp(id as string));
   });
 });
+
+describe('新断言 —— 结果与过程两侧都要咬得住', () => {
+  function tracedOutcome(): ReturnType<typeof outcome> {
+    const trace: Trace = {
+      ...emptyTrace(),
+      spans: [
+        {
+          spanId: 's-1',
+          traceId: 't-1',
+          parentSpanId: 's-0',
+          kind: 'llm.turn',
+          name: 'm',
+          startedAt: 1,
+          status: 'ok',
+          attributes: {},
+          events: [
+            {
+              time: 10,
+              name: 'tool.input',
+              body: { tool: 'search', input: '{"query":"foo.c"}' },
+            },
+            { time: 20, name: 'tool.input', body: { tool: 'search', input: '{"query":"bar.c"}' } },
+            { time: 30, name: 'tool.input', body: { tool: 'edit', input: '{"path":"foo.c"}' } },
+          ],
+        },
+      ],
+    };
+    return outcome('结论：没问题', { trace, skills: ['summarize'], iterations: 3 });
+  }
+
+  it('notContains：命中/未命中', () => {
+    assert.deepEqual(check(evalCase({ notContains: ['TODO'] }), tracedOutcome()), []);
+    assert.match(
+      check(evalCase({ notContains: ['结论'] }), tracedOutcome())[0] ?? '',
+      /不该出现 "结论"/,
+    );
+  });
+
+  it('skills：命中/未命中', () => {
+    assert.deepEqual(check(evalCase({ skills: ['summarize'] }), tracedOutcome()), []);
+    assert.match(check(evalCase({ skills: ['review'] }), tracedOutcome())[0] ?? '', /命中技能/);
+  });
+
+  it('maxIterations：命中/未命中', () => {
+    assert.deepEqual(check(evalCase({ maxIterations: 3 }), tracedOutcome()), []);
+    assert.match(check(evalCase({ maxIterations: 2 }), tracedOutcome())[0] ?? '', /轮数超预算/);
+  });
+
+  it('toolCounts 是**精确**次数，与 tools 的子序列语义刻意不同', () => {
+    assert.deepEqual(
+      check(evalCase({ toolCounts: { search: 2, edit: 1, review: 0 } }), tracedOutcome()),
+      [],
+    );
+    const bad = check(evalCase({ toolCounts: { search: 1, edit: 1 } }), tracedOutcome());
+    assert.equal(bad.length, 1);
+    assert.match(bad[0] ?? '', /"search" 调用 2 次，期望恰好 1 次/);
+  });
+
+  it('toolArgs 从真实入参文本里找子串', () => {
+    assert.deepEqual(
+      check(evalCase({ toolArgs: [{ tool: 'search', substring: 'foo.c' }] }), tracedOutcome()),
+      [],
+    );
+    const bad = check(
+      evalCase({ toolArgs: [{ tool: 'search', substring: 'missing.c' }] }),
+      tracedOutcome(),
+    );
+    assert.match(bad[0] ?? '', /入参里没有 "missing.c"/);
+    // 工具名对不上也不算命中 —— 防止「任何工具的入参里有这个串」的假阳性
+    assert.equal(
+      check(evalCase({ toolArgs: [{ tool: 'nope', substring: 'foo.c' }] }), tracedOutcome()).length,
+      1,
+    );
+  });
+
+  it('真实 trace 上次数与参数都能读到（上游改事件名会在这里红）', async () => {
+    const root = project();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const runner = createRunner(config, assets, undefined, false);
+    const out = await runner.run('压一下这段文字', {
+      client: scriptedClient([
+        toolUse('summarize', { task: '压一下' }),
+        endTurn('三条要点'),
+        endTurn('结论：三条'),
+      ]),
+    });
+    assert.deepEqual(
+      check(
+        evalCase({
+          toolCounts: { summarize: 1 },
+          toolArgs: [{ tool: 'summarize', substring: '压一下' }],
+        }),
+        out,
+      ),
+      [],
+    );
+  });
+});
+
+describe('新断言的加载期校验', () => {
+  function withHeader(header: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'harness-eval-new-'));
+    mkdirSync(join(dir, 'evals'), { recursive: true });
+    writeFileSync(
+      join(dir, 'evals', 'c.md'),
+      `---\nname: c\n${header}\n---\n\n压一下这段文字\n`,
+      'utf8',
+    );
+    return dir;
+  }
+
+  const cases: readonly [string, RegExp][] = [
+    ['expect_tool_counts: [read:0]', /正整数/],
+    ['expect_tool_counts: [read:x]', /正整数/],
+    ['expect_tool_counts: [read:1, read:2]', /重复声明/],
+    ['expect_tool_counts: [read]', /格式不对/],
+    ['expect_tool_args: [read:]', /格式不对/],
+    ['expect_max_iterations: -1', /应为正数/],
+    ['expect_contains: x\nexpect_not_contains: x', /同时出现/],
+  ];
+
+  for (const [header, pattern] of cases) {
+    it(`拒绝非法输入: ${header}`, () => {
+      const dir = withHeader(header);
+      assert.throws(
+        () => loadEvalCases(join(dir, 'evals')),
+        (e: unknown) => {
+          const err = e as { code?: string; message?: string };
+          assert.equal(err.code, 'eval.invalid');
+          assert.match(err.message ?? '', pattern);
+          return true;
+        },
+      );
+    });
+  }
+
+  it('全部合法写法可以一起加载', () => {
+    const dir = withHeader(
+      [
+        'expect_contains: 结论',
+        'expect_not_contains: TODO',
+        'expect_skills: [summarize]',
+        'expect_tool_counts: [search:2, edit:1]',
+        'expect_tool_args: [search:foo.c]',
+        'expect_max_iterations: 5',
+      ].join('\n'),
+    );
+    const loaded = loadEvalCases(join(dir, 'evals'));
+    assert.equal(loaded.length, 1);
+    assert.deepEqual(loaded[0]?.expect.toolCounts, { search: 2, edit: 1 });
+    assert.deepEqual(loaded[0]?.expect.toolArgs, [{ tool: 'search', substring: 'foo.c' }]);
+  });
+});

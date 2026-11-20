@@ -153,6 +153,19 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 判断 issue #12 的优先级
 ```
 
+断言全集（全部是规则式，没有一条依赖模型判断）：
+
+| 字段                                          | 判据                                                       |
+| --------------------------------------------- | ---------------------------------------------------------- |
+| `expect_contains` / `expect_not_contains`     | 最终文本必须 / 不得包含某些子串                            |
+| `expect_matches`                              | 最终文本匹配正则（加载期就编译，坏正则退出码 2）           |
+| `expect_tools`                                | 工具名按序出现（子序列，允许中间夹别的调用）               |
+| `expect_tool_counts: [grep:2]`                | 工具调用**精确**次数 —— 与上面的子序列语义刻意分开         |
+| `expect_tool_args: [grep:foo.c]`              | 该工具入参里必须含某子串（frontmatter 行内数组不能含逗号） |
+| `expect_skills`                               | 必须命中的技能                                             |
+| `expect_ok`                                   | 是否正常收尾（缺省 true）                                  |
+| `expect_max_tokens` / `expect_max_iterations` | token / 轮数上限                                           |
+
 跑评测的三个旋钮，各自的语义都是刻意的：
 
 | 旋钮                | 缺省   | 为什么                                                                                      |
@@ -192,6 +205,11 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 
 **一轮最多采纳一个提案。** 同时采纳三个，评测从 70% 涨到 85%，没人知道是哪个起的作用 —— 单变量是让「采纳记录」变成可信知识的唯一做法。
 
+**提案来源可以换，门不能换。** 缺省由 `LlmProposer` 生成；也可以手写一份 L1 提案 JSON，
+用 `rsi propose --from` 登记（存到 `.workspace/rsi/proposals/<id>.json`），再把那个路径交给
+`rsi accept --from` 采纳。手写提案**照样跑完整两遍评测与回归门**（没有跳门的 `--yes` 开关），
+并且 `patch.before` 必须与当前资产正文逐字相等 —— 来源是人还是模型，验证路径是同一条。
+
 ## 命令
 
 ```
@@ -205,15 +223,19 @@ harness eval            跑评测集；有失败退出码 1
 harness report <基线.json> <候选.json>   两份报告比一次并过门；门不过退出码 1
   --max-token-growth <r> / --max-cost-growth <r>   两种门阈值
 harness trace <traceId> 打印那次运行的 span 树（可用前缀；--tail n 只看最后 n 条）
+harness harvest <traceId>  把一条 trace 回流成 evals/harvest-*.md 回归用例
+  --task <文本>         任务原文（trace 里没存，必须外来）
+  --from-report <文件>  或从 eval --save 的报告按 traceId 反查
 harness lock            按当前资产重写锁
 harness lock --check    校验资产与锁一致（CI 用），不一致退出码 1
 harness rsi             跑一轮闭环
   --dry-run             只验证不落盘（记录仍写盘，供人审）
   --max-cost <usd>      本轮总预算（含提案、基线、候选；覆盖配置 maxCostUsd）
   --timeout/--concurrency/--retries   见上表
-harness rsi --dry-run   只验证不落盘（记录仍写盘，供人审）
-harness rsi revert      回滚最近一次采纳
+harness rsi revert [id] 回滚最近一次采纳；给 id 可防期间插入了新采纳
 harness rsi status      采纳历史
+harness rsi propose --from <json>  登记手写 L1 提案（不调模型）
+harness rsi accept --from <json>   手写提案也过完整验证门才采纳
 harness serve           起 HTTP 服务（POST /run、GET /health）
 harness patch <diff>    验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
   --yes                 验证通过后落盘（代码补丁必须人工确认）
@@ -230,6 +252,12 @@ frontmatter 里的未知 `expect_*`、CLI 的未知 flag、非数字的 `--timeo
 没人会往拼写上想。预算与迭代上限还必须是正数：`0` 在 agentia 里是「不设上限」。
 
 `harness trace` 的存在理由：RSI 归因读的是**汇总**（失败模式、命中统计），人查问题读的是**链路**（谁调了谁、在哪一步炸的）。没有它，`.workspace/traces.jsonl` 只是一堆没人会去 grep 的日志。
+
+`harness harvest` 把链路变成回归用例。先跑 `harness eval --keep-traces --save report.json`
+把 trace 留下。trace 里**没有任务原文**（root span 只记模型与配置），所以必须给 `--task`，
+或用 `--from-report` 从那份报告按 traceId 反查；前缀匹配到多条时拒绝，写文件不接受歧义。生成的断言只有 `expect_ok: true`，注释里列出观察到的工具、技能与
+收尾状态 —— trace 记的是**实际行为**，不是**正确行为**；把当时调过的工具固化成断言，等于把
+错误一起固化。结果类断言（`expect_contains` / `expect_matches`）要人补。已有的用例文件不会被覆盖。
 
 ## 设计不变量
 

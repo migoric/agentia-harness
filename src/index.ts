@@ -40,12 +40,14 @@ export {
 export { CONFIG_FILENAME, type HarnessConfig, loadConfig, type ModelPrice } from './config.js';
 export { describeError, HarnessError, type HarnessErrorCode, isHarnessError } from './errors.js';
 export { type GateOptions, type GateResult, gate } from './evals/gate.js';
+export { type HarvestedCase, harvestCase } from './evals/harvest.js';
 export { loadEvalCases } from './evals/load.js';
 export {
   check,
   type RunSuiteOptions,
   runSuite,
   type SuiteTuning,
+  toolInvocations,
   toolSequence,
 } from './evals/run.js';
 export {
@@ -55,6 +57,7 @@ export {
   type EvalExpect,
   type EvalReport,
   summarize,
+  type ToolArgExpect,
 } from './evals/types.js';
 export {
   acceptManually,
@@ -80,10 +83,12 @@ export {
 export type { CodeFileState, CodeJournal, CodePatch, CodeVerify } from './rsi/code/types.js';
 export { appendJournal, atomicWrite } from './rsi/journal.js';
 export { type CycleOptions, cyclesDir, runCycle } from './rsi/loop.js';
+export { readProposal, writeProposal } from './rsi/manual.js';
 export { LlmProposer, type ProposeContext, type Proposer } from './rsi/propose.js';
 export type {
   AssetPatch,
   CycleReport,
+  FAILURE_KINDS,
   FailureKind,
   FailureMode,
   FailureSample,

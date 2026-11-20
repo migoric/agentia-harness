@@ -12,7 +12,8 @@ import { type AssetSet, assetKey } from './types.js';
  * 三个使用面：
  * 1. `harness lock`：采纳后重写；
  * 2. `harness lock --check`：CI 门 —— 资产改了但没重新锁，直接失败（防「偷偷改提示词」）；
- * 3. 回滚：`harness rsi revert <id>` 用锁里上一份指纹恢复文件内容（见 rsi/accept.ts）。
+ * 3. 回滚后同步重写（`rsi/accept.ts`）—— 锁本身**不保存历史正文**，回滚读的是
+ *    journal 里的 before；指定 id 的回滚也只是核对 journal 里最近一条的 proposalId。
  *
  * 刻意**不存正文**：锁是索引，正文在 git 里。存正文会让「锁」变成第二份真相，
  * 两者不一致时没人知道该信谁。

@@ -2,16 +2,21 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { HarnessError } from '../errors.js';
 import { list, parseFrontmatter, scalar } from '../util/frontmatter.js';
-import type { EvalCase, EvalExpect } from './types.js';
+import type { EvalCase, EvalExpect, ToolArgExpect } from './types.js';
 
 /** 用例 frontmatter 白名单：多写一个断言键就静默少一道门，比配置拼错更难发现 */
 const CASE_KEYS: readonly string[] = [
   'name',
   'expect_contains',
+  'expect_not_contains',
   'expect_tools',
+  'expect_tool_counts',
+  'expect_tool_args',
+  'expect_skills',
   'expect_matches',
   'expect_ok',
   'expect_max_tokens',
+  'expect_max_iterations',
 ];
 
 /**
@@ -78,17 +83,32 @@ function parseCase(path: string): EvalCase {
   }
 
   const contains = list(fm, 'expect_contains');
+  const notContains = list(fm, 'expect_not_contains');
   const tools = list(fm, 'expect_tools');
+  const toolCountsRaw = list(fm, 'expect_tool_counts');
+  const toolArgsRaw = list(fm, 'expect_tool_args');
+  const skills = list(fm, 'expect_skills');
   const matches = scalar(fm, 'expect_matches', path);
   const ok = scalar(fm, 'expect_ok', path);
   const maxTokens = scalar(fm, 'expect_max_tokens', path);
+  const maxIterations = scalar(fm, 'expect_max_iterations', path);
 
   if (ok !== undefined && ok !== 'true' && ok !== 'false') {
     throw new HarnessError('eval.invalid', `${path}: expect_ok 只能是 true/false`);
   }
-  const maxTokensNum = maxTokens === undefined ? undefined : Number(maxTokens);
-  if (maxTokensNum !== undefined && (!Number.isFinite(maxTokensNum) || maxTokensNum <= 0)) {
-    throw new HarnessError('eval.invalid', `${path}: expect_max_tokens 应为正数`);
+  const maxTokensNum = positive(maxTokens, `${path}: expect_max_tokens`);
+  const maxIterationsNum = positive(maxIterations, `${path}: expect_max_iterations`);
+  const toolCounts = parseCounts(toolCountsRaw, path);
+  const toolArgs = parseArgs(toolArgsRaw, path);
+
+  // 同一串既要求出现又要求不出现 ⇒ 这条用例永远失败，是写错了而不是「严格」
+  for (const s of contains) {
+    if (notContains.includes(s)) {
+      throw new HarnessError(
+        'eval.invalid',
+        `${path}: "${s}" 同时出现在 expect_contains 与 expect_not_contains`,
+      );
+    }
   }
 
   // 正则在加载期编译：`check()` 里才 new RegExp 的话，坏正则会让**用例跑到一半**
@@ -103,10 +123,15 @@ function parseCase(path: string): EvalCase {
 
   const expect: EvalExpect = {
     ...(contains.length > 0 ? { contains } : {}),
+    ...(notContains.length > 0 ? { notContains } : {}),
     ...(tools.length > 0 ? { tools } : {}),
+    ...(Object.keys(toolCounts).length > 0 ? { toolCounts } : {}),
+    ...(toolArgs.length > 0 ? { toolArgs } : {}),
+    ...(skills.length > 0 ? { skills } : {}),
     ...(matches !== undefined ? { matches } : {}),
     ...(ok !== undefined ? { ok: ok === 'true' } : {}),
     ...(maxTokensNum !== undefined ? { maxTokens: maxTokensNum } : {}),
+    ...(maxIterationsNum !== undefined ? { maxIterations: maxIterationsNum } : {}),
   };
   if (Object.keys(expect).length === 0) {
     throw new HarnessError(
@@ -116,4 +141,55 @@ function parseCase(path: string): EvalCase {
   }
 
   return { name, task, expect, path };
+}
+
+function positive(raw: string | undefined, label: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new HarnessError('eval.invalid', `${label} 应为正数（收到 "${raw}"）`);
+  }
+  return n;
+}
+
+/** `expect_tool_counts: [read:2, grep:1]` —— 只切第一个冒号，工具名本身不含冒号 */
+function parseCounts(raw: readonly string[], path: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const item of raw) {
+    const colon = item.indexOf(':');
+    const tool = (colon < 0 ? item : item.slice(0, colon)).trim();
+    const count = colon < 0 ? '' : item.slice(colon + 1).trim();
+    if (tool === '' || !/^\d+$/.test(count) || Number(count) <= 0) {
+      throw new HarnessError(
+        'eval.invalid',
+        `${path}: expect_tool_counts 的 "${item}" 格式不对，应为 "工具名:正整数"`,
+      );
+    }
+    if (out[tool] !== undefined) {
+      throw new HarnessError(
+        'eval.invalid',
+        `${path}: expect_tool_counts 重复声明 "${tool}" —— 要么写成一个数，要么是写错了`,
+      );
+    }
+    out[tool] = Number(count);
+  }
+  return out;
+}
+
+/** `expect_tool_args: [read:foo.c]` —— 子串里可以有冒号，但 frontmatter 行内数组不含逗号 */
+function parseArgs(raw: readonly string[], path: string): ToolArgExpect[] {
+  const out: ToolArgExpect[] = [];
+  for (const item of raw) {
+    const colon = item.indexOf(':');
+    const tool = (colon < 0 ? item : item.slice(0, colon)).trim();
+    const substring = colon < 0 ? '' : item.slice(colon + 1).trim();
+    if (tool === '' || substring === '') {
+      throw new HarnessError(
+        'eval.invalid',
+        `${path}: expect_tool_args 的 "${item}" 格式不对，应为 "工具名:入参子串"`,
+      );
+    }
+    out.push({ tool, substring });
+  }
+  return out;
 }

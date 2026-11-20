@@ -1,11 +1,16 @@
-import type { ModelClient, Trace } from '@migor/agentia';
+import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { createRunner, type RunOutcome } from '../run/runner.js';
 import { combineAbort } from '../util/abort.js';
 import { loadEvalCases } from './load.js';
+import { toolInvocations } from './tool-events.js';
 import { type CaseResult, type EvalCase, type EvalReport, summarize } from './types.js';
+
+// 工具事件提取的唯一实现搬到了 tool-events.ts（序列 / 次数 / 参数共用一份扫描）。
+// 保留从本模块再导出：index.ts 与既有测试一直从这里取 toolSequence。
+export { toolInvocations, toolSequence } from './tool-events.js';
 
 /**
  * 跑评测集。
@@ -190,6 +195,12 @@ async function runOne(
 /** 断言。返回空数组 = 通过 */
 export function check(c: EvalCase, out: RunOutcome): string[] {
   const f: string[] = [];
+  // 只在这一轮真的需要过程类断言时才扫 trace —— 多数用例只看文本
+  const needsTools =
+    c.expect.tools !== undefined ||
+    c.expect.toolCounts !== undefined ||
+    (c.expect.toolArgs?.length ?? 0) > 0;
+  const invocations = needsTools ? toolInvocations(out.trace) : [];
   const wantOk = c.expect.ok ?? true;
   if (wantOk && !out.ok) {
     f.push(`期望正常收尾，实际 stopReason=${out.stopReason}`);
@@ -200,52 +211,52 @@ export function check(c: EvalCase, out: RunOutcome): string[] {
   for (const s of c.expect.contains ?? []) {
     if (!out.text.includes(s)) f.push(`正文缺少 "${s}"`);
   }
+  for (const s of c.expect.notContains ?? []) {
+    if (out.text.includes(s)) f.push(`正文不该出现 "${s}"`);
+  }
   if (c.expect.matches !== undefined) {
     const re = new RegExp(c.expect.matches);
     if (!re.test(out.text)) f.push(`正文不匹配 /${c.expect.matches}/`);
   }
   if (c.expect.tools !== undefined && c.expect.tools.length > 0) {
-    const seq = toolSequence(out.trace);
+    const seq = invocations.map((i) => i.tool);
     if (!isSubsequence(c.expect.tools, seq)) {
       f.push(
         `工具序列不符：期望 ${c.expect.tools.join(' → ')}，实际 ${seq.join(' → ') || '（无调用）'}`,
       );
     }
   }
+  if (c.expect.toolCounts !== undefined) {
+    const actual = countTools(invocations);
+    for (const [tool, want] of Object.entries(c.expect.toolCounts)) {
+      const got = actual.get(tool) ?? 0;
+      if (got !== want) f.push(`工具 "${tool}" 调用 ${got} 次，期望恰好 ${want} 次`);
+    }
+  }
+  for (const a of c.expect.toolArgs ?? []) {
+    const hit = invocations.some((i) => i.tool === a.tool && i.input.includes(a.substring));
+    if (!hit) {
+      f.push(`工具 "${a.tool}" 的入参里没有 "${a.substring}"`);
+    }
+  }
+  for (const s of c.expect.skills ?? []) {
+    if (!out.skills.includes(s)) {
+      f.push(`没有命中技能 "${s}"（实际：${out.skills.join(', ') || '无'}）`);
+    }
+  }
   if (c.expect.maxTokens !== undefined && out.tokens > c.expect.maxTokens) {
     f.push(`token 超预算：${out.tokens} > ${c.expect.maxTokens}`);
+  }
+  if (c.expect.maxIterations !== undefined && out.iterations > c.expect.maxIterations) {
+    f.push(`轮数超预算：${out.iterations} > ${c.expect.maxIterations}`);
   }
   return f;
 }
 
-/**
- * agentia 的工具入参事件名（`core/trace.ts` 的 `TOOL_INPUT_EVENT`）。
- *
- * 为什么写字面量而不是 import：agentia 的公共导出面里没有它（它属于
- * 「core 词汇表」，只对内部三层可见）。这里复制一份字面量是有风险的 ——
- * 上游改名会让我们静默读到 0 条工具调用。防线是测试：`tests/evals.test.ts`
- * 用真实调用产生的 trace 断言这个序列非空，改名会立刻红。
- */
-const TOOL_INPUT_EVENT = 'tool.input';
-
-/**
- * 从 trace 提取工具调用序列。
- *
- * 工具调用不是独立 span —— 它以 `tool.input` 事件挂在 `llm.turn` span 上。这是
- * agentia 的既定模型（一个回合 N 个 tool_use 共用一个 turn span），不是我们能选的，
- * 所以这里按事件时间排序还原真实顺序。
- */
-export function toolSequence(trace: Trace): string[] {
-  const calls: { at: number; tool: string }[] = [];
-  for (const span of trace.spans) {
-    for (const e of span.events) {
-      if (e.name !== TOOL_INPUT_EVENT) continue;
-      const body = e.body as { tool?: unknown } | null;
-      const tool = body?.tool;
-      if (typeof tool === 'string') calls.push({ at: e.time, tool });
-    }
-  }
-  return calls.sort((a, b) => a.at - b.at).map((c) => c.tool);
+function countTools(invocations: readonly { tool: string }[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const i of invocations) out.set(i.tool, (out.get(i.tool) ?? 0) + 1);
+  return out;
 }
 
 /** 子序列匹配：允许中间夹别的调用（「先查再改」不该被无关调用判失败） */

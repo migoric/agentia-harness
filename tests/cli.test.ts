@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { discoverAssets } from '../src/assets/discover.ts';
+import { loadConfig } from '../src/config.ts';
 import { runCli as run } from './support/cli.ts';
 
 /**
@@ -272,4 +274,48 @@ it('eval --keep-traces 是合法 flag（此前只在注释里存在）', () => {
   });
   assert.doesNotMatch(r.out, /不认识 --keep-traces/, r.out);
   assert.notEqual(r.code, 2, r.out);
+});
+
+describe('rsi revert <id>', () => {
+  it('CLI 把 id 传到回滚逻辑：错 id 拒绝，对 id 逐字恢复', () => {
+    const dir = tmp();
+    run(['init'], dir);
+    const config = loadConfig(dir);
+    const before = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const agent = before.agents[0];
+    assert.ok(agent !== undefined);
+    const original = readFileSync(agent.path, 'utf8');
+
+    // 造一条「已采纳」记录，并让资产确实处于采纳后的状态
+    const modified = `${agent.body}\n补上的一句。`;
+    writeFileSync(agent.path, original.replace(agent.body, modified), 'utf8');
+    const afterAssets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+
+    mkdirSync(join(dir, '.workspace', 'rsi'), { recursive: true });
+    writeFileSync(
+      join(dir, '.workspace', 'rsi', 'journal.jsonl'),
+      `${JSON.stringify({
+        at: Date.now(),
+        proposalId: 'p-right',
+        status: 'accepted',
+        target: 'agent:main',
+        before: agent.body,
+        after: modified,
+        reason: 't',
+        assetsBefore: before.fingerprint,
+        assetsAfter: afterAssets.fingerprint,
+        kind: 'asset',
+      })}\n`,
+      'utf8',
+    );
+
+    const wrong = run(['rsi', 'revert', 'p-wrong'], dir);
+    assert.equal(wrong.code, 1, wrong.out);
+    assert.match(wrong.out, /最近一条可回滚的采纳是 p-right/);
+
+    const right = run(['rsi', 'revert', 'p-right'], dir);
+    assert.equal(right.code, 0, right.out);
+    assert.match(right.out, /已回滚 p-right/);
+    assert.equal(readFileSync(agent.path, 'utf8'), original);
+  });
 });

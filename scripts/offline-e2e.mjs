@@ -370,6 +370,94 @@ const root = await project();
   rmSync(cycle, { recursive: true, force: true });
 }
 
+// 手写提案：来源可以变，**门不能变**。走真 HTTP 的两遍评测，不只是单测的脚本客户端
+{
+  const manual = await project();
+  writeFileSync(
+    join(manual, 'evals', 'strict.md'),
+    [
+      '---',
+      'name: strict',
+      'expect_contains: 校准标记',
+      '---',
+      '',
+      '把这段话压成三条要点。',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  const skillPath = join(manual, 'skills', 'example', 'SKILL.md');
+  const original = readFileSync(skillPath, 'utf8');
+  const body = original.split('---')[2].trim();
+  const proposal = {
+    id: 'p-manual-offline',
+    modeId: 'm',
+    kind: 'wrong_answer',
+    rationale: '人工看了线上日志，要求输出带校准标记',
+    layer: 'L1',
+    patch: {
+      target: 'skill:example',
+      // patch.before 必须是资产的**正文**（discoverAssets 读到的就是 trim 后的正文）
+      before: body,
+      after: `${body}\n输出必须以「校准标记」开头。`,
+    },
+  };
+  writeFileSync(join(manual, 'proposal.json'), `${JSON.stringify(proposal, null, 2)}\n`, 'utf8');
+
+  const fake = await startFake();
+  const registered = await cli(['rsi', 'propose', '--from', 'proposal.json'], {
+    root: manual,
+    base: fake.url,
+  });
+  check(
+    'rsi propose --from 登记手写提案（不调模型，只校验+落盘）',
+    registered.code === 0 && /p-manual-offline/.test(registered.out),
+    `code=${registered.code}\n${registered.out}`,
+  );
+
+  const accepted = await cli(['rsi', 'accept', '--from', 'proposal.json'], {
+    root: manual,
+    base: fake.url,
+  });
+  const changed = readFileSync(skillPath, 'utf8');
+  check(
+    '手写提案也要过完整验证门：两遍评测后采纳，真的改到技能正文',
+    accepted.code === 0 && changed.includes('校准标记') && changed !== original,
+    `code=${accepted.code}\n${accepted.out}\n端点日志:\n${fake.log()}`,
+  );
+
+  const reverted = await cli(['rsi', 'revert', 'p-manual-offline'], {
+    root: manual,
+    base: fake.url,
+  });
+  check(
+    'rsi revert <id> 按 id 精确回滚，逐字恢复',
+    reverted.code === 0 && readFileSync(skillPath, 'utf8') === original,
+    `code=${reverted.code}\n${reverted.out}`,
+  );
+
+  // 证明 accept 走的是验证层而不是「直接写盘」：给一份 before 已过期的提案，
+  // 应在 applyPatch 的乐观锁处被拒，源文件一个字都不动。
+  // （门本身的退步否决由 gate 单测覆盖；假端点下很难构造出真正的通过率下降）
+  proposal.id = 'p-manual-stale';
+  proposal.patch.before = '这段正文早就过期了';
+  writeFileSync(join(manual, 'proposal.json'), `${JSON.stringify(proposal, null, 2)}\n`, 'utf8');
+  const blocked = await cli(['rsi', 'accept', '--from', 'proposal.json'], {
+    root: manual,
+    base: fake.url,
+  });
+  check(
+    '手写提案不是直写：先过验证层的乐观锁，过期 before 拒绝且文件不动',
+    blocked.code === 2 &&
+      /基础版本已过期/.test(blocked.out) &&
+      readFileSync(skillPath, 'utf8') === original,
+    `code=${blocked.code}\n${blocked.out}`,
+  );
+
+  fake.stop();
+  rmSync(manual, { recursive: true, force: true });
+}
+
 rmSync(root, { recursive: true, force: true });
 
 const failed = results.filter((r) => !r.ok);
