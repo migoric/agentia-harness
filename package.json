@@ -1,7 +1,7 @@
 {
   "name": "@migor/agentia-harness",
   "version": "0.1.0",
-  "description": "Agent harness 工程基座：技能资产库 + 评测台 + RSI 闭环，构建在 @migor/agentia 之上",
+  "description": "Agent harness 工程基座：Markdown 资产库 + 评测台 + RSI 闭环，构建在 @migor/agentia 之上",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -15,8 +15,7 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
-    "templates"
+    "dist"
   ],
   "engines": {
     "node": ">=20"
@@ -27,6 +26,9 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "node --import tsx --test 'tests/**/*.test.ts'",
+    "test:watch": "node --import tsx --test --watch 'tests/**/*.test.ts'",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "prepublishOnly": "npm run check",
     "harness": "node --import tsx src/cli.ts"
   },
   "dependencies": {
@@ -37,5 +39,23 @@
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "agent",
+    "harness",
+    "rsi",
+    "eval",
+    "llm",
+    "typescript",
+    "prompt-engineering"
+  ],
+  "author": "migor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/migoric/agentia-harness.git"
+  },
+  "homepage": "https://github.com/migoric/agentia-harness#readme",
+  "bugs": {
+    "url": "https://github.com/migoric/agentia-harness/issues"
   }
 }

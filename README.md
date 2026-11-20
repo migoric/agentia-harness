@@ -37,8 +37,7 @@ harness rsi                         # 采集→归因→提案→验证→采纳
 
 ```bash
 npm install
-npx @migor/agentia-harness init     # 或 harness init
-harness lock                         # 生成 harness.lock.json
+npx @migor/agentia-harness init     # 或 harness init；会一并生成 harness.lock.json
 harness eval                         # 会失败 —— 因为没有模型凭据
 ```
 
@@ -46,11 +45,18 @@ harness eval                         # 会失败 —— 因为没有模型凭据
 
 ```bash
 harness run "把这个仓库的未处理 issue 分个类"
-harness eval                         # PASS/FAIL + 通过率 + token
+harness eval --save .workspace/base.json   # PASS/FAIL + 通过率 + token + 命中统计
 harness rsi --dry-run                # 看它想改什么，不落盘
 harness rsi                          # 真改（通过回归门才落盘）
 harness rsi status                   # 采纳历史
 harness rsi revert                   # 回滚最近一次
+```
+
+改完提示词之后，用它判断「到底变好没有」：
+
+```bash
+harness eval --save .workspace/after.json
+harness report .workspace/base.json .workspace/after.json   # 门不过退出码 1
 ```
 
 ## 目录
@@ -85,6 +91,24 @@ tools: [search_issue] # 可选：本技能内部可调的其他技能
 
 装配时：`description` 进模型可见的工具列表，正文成为该技能一次子运行的 system。**技能看不到主 agent 的对话历史** —— 这是刻意的：上下文隔离让技能行为可独立评测，而「可独立评测」是 RSI 能验证改动的唯一前提。
 
+### 能力清单的语义
+
+`tools` 与 `subagents` 决定一个 agent 能看到什么，规则只有一条：**未声明 = 全部技能，声明了 = 精确清单**（`tools: []` 表示一个都不挂）。
+
+```md
+---
+
+name: lead
+description: 主编排 —— 拆任务、分派、汇总
+tools: [search_issue] # 只挂这一个技能
+subagents: [reviewer] # 把 reviewer 变成可委派的工具
+---
+```
+
+子 agent 是**完整独立循环**：自己的 system、自己的工具、自己的模型，主 agent 的对话历史它看不见，只交回最终文本。委派在 trace 里是带 `subagent` 属性与 `agentia.handoff.from/to` 的 capability span，所以「谁把活交给了谁」是一等事实，不用靠命名反推。
+
+委派成环（A→B→A）在**装配期**就报错并指名路径 —— 留到运行期会一直跑到预算耗尽，而那一刻的 trace 里只有几十层同名 span。
+
 ## 评测
 
 用例的断言只能来自 **trace 与最终文本**，不用 LLM 当裁判（裁判自己不确定，RSI 就会把随机波动当进步）：
@@ -100,6 +124,16 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 
 判断 issue #12 的优先级
 ```
+
+跑评测的三个旋钮，各自的语义都是刻意的：
+
+| 旋钮                | 缺省   | 为什么                                                                                      |
+| ------------------- | ------ | ------------------------------------------------------------------------------------------- |
+| `--timeout <ms>`    | 不超时 | 超时**按失败记**并写进失败原因。超时由 harness 自己 race 兑现，不依赖下游配合               |
+| `--concurrency <n>` | `1`    | 并发会让「这轮花了多少」与「哪条贵」互相污染，而成本归因是 RSI 的输入。结果顺序永远按用例名 |
+| `--retries <n>`     | `0`    | **只对「跑崩了」重试**（`stopReason=error`）。断言失败重试等于用采样次数掩盖问题            |
+
+报告里带 `skillHits`（每个资产被多少条用例走过），这是提案「该改哪个文件」的数据来源。
 
 ## RSI 闭环
 
@@ -131,33 +165,54 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 ## 命令
 
 ```
-harness init [目录]     生成最小工程
-harness run <任务>      跑一次；打印结果、token、traceId
+harness init [目录]     生成最小工程（含锁文件）
+harness run <任务>      跑一次；打印结果、token、命中技能、traceId
 harness eval            跑评测集；有失败退出码 1
+  --save <文件>         存报告，供 report 对比
+  --only <a,b>          只跑这些用例
+  --timeout/--concurrency/--retries   见上表
+harness report <基线.json> <候选.json>   两份报告比一次并过门；门不过退出码 1
+harness trace <traceId> 打印那次运行的 span 树（可用前缀；--tail n 只看最后 n 条）
 harness lock            按当前资产重写锁
 harness lock --check    校验资产与锁一致（CI 用），不一致退出码 1
 harness rsi             跑一轮闭环
-harness rsi --dry-run   只验证不落盘
+harness rsi --dry-run   只验证不落盘（记录仍写盘，供人审）
 harness rsi revert      回滚最近一次采纳
 harness rsi status      采纳历史
 harness serve           起 HTTP 服务（POST /run、GET /health）
 ```
 
-退出码是接口的一部分：`0` 正常、`1` 断言/门未过、`2` 用法或配置错误。
+退出码是接口的一部分：`0` 正常、`1` 跑了但没达标（断言/门未过）、`2` 配置/资产/用法错。
+
+`harness trace` 的存在理由：RSI 归因读的是**汇总**（失败模式、命中统计），人查问题读的是**链路**（谁调了谁、在哪一步炸的）。没有它，`.workspace/traces.jsonl` 只是一堆没人会去 grep 的日志。
+
+## 设计不变量
+
+这几条是**不能妥协**的，改它们等于换一个系统。每条都在 `AGENTS.md` 与本仓测试里各有一份：
+
+1. **门在 RSI 的写权限之外** —— 它能提改动，不能提标准。
+2. **归因不用模型** —— 归因是地基，地基不能是概率的。
+3. **验证零副作用** —— 提案只在内存副本上生效，跑完源文件一字未动。
+4. **一轮最多采纳一个** —— 单变量才有归因能力。
+5. **采纳前三次校验、回滚前验指纹** —— 落盘是唯一不可逆的动作。
+6. **只有「跑崩了」才重试** —— 断言失败是结果，不是抖动。
+7. **历史先写、后改文件** —— 顺序选反，回滚就成破坏。
 
 ## 已知边界（如实标注）
 
-- **无并行分支**：图编排与扇出不在本仓（agentia 的 `graph/` 有独立的编排层）。
-- **L2 未开**：RSI 不能改 TS 代码。改代码需要沙箱 + 测试门 + 人工审批，是下一版的事。
-- **提案只改第一个 agent**：`EvalReport` 里没有「哪条用例走了哪个技能」的映射，硬猜会改错文件。等 trace 回流给出技能命中统计后再按数据选。
+- **L2 未开**：RSI 只能改文本资产，不能改 TS 代码。改代码需要沙箱 + 测试门 + 人工审批。
+- **不做并行分支编排**：并行留给工具层（`maxToolConcurrency`）。两套并行的闸比没有闸更危险。
+- **`suspended` 不在本层**：等审批 / 等时刻交给外层 run 的 `approvals`。图的检查点与 HITL 挂起是两种中断，混在一起会让「续跑」有两个互相不知道的状态源。
+- **没有自己的预算账本**：累计成本靠外层 run 或宿主推进。
 - **server 是缝不是产品**：只有 `/run` 与 `/health`。要会话、审批、SSE，用 agentia 的 `transport/`。
-- **串行执行**：一个进程同时跑多个任务会污染成本归因；要并发就起多个进程。
+- **依赖走本地路径**：`@migor/agentia` 用 `file:../agentia`（上游尚未发 npm）。发版前需改成版本号。
 
 ## 开发
 
 ```bash
-npm test          # 48 条（资产 / 评测 / RSI 闭环 / CLI 端到端）
-npm run typecheck
-npm run lint
-npm run build
+npm run check     # typecheck + lint + test + build（CI 跑的就是这个）
+npm test          # 单跑测试
+npm run harness -- help
 ```
+
+测试分五组：资产层、评测台与回归门、RSI 闭环（含真实 trace 归因）、多 agent 委派、CLI 与渲染端到端。另有 `tests/architecture.test.ts` 守分层与文件体量 —— 分层写在文档里等于没有，能执行才算。
