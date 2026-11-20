@@ -120,3 +120,14 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
 - **`agentia` 把模型层错误收成 `stopReason: 'error'` 而不是抛异常**，且 `error.retryable`
   常为 `false`（裸 Error 会被归类为 unknown）。harness 的重试语义**不看**那个字段，
   理由写在 `evals/run.ts` 的注释里。
+- **端点走环境变量是唯一能覆盖所有调用点的方式**。agentia 的默认客户端是**每次 run 现造**
+  的（技能子循环、RSI 提案器各造各的），显式注入 client 传不进子循环 —— 那会让
+  「主 agent 走 DeepSeek、技能偷偷走官方端点」静默发生。所以 `endpoint` 段在 CLI 入口
+  一次性落到 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`（`run/endpoint.ts`），
+  **不覆盖**已存在的真实环境变量（与 `loadEnvFile` 同款语义）。
+- **`pricing` 的 `cacheRead` / `cacheWrite` 是相对 `in` 的乘数，不是绝对价**。把
+  DeepSeek 的 $0.003（缓存读）当成乘数填进去，缓存命中那部分会便宜 100 倍，而成本
+  数字看上去「很正常」。`tests/config.test.ts` 只守形状，口径靠人守 —— 改这块先读
+  agentia 的 `engine/usage.ts`。
+- **「没读数」有两种病因，别合并**：`unpriced`（没定价，改配置）与 `unreported`
+  （端点没报计量，改不了配置）。合并成一句「没有成本」会把人引向错误的动作。

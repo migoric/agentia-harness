@@ -37,7 +37,7 @@ export {
   findAsset,
   type SkillAsset,
 } from './assets/types.js';
-export { CONFIG_FILENAME, type HarnessConfig, loadConfig } from './config.js';
+export { CONFIG_FILENAME, type HarnessConfig, loadConfig, type ModelPrice } from './config.js';
 export { describeError, HarnessError, type HarnessErrorCode, isHarnessError } from './errors.js';
 export { type GateOptions, type GateResult, gate } from './evals/gate.js';
 export { loadEvalCases } from './evals/load.js';
@@ -94,7 +94,20 @@ export type {
   VerifyOutcome,
 } from './rsi/types.js';
 export { applyPatch, renderFile, type VerifyOptions, verifyProposal } from './rsi/verify.js';
-export { type BuildAppOptions, type BuiltApp, buildApp } from './run/app.js';
-export { createRunner, Runner, type RunOptions, type RunOutcome } from './run/runner.js';
+export { type BuildAppOptions, type BuiltApp, buildApp, effectiveModel } from './run/app.js';
+export {
+  applyEndpointEnv,
+  assertEndpointKey,
+  type EndpointSummary,
+  endpointSummary,
+  unpricedHint,
+} from './run/endpoint.js';
+export {
+  type CostNote,
+  createRunner,
+  Runner,
+  type RunOptions,
+  type RunOutcome,
+} from './run/runner.js';
 export { assertNoCycles, buildSkillTools, buildTools } from './run/tools.js';
 export { type CapabilityHits, capabilityHits } from './run/trace-read.js';

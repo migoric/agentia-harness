@@ -26,6 +26,28 @@ export interface HarnessConfig {
   readonly maxIterations: number | undefined;
   readonly maxCostUsd: number | undefined;
   /**
+   * Anthropic 兼容端点的 baseURL（`endpoint.baseURL`）；不给就完全交给环境变量
+   * （`ANTHROPIC_BASE_URL` → 官方端点）。
+   *
+   * 放配置而不是只认 env 的理由：**「这个工程连的是哪个端点」是可提交、可 review 的
+   * 事实**（换模型时同一份 diff 里能看见），而 key 不是。
+   */
+  readonly baseURL: string | undefined;
+  /**
+   * 装 API key 的**环境变量名**（`endpoint.apiKeyEnv`），缺省 `ANTHROPIC_API_KEY`。
+   *
+   * 配置里只写名字，值放 `.env` —— 这个文件会被提交，密钥不会。
+   */
+  readonly apiKeyEnv: string;
+  /**
+   * 价格表追加/覆盖（`pricing` 段，$/1M token）。
+   *
+   * 不给非 Anthropic 模型定价的后果是**静默**的：`costEstimate` 变成 `undefined`，
+   * 回归门的成本判据退回 token、`rsi --max-cost` 不生效。`run` 与 `eval` 都会在
+   * 没有读数时明确说出来（见 `run/endpoint.ts` 的 `unpricedHint`）。
+   */
+  readonly pricing: Readonly<Record<string, ModelPrice>>;
+  /**
    * L2（代码补丁）的验证命令，缺省 `['npm', 'test']`。
    *
    * 存成数组而不是字符串：字符串要过 shell，而 shell 会把「参数里带空格」和
@@ -38,12 +60,30 @@ export interface HarnessConfig {
 
 export const CONFIG_FILENAME = 'harness.config.json';
 
+/**
+ * 一条单价（对齐 agentia 的 `ModelPricing`，但**不 import** 它：配置文件层不认识
+ * 运行时）。字段含义逐条对齐，差一个都算配置错——
+ *
+ * - `in` / `out`：$/1M token，**绝对价**；
+ * - `cacheRead` / `cacheWrite`：相对 `in` 的**乘数**（不是绝对价！），缺省 0.1 / 1.25。
+ *   这条最容易配错：DeepSeek 缓存读 $0.003/1M、输入 $0.15/1M ⇒ 乘数是 `0.02`，不是 `0.003`。
+ */
+export interface ModelPrice {
+  readonly in: number;
+  readonly out: number;
+  readonly cacheRead?: number;
+  readonly cacheWrite?: number;
+}
+
+const PRICE_KEYS: readonly string[] = ['in', 'out', 'cacheRead', 'cacheWrite'];
+
 const DEFAULTS = {
   skillsDir: 'skills',
   agentsDir: 'agents',
   evalsDir: 'evals',
   workspaceDir: '.workspace',
   appName: 'harness',
+  apiKeyEnv: 'ANTHROPIC_API_KEY',
 } as const;
 
 interface RawConfig {
@@ -56,6 +96,8 @@ interface RawConfig {
   maxIterations?: unknown;
   maxCostUsd?: unknown;
   code?: unknown;
+  endpoint?: unknown;
+  pricing?: unknown;
 }
 
 export function loadConfig(root: string): HarnessConfig {
@@ -80,13 +122,113 @@ export function loadConfig(root: string): HarnessConfig {
     model: readString(raw.model, 'model'),
     maxIterations: readNumber(raw.maxIterations, 'maxIterations'),
     maxCostUsd: readNumber(raw.maxCostUsd, 'maxCostUsd'),
+    pricing: readPricing(raw.pricing),
+    ...readEndpoint(raw.endpoint),
     ...readCode(raw.code),
   };
 }
 
-const CODE_DEFAULTS = { verify: ['npm', 'test'] as readonly string[], timeoutMs: 600_000 };
+/**
+ * `endpoint` 段：形状错就炸。
+ *
+ * 只校验「能立刻证伪」的形态（协议、空白、环境变量名形状），不去猜端点能不能用 ——
+ * 那是第一次真实调用的活。多拦一层「看起来像 URL 但不是」的价值在于：错在这里
+ * 会以 `config.invalid`（退出码 2）出现，而错在 `fetch` 里会以「模型调用失败」出现，
+ * 后者要花一轮 token 才看得见。
+ */
+function readEndpoint(v: unknown): { baseURL: string | undefined; apiKeyEnv: string } {
+  if (v === undefined) {
+    return { baseURL: undefined, apiKeyEnv: DEFAULTS.apiKeyEnv };
+  }
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    throw new HarnessError('config.invalid', '配置字段 "endpoint" 应为对象');
+  }
+  rejectUnknownKeys(v, 'endpoint', ['baseURL', 'apiKeyEnv']);
 
-/** `code` 段：形状错就炸（配置错必须响亮，否则会以「验证永远失败」的形式出现） */
+  const url = readString((v as { baseURL?: unknown }).baseURL, 'endpoint.baseURL');
+  if (url !== undefined) {
+    if (!/^https?:\/\//i.test(url) || /\s/.test(url)) {
+      throw new HarnessError(
+        'config.invalid',
+        `配置字段 "endpoint.baseURL" 应是 http(s) 地址（收到 "${url}"）`,
+      );
+    }
+  }
+  const envName = readString((v as { apiKeyEnv?: unknown }).apiKeyEnv, 'endpoint.apiKeyEnv');
+  if (envName === undefined) return { baseURL: url, apiKeyEnv: DEFAULTS.apiKeyEnv };
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envName)) {
+    throw new HarnessError(
+      'config.invalid',
+      `配置字段 "endpoint.apiKeyEnv" 应填**环境变量名**（如 DEEPSEEK_API_KEY），` +
+        `key 本身放 .env（收到 "${envName}"）`,
+    );
+  }
+  return { baseURL: url, apiKeyEnv: envName };
+}
+
+/** `pricing` 段：每条都要有 `in` / `out` 两个非负有限数，键名只认那四个 */
+function readPricing(v: unknown): Readonly<Record<string, ModelPrice>> {
+  if (v === undefined) return {};
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    throw new HarnessError(
+      'config.invalid',
+      '配置字段 "pricing" 应为 { 模型名: { in, out } } 对象',
+    );
+  }
+  const out: Record<string, ModelPrice> = {};
+  for (const [model, raw] of Object.entries(v as Record<string, unknown>)) {
+    const where = `pricing["${model}"]`;
+    if (model.trim() === '') {
+      throw new HarnessError('config.invalid', '配置字段 "pricing" 里有空模型名');
+    }
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new HarnessError('config.invalid', `${where} 应为 { in, out } 对象`);
+    }
+    rejectUnknownKeys(raw, where, PRICE_KEYS);
+    const e = raw as Record<string, unknown>;
+    out[model] = {
+      in: priceOf(e.in, where, 'in'),
+      out: priceOf(e.out, where, 'out'),
+      ...(e.cacheRead === undefined ? {} : { cacheRead: priceOf(e.cacheRead, where, 'cacheRead') }),
+      ...(e.cacheWrite === undefined
+        ? {}
+        : { cacheWrite: priceOf(e.cacheWrite, where, 'cacheWrite') }),
+    };
+  }
+  return out;
+}
+
+function priceOf(v: unknown, where: string, key: string): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+    const detail =
+      key === 'cacheRead' || key === 'cacheWrite'
+        ? '（cacheRead / cacheWrite 是相对 in 的**乘数**，不是绝对价）'
+        : '（$/1M token）';
+    throw new HarnessError('config.invalid', `${where}.${key} 应为非负有限数${detail}`);
+  }
+  return v;
+}
+
+/**
+ * 未知键一律拒。理由与 `code` / `endpoint` 同款：`pricng`（少个 i）或
+ * `cache_read`（下划线）静默被忽略时，症状是「成本数字不对」——而那是最难往
+ * 拼写错误上想的症状。
+ */
+function rejectUnknownKeys(v: object, where: string, allowed: readonly string[]): void {
+  for (const k of Object.keys(v)) {
+    if (!allowed.includes(k)) {
+      throw new HarnessError(
+        'config.invalid',
+        `配置字段 "${where}" 不认识 "${k}"（只认 ${allowed.join(' / ')}）`,
+      );
+    }
+  }
+}
+
+const CODE_DEFAULTS = {
+  verify: ['npm', 'test'] as readonly string[],
+  timeoutMs: 600_000,
+}; /** `code` 段：形状错就炸（配置错必须响亮，否则会以「验证永远失败」的形式出现） */
 function readCode(v: unknown): { codeVerify: readonly string[]; codeVerifyTimeoutMs: number } {
   if (v === undefined) {
     return { codeVerify: CODE_DEFAULTS.verify, codeVerifyTimeoutMs: CODE_DEFAULTS.timeoutMs };

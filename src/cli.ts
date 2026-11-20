@@ -13,6 +13,7 @@ import { initCommand } from './cli/init.js';
 import { say, warn } from './cli/output.js';
 import { loadConfig } from './config.js';
 import { describeError, isHarnessError } from './errors.js';
+import { applyEndpointEnv, assertEndpointKey } from './run/endpoint.js';
 
 /**
  * CLI —— 八个命令，每个对应闭环的一段。
@@ -88,6 +89,13 @@ async function main(): Promise<number> {
     agent: strFlag(args.flags, 'agent'),
   };
 
+  // 端点与凭据只在**真会调模型**的命令上校验：`lock` / `trace` / `report` /
+  // `rsi status|revert` 一个模型都不调，没 key 时拦它们只会让人以为工具坏了
+  if (needsModel(cmd, args._[0])) {
+    applyEndpointEnv(ctx.config);
+    assertEndpointKey(ctx.config);
+  }
+
   switch (cmd) {
     case 'run':
       return runCommand(ctx, args._.join(' ').trim());
@@ -115,6 +123,18 @@ async function main(): Promise<number> {
 function isUsageError(e: unknown): boolean {
   if (!isHarnessError(e)) return false;
   return e.code.startsWith('config') || e.code.startsWith('asset') || e.code === 'eval.invalid';
+}
+
+/**
+ * 这条命令会调模型吗？
+ *
+ * `rsi` 的两个只读子命令（`status` / `revert`）不调：把「看历史记录」也拦在
+ * 「先配好 key」后面，会让人以为 RSI 的记录依赖凭据。
+ */
+function needsModel(cmd: string, sub: string | undefined): boolean {
+  if (cmd === 'run' || cmd === 'eval' || cmd === 'serve') return true;
+  if (cmd === 'rsi') return sub !== 'revert' && sub !== 'status';
+  return false;
 }
 
 main().then(

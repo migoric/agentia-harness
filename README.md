@@ -61,15 +61,41 @@ harness eval --save .workspace/after.json
 harness report .workspace/base.json .workspace/after.json   # 门不过退出码 1
 ```
 
+### 换端点 / 换模型（以 DeepSeek 为例）
+
+`harness.config.json` 写三段就够，完整可跑的工程见 [`examples/starter/`](examples/starter/)：
+
+```json
+{
+  "model": "deepseek-flash",
+  "endpoint": {
+    "baseURL": "https://api.deepseek.com/anthropic",
+    "apiKeyEnv": "DEEPSEEK_API_KEY"
+  },
+  "pricing": { "deepseek-flash": { "in": 0.15, "out": 0.6, "cacheRead": 0.02 } }
+}
+```
+
+- `endpoint.baseURL` 是 `ANTHROPIC_BASE_URL` 的配置化写法；`apiKeyEnv` 只写**变量名**，
+  key 放 `.env`（真实环境变量优先于文件）。密钥永远不进配置文件 —— 那个会被提交。
+- 声明了 `apiKeyEnv` 却没有 key ⇒ **开跑前**就报错（退出码 2），不花一轮 token 换一个 401。
+  只拦真会调模型的命令（`run` / `eval` / `rsi` / `serve`），`lock` / `trace` / `report` 不受影响。
+- 不给非 Anthropic 模型定价，成本读数是「未知」而**不是 0**：报告里不出现 `$`、回归门的
+  成本判据退回 token、`rsi --max-cost` 不生效。`run` 会在结尾说清病因是「没定价」（配置能修）
+  还是「端点没报计量」（换端点才能修）。
+- `cacheRead` / `cacheWrite` 是相对 `in` 的**乘数**，不是绝对价：DeepSeek 缓存读
+  $0.003 / 输入 $0.15 ⇒ 写 `0.02`。价格表填的是 off-peak 价，高峰期实际是 2 倍。
+
 ## 目录
 
 ```
 agents/*.md          主 agent 的 system（正文）+ frontmatter（description/tools/model）
 skills/*.md          技能：正文 = 子循环 system；description = 模型看到的工具描述
 evals/*.md           评测用例：frontmatter 是断言，正文是任务
-harness.config.json  可选，覆盖缺省目录
+harness.config.json  可选：目录、模型、端点（endpoint）、价格表（pricing）、L2 验证命令
 harness.lock.json    资产版本锁（提交进 git）
 .workspace/          运行时产物：traces.jsonl、rsi/journal.jsonl、sandbox/（不提交）
+examples/starter/    一个接 DeepSeek 端点的完整工程（可直接跑）
 ```
 
 ## 资产格式
@@ -281,7 +307,8 @@ CI 里有这一步。
 
 工具链：Node ≥ 20、TypeScript 7（原生 `tsc`，与 `@migor/agentia` 同版本）、tsx 跑测试、biome 管 lint 与格式。类型检查是硬门，`strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` 全开。
 
-测试分七组：资产层、评测台与回归门、RSI 闭环（含真实 trace 归因）、多 agent 委派、
-CLI 与渲染端到端、L2 代码补丁（沙箱 / 审批 / 回滚）、HTTP 面（含并发峰值必须为 1）。
-另有 `tests/architecture.test.ts` 守分层与文件体量 —— 分层写在文档里等于没有，能执行才算。
-`npm run e2e:offline` 是第八组：它不在 `npm test` 里，因为它要 `dist/` 且起子进程。
+测试分八组：资产层、评测台与回归门、RSI 闭环（含真实 trace 归因）、多 agent 委派、
+CLI 与渲染端到端、配置与端点桥接（含价格表口径）、L2 代码补丁（沙箱 / 审批 / 回滚）、
+HTTP 面（含并发峰值必须为 1）。另有 `tests/architecture.test.ts` 守分层与文件体量 ——
+分层写在文档里等于没有，能执行才算。`npm run e2e:offline` 是第九组：它不在 `npm test` 里，
+因为它要 `dist/` 且起子进程。

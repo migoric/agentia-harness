@@ -29,6 +29,12 @@ export interface RunOutcome {
    * token 判「没变好还更贵」—— 把两者混成一个 0，预算判据就静默失效了。
    */
   readonly costUsd: number | undefined;
+  /**
+   * 没有成本读数时**为什么**没有 —— 两种病因的处理完全不同，别混成一句「没读数」：
+   * - `unpriced`：模型不在价格表里（改配置的 `pricing` 段）；
+   * - `unreported`：端点根本没报 token 计量（改不了配置，得看端点的 usage 行为）。
+   */
+  readonly costNote: CostNote | undefined;
   readonly durationMs: number;
   readonly error: { readonly type: string; readonly message: string } | undefined;
   /** 本次实际调用过的技能（去重、按首次出现序） */
@@ -45,6 +51,8 @@ export interface RunOutcome {
  * **真实调用产生的 trace** 断言这个事件在读不到 usage 时确实出现，改名会立刻红。
  */
 const USAGE_MISSING_EVENT = 'usage.missing';
+
+export type CostNote = 'unpriced' | 'unreported';
 
 /**
  * 这一轮里有没有回合「根本没报计量」。
@@ -71,6 +79,8 @@ export interface RunOptions {
 
 export class Runner {
   readonly agent: AgentAsset;
+  /** 生效的模型名 —— `harness run` 用它判断「这个模型有没有定价」 */
+  readonly model: string;
   private readonly built: ReturnType<typeof buildApp>;
   private readonly skillNames: ReadonlySet<string>;
 
@@ -83,6 +93,7 @@ export class Runner {
   ) {
     this.built = buildApp({ config, assets, agent: agentName, persistTraces });
     this.agent = this.built.agent;
+    this.model = this.built.model;
     this.skillNames = new Set(assets.skills.map((s) => s.name));
   }
 
@@ -94,6 +105,11 @@ export class Runner {
     });
     const u = result.trace.totalUsage;
     const reported = usageReported(result.trace);
+    const costNote: CostNote | undefined = reported
+      ? u.costEstimate === undefined
+        ? 'unpriced'
+        : undefined
+      : 'unreported';
     const hits = capabilityHits(result.trace, this.skillNames);
     return {
       text: result.finalText,
@@ -104,7 +120,8 @@ export class Runner {
       tokens: u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens,
       // 端点没报计量时 `costEstimate` 是 **0** 而不是 undefined（上游按「0 token × 单价」算），
       // 直接透传会让预算闸以为这一轮免费 —— 所以先问「到底报没报读数」
-      costUsd: reported ? (u.costEstimate ?? undefined) : undefined,
+      costUsd: costNote === undefined ? u.costEstimate : undefined,
+      costNote,
       durationMs: Date.now() - started,
       error:
         result.error === undefined

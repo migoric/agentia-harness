@@ -6,12 +6,39 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **`endpoint` 段：把「连哪个端点」变成可提交的配置**。此前换端点只能靠环境变量
+  （`ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`），于是「这个工程跑的是 DeepSeek 还是
+  Anthropic」在仓库里看不出来。现在：
+
+  ```json
+  { "endpoint": { "baseURL": "https://api.deepseek.com/anthropic", "apiKeyEnv": "DEEPSEEK_API_KEY" } }
+  ```
+
+  `apiKeyEnv` 只写**变量名**，key 留在 `.env`（配置文件会被提交）。真实环境变量仍然
+  优先于配置文件与 `.env` —— 命令行的显式设置永远赢。
+
+- **`pricing` 段：给非 Anthropic 模型定价**，接到 agentia 的 `priceOverrides`。
+  不给的后果是**静默**的（成本读数「未知」⇒ 回归门的成本判据退回 token、`rsi --max-cost`
+  不生效），现在 `run` 会在结尾点明是哪一种。
+
+- **`examples/starter/`**：一个接 DeepSeek 端点、能直接跑的完整工程。
+
 ### 修复
 
 - **端点不报 usage 时成本被算成 `0`**：模型在价格表里时，上游按「0 token × 单价」
   算出 `costEstimate = 0`，与「真的一分没花」是同一个数 ⇒ `costKnown` 判成 true，
   预算闸与回归门一起静默失效。现在按 trace 里的 `usage.missing` 事件把这种情况折回
   `undefined`（literal 复制，有测试守着上游改名）。
+- **「没有成本读数」的两种病因分开报**（`RunOutcome.costNote`：`unpriced` / `unreported`）。
+  补救动作完全不同：一个是改配置，一个是换端点。此前都表现为「报告里少了个 `$`」。
+- **eval 报告的成本缺失提示不再要求 `costUsd > 0`**：未定价时总成本恰好是 0，
+  而按 `>0` 判会让最该看到这句话的人看不到它。
+- **缺 key 时在开跑前报 config.invalid（退出码 2）**，而不是等第一次模型调用换回一个
+  401（那时人先去怀疑端点、模型名、网络）。只对显式声明了 `endpoint.apiKeyEnv` 的工程
+  生效，且只拦 `run` / `eval` / `rsi` / `serve` —— `lock` / `trace` / `report` 与
+  `rsi status|revert` 不调模型，不该被凭据拦住。
 
 ### 工具
 
@@ -22,6 +49,9 @@
   与完整 RSI 闭环（归因 → 提案 → 验证 → 采纳 → 回滚，逐字比对）。CI 已接入。
 
   它立刻兑现了价值：上面那条成本 bug 就是它跑出来的。
+
+  新增两条用例走**配置 + `.env`** 而不是环境变量 —— 只有这条路能证明配置里的
+  `baseURL` / `apiKeyEnv` 真的接到了客户端上（对照：缺 key 时退出码 2）。
 
 ## [0.2.0] - 2026-11-20
 

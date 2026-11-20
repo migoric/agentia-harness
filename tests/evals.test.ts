@@ -82,6 +82,7 @@ function outcome(text: string, extra: Partial<RunOutcome> = {}): RunOutcome {
     trace: emptyTrace(),
     tokens: 15,
     costUsd: undefined,
+    costNote: 'unpriced',
     durationMs: 1,
     error: undefined,
     skills: [],
@@ -212,6 +213,11 @@ describe('成本 —— 从 trace 读真实 USD', () => {
       '「没报读数」不能落成 0 —— 那会让预算闸与成本门一起静默失效',
     );
     assert.equal(out.tokens, 0, 'token 总量此时确实是 0，与成本未知是两件事');
+    assert.equal(
+      out.costNote,
+      'unreported',
+      '病因必须记成「端点没报计量」而不是「没定价」—— 两者的补救动作完全不同',
+    );
 
     // harness 读的是复制的字面量 `usage.missing`（该常量不在 agentia 公共导出面），
     // 上游改名后会静默「读到 0 条」⇒ 成本又变回 0。这条断言就是那个变化的探针
@@ -238,6 +244,31 @@ describe('成本 —— 从 trace 读真实 USD', () => {
       out.costUsd,
       undefined,
       '「不知道花了多少」与「花了 0」必须可区分，否则成本门静默失效',
+    );
+    assert.equal(out.costNote, 'unpriced', '这一种是配置能修的：pricing 段缺一条单价');
+  });
+
+  it('pricing 段配了单价之后，非 Anthropic 模型也有成本读数', async () => {
+    const root = project();
+    // 这条守的是「配置里的 pricing 真的接到了 agentia 的 priceOverrides」——
+    // 只测 loadConfig 解析，接不上等于写了个没人读的字段
+    writeFileSync(
+      join(root, 'harness.config.json'),
+      JSON.stringify({
+        model: 'deepseek-flash',
+        pricing: { 'deepseek-flash': { in: 0.15, out: 0.6 } },
+      }),
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const runner = createRunner(config, assets, undefined, false);
+    const out = await runner.run('压一下', { client: scriptedClient([endTurn('结论：好')]) });
+
+    assert.equal(out.costNote, undefined, '配了单价就不该再报「没读数」');
+    assert.ok(
+      (out.costUsd ?? 0) > 0,
+      `10 in + 5 out × ($0.15/$0.6 每 1M) 应大于 0，实际 ${String(out.costUsd)}`,
     );
   });
 });

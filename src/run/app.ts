@@ -1,4 +1,10 @@
-import { AgentApp, jsonlTraceSink, SystemPrompt, type TraceSink } from '@migor/agentia';
+import {
+  AgentApp,
+  jsonlTraceSink,
+  resolveDefaultModel,
+  SystemPrompt,
+  type TraceSink,
+} from '@migor/agentia';
 import type { AgentAsset, AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
@@ -17,6 +23,8 @@ import { buildTools } from './tools.js';
 export interface BuiltApp {
   readonly app: AgentApp;
   readonly agent: AgentAsset;
+  /** 生效的模型名（与传给 app 的**同一个值**）—— 诊断文案靠它说话 */
+  readonly model: string;
 }
 
 export interface BuildAppOptions {
@@ -40,9 +48,10 @@ export function buildApp(opts: BuildAppOptions): BuiltApp {
   }
   sinks.push(...(opts.extraSinks ?? []));
 
-  const model = opts.config.model ?? agent.model;
+  const model = effectiveModel(opts.config, agent);
   const maxIterations = opts.config.maxIterations ?? agent.maxIterations;
   const maxCostUsd = opts.config.maxCostUsd ?? agent.maxCostUsd;
+  const pricing = opts.config.pricing;
 
   const app = new AgentApp({
     name: opts.config.appName,
@@ -54,13 +63,27 @@ export function buildApp(opts: BuildAppOptions): BuiltApp {
       'harness.agent.fingerprint': agent.fingerprint,
     },
     traceContent: 'full',
-    ...(model !== undefined ? { model } : {}),
+    model,
     ...(maxIterations !== undefined ? { maxIterations } : {}),
     ...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
+    // 非 Anthropic 模型必须自己定价，否则成本读数是「未知」而不是 0（见 config.pricing）
+    ...(Object.keys(pricing).length > 0 ? { priceOverrides: { ...pricing } } : {}),
     sinks,
   });
 
-  return { app, agent };
+  return { app, agent, model };
+}
+
+/**
+ * 本工程**实际生效**的模型名：配置 > agent 资产 > agentia 缺省（`AGENTIA_MODEL` env
+ * → `claude-opus-5`）。
+ *
+ * 单独导出的理由：诊断（「这个模型没定价」）必须对着**生效值**说话。拿
+ * `config.model ?? agent.model` 去算，会漏掉「两处都没有、实际用的是缺省模型」这一支，
+ * 而那恰恰是最容易没定价的一支。
+ */
+export function effectiveModel(config: HarnessConfig, agent: AgentAsset): string {
+  return config.model ?? agent.model ?? resolveDefaultModel();
 }
 
 function pickAgent(assets: AssetSet, wanted: string | undefined): AgentAsset {

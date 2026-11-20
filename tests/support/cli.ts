@@ -17,11 +17,21 @@ const CLI = join(import.meta.dirname, '..', '..', 'src', 'cli.ts');
  */
 const TSX = import.meta.resolve('tsx');
 
-export function runCli(args: string[], cwd: string): { code: number | null; out: string } {
+export function runCli(
+  args: string[],
+  cwd: string,
+  /** 追加/覆盖的环境变量（`undefined` 值表示**删掉**继承来的那个变量） */
+  env: Record<string, string | undefined> = {},
+): { code: number | null; out: string } {
+  const merged: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete merged[k];
+    else merged[k] = v;
+  }
   const r = spawnSync(process.execPath, ['--import', TSX, CLI, ...args], {
     cwd,
     encoding: 'utf8',
-    env: { ...process.env, NO_COLOR: '1' },
+    env: merged,
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }

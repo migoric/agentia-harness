@@ -95,8 +95,13 @@ export function renderReport(report: EvalReport): string {
     `\n${report.passed}/${report.total} 通过（${(report.passRate * 100).toFixed(1)}%）· ` +
       `${report.tokens} token${report.costKnown ? fmtCost(report.costUsd) : ''} · 资产 ${report.assetFingerprint}`,
   );
-  if (!report.costKnown && report.costUsd > 0) {
-    lines.push('注意：部分用例没有成本读数（模型不在价格表内），总成本偏低，不可用于跨轮比较。');
+  if (!report.costKnown) {
+    // 条件刻意**不是** `costUsd > 0`：模型不在价格表里时总成本恰好是 0，而那正是
+    // 「这轮根本没有读数」的常态 —— 按 >0 判会让最该看到这句话的人看不到它。
+    lines.push(
+      '注意：有成本读数缺失的用例（模型不在价格表里 / 端点没报计量），总成本不可用于跨轮比较，' +
+        '回归门会退回按 token 判。',
+    );
   }
   if (report.skillHits.length > 0) {
     lines.push('命中：');

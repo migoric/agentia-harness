@@ -55,17 +55,24 @@ async function startFake(args = []) {
   };
 }
 
-/** 跑 CLI，返回 { code, out, json } */
-function cli(args, { root, base }) {
+/**
+ * 跑 CLI，返回 { code, out, json }。
+ *
+ * `clean: true` 表示**不**从环境变量给端点/凭据 —— 用来证明「配置 + .env」这条
+ * 真实用户路径自己就能走通（不借开发机上可能存在的 ANTHROPIC_* 变量）。
+ */
+function cli(args, { root, base, clean = false }) {
+  const env = { ...process.env };
+  if (clean) {
+    delete env.ANTHROPIC_BASE_URL;
+    delete env.ANTHROPIC_API_KEY;
+  } else {
+    env.ANTHROPIC_BASE_URL = base;
+    env.ANTHROPIC_API_KEY = 'fake-key';
+  }
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args, '--root', root], {
-      env: {
-        ...process.env,
-        ANTHROPIC_BASE_URL: base,
-        ANTHROPIC_API_KEY: 'fake-key',
-        // 退避默认是秒级；测试要的是「重试发生了」，不是「等够了」
-        HARNESS_TEST_FAST_BACKOFF: '1',
-      },
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const out = [];
@@ -204,7 +211,63 @@ const root = await project();
     j.costUsd === null,
     `costUsd=${JSON.stringify(j.costUsd)}\n${r.out}`,
   );
+  check(
+    '同一轮要说清病因是「端点没报计量」而不是「没定价」',
+    String(j.costNote) === 'unreported',
+    `costNote=${JSON.stringify(j.costNote)}\n${r.out}`,
+  );
   fake.stop();
+}
+
+// 端点走配置 + .env（真实用户路径）：`endpoint.baseURL` 与「key 在哪个变量里」进配置，
+// key 只进 .env。全程**不给**环境变量 —— 这条过了才说明桥接真的接上了
+{
+  const fake = await startFake();
+  const cfgRoot = await project();
+  writeFileSync(
+    join(cfgRoot, 'harness.config.json'),
+    `${JSON.stringify(
+      {
+        appName: 'offline',
+        model: 'claude-opus-5',
+        endpoint: { baseURL: fake.url, apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+  writeFileSync(join(cfgRoot, '.env'), 'DEEPSEEK_API_KEY=fake-key\n', 'utf8');
+  const r = await cli(['run', '压成要点', '--json'], { root: cfgRoot, clean: true });
+  const j = r.json ?? {};
+  check(
+    'endpoint + .env：配置里的 baseURL / apiKeyEnv 真的接到了客户端（不借环境变量）',
+    r.code === 0 && j.ok === true && (j.costUsd ?? 0) > 0,
+    `code=${r.code} ok=${j.ok} cost=${j.costUsd}\n${r.out}`,
+  );
+  rmSync(cfgRoot, { recursive: true, force: true });
+  fake.stop();
+}
+
+// 同一个工程，把 .env 拿掉 ⇒ 开跑前就报缺凭据（退出码 2），不花一轮 token 去换 401
+{
+  const cfgRoot = await project();
+  writeFileSync(
+    join(cfgRoot, 'harness.config.json'),
+    `${JSON.stringify(
+      { appName: 'offline', model: 'claude-opus-5', endpoint: { apiKeyEnv: 'DEEPSEEK_API_KEY' } },
+      null,
+      2,
+    )}\n`,
+    'utf8',
+  );
+  const r = await cli(['run', '压成要点'], { root: cfgRoot, clean: true });
+  check(
+    '没有 key ⇒ 退出码 2 且点名 DEEPSEEK_API_KEY（不是等 401）',
+    r.code === 2 && /缺少模型凭据：DEEPSEEK_API_KEY/.test(r.out),
+    `code=${r.code}\n${r.out}`,
+  );
+  rmSync(cfgRoot, { recursive: true, force: true });
 }
 
 {
