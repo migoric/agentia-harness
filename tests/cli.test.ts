@@ -320,3 +320,77 @@ describe('rsi revert <id>', () => {
     assert.equal(readFileSync(agent.path, 'utf8'), original);
   });
 });
+
+describe('harness evidence', () => {
+  it('从报告导出分层证据；重复 id 拒绝；拼错的 flag 退出码 2', () => {
+    const dir = tmp();
+    writeFileSync(join(dir, 'harness.config.json'), '{}\n');
+    mkdirSync(join(dir, '.workspace'), { recursive: true });
+    writeFileSync(
+      join(dir, '.workspace', 'traces.jsonl'),
+      `${JSON.stringify({
+        traceId: 't-ev',
+        rootSpanId: 's0',
+        spans: [],
+        status: 'ok',
+        totalUsage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      })}\n`,
+    );
+    writeFileSync(
+      join(dir, '.workspace', 'report.json'),
+      JSON.stringify({
+        total: 1,
+        passed: 0,
+        passRate: 0,
+        tokens: 2,
+        costUsd: 0.01,
+        costKnown: true,
+        assetFingerprint: 'fp',
+        agent: 'main@1',
+        skillHits: [],
+        cases: [
+          {
+            name: 'a',
+            task: '任务甲',
+            split: 'train',
+            passed: false,
+            failures: ['正文缺少 "x"'],
+            tokens: 2,
+            costUsd: 0.01,
+            iterations: 1,
+            durationMs: 1,
+            stopReason: 'end_turn',
+            excerpt: '输出',
+            traceId: 't-ev',
+            skills: [],
+            subagents: [],
+          },
+        ],
+      }),
+    );
+
+    const first = run(
+      ['evidence', '--from-report', '.workspace/report.json', '--id', 'ev-cli'],
+      dir,
+    );
+    assert.equal(first.code, 0, first.out);
+    const corpus = join(dir, '.workspace', 'evidence', 'ev-cli');
+    assert.ok(existsSync(join(corpus, 'overview.md')));
+    assert.ok(existsSync(join(corpus, 'index.json')));
+    assert.match(readFileSync(join(corpus, 'overview.md'), 'utf8'), /\[a\]/);
+
+    const again = run(
+      ['evidence', '--from-report', '.workspace/report.json', '--id', 'ev-cli'],
+      dir,
+    );
+    assert.equal(again.code, 1, again.out);
+    assert.match(again.out, /不覆盖历史证据/);
+
+    const typo = run(
+      ['evidence', '--from-report', '.workspace/report.json', '--id', 'x', '--oops'],
+      dir,
+    );
+    assert.equal(typo.code, 2, typo.out);
+    assert.match(typo.out, /不认识 --oops/);
+  });
+});

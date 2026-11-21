@@ -6,6 +6,7 @@ import type { AssetSet } from '../assets/types.js';
 import { findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { loadEvalCases } from '../evals/load.js';
 import { appendJournal, atomicWrite, journalPath, readJournal } from './journal.js';
 import type { JournalEntry, Proposal, VerifyOutcome } from './types.js';
 import { renderFile } from './verify.js';
@@ -33,6 +34,25 @@ export function acceptProposal(
 ): JournalEntry {
   if (!outcome.gate.ok) {
     throw new HarnessError('rsi.gate_blocked', `回归门未通过，拒绝采纳：${outcome.gate.reason}`);
+  }
+  // 第二道闸在唯一写盘入口上：调用方即使拿到 verifyProposal 的结果后自己改了判定，
+  // 也没法带着「留出集退步」的候选落盘。
+  if (outcome.holdout !== undefined && !outcome.holdout.gate.ok) {
+    throw new HarnessError(
+      'rsi.gate_blocked',
+      `留出集未通过，拒绝采纳：${outcome.holdout.gate.reason}`,
+    );
+  }
+  // 反过来也要挡：工程配了 holdout，却拿来一份没验过留出集的 outcome ——
+  // 这不是「可选字段缺席」，是有人绕过了 runCycle / rsi accept --from。
+  if (
+    outcome.holdout === undefined &&
+    loadEvalCases(config.evalsDir).some((c) => c.split === 'holdout')
+  ) {
+    throw new HarnessError(
+      'rsi.gate_blocked',
+      '本工程配置了 holdout 用例，但验证结果没有留出集记录 —— 拒绝采纳',
+    );
   }
   const { proposal } = outcome;
   const entry = writePatch(config, assets, proposal, outcome.gate.reason);
@@ -87,6 +107,7 @@ function writePatch(
     before: proposal.patch.before,
     after: proposal.patch.after,
     reason,
+    ...(proposal.manifest !== undefined ? { manifest: proposal.manifest } : {}),
     assetsBefore: assets.fingerprint,
     assetsAfter: after.fingerprint,
   };
@@ -144,6 +165,7 @@ export function revertLast(config: HarnessConfig, id?: string): RevertResult {
     ...last,
     at: Date.now(),
     status: 'rejected',
+    reverted: true,
     reason: `回滚了 ${last.proposalId}（原采纳理由：${last.reason}）`,
     assetsBefore: current.fingerprint,
     assetsAfter: restored.fingerprint,

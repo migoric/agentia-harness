@@ -7,6 +7,7 @@ import type { EvalCase, EvalExpect, ToolArgExpect } from './types.js';
 /** 用例 frontmatter 白名单：多写一个断言键就静默少一道门，比配置拼错更难发现 */
 const CASE_KEYS: readonly string[] = [
   'name',
+  'split',
   'expect_contains',
   'expect_not_contains',
   'expect_tools',
@@ -18,6 +19,18 @@ const CASE_KEYS: readonly string[] = [
   'expect_max_tokens',
   'expect_max_iterations',
 ];
+
+/**
+ * 多轮用例的轮次分隔符 —— 正文里单独一行写成 `<!-- turn -->`。
+ *
+ * 为什么不用 frontmatter 数组：轮次正文是**给模型的话**，里面天然会带引号、冒号、
+ * `#`（看起来像注释）、甚至 `---`（markdown 分隔线）。塞进我们那个刻意做小的 YAML
+ * 子集只会让「写一个带 # 的追问」变成解析失败。一行 HTML 注释不会出现在人话里，
+ * 而且对 diff / grep 都友好。
+ */
+export const TURN_SEPARATOR = '<!-- turn -->';
+
+const TURN_LINE = /^[ \t]*<!--\s*turn\s*-->[ \t]*\r?$/m;
 
 /**
  * 加载 `evals/` —— 一个文件一个用例，Markdown。
@@ -32,6 +45,18 @@ const CASE_KEYS: readonly string[] = [
  * 这个仓库的 issue #12 该交给谁？
  * ```
  *
+ * 多轮用例用分隔符把后续轮次写在同一个正文里（首轮仍是第一段）：
+ *
+ * ```md
+ * ---
+ * name: fix-path
+ * expect_contains: bar.c
+ * ---
+ * 先看下 foo.c 里的函数
+ * <!-- turn -->
+ * 不对，我要的是 bar.c
+ * ```
+ *
  * 用 Markdown 而不是 JSON：RSI 的提案会**生成**用例（从线上失败 trace 回流），
  * md 让 diff 可读、也让人能直接改一个字重跑。正文就是 task。
  */
@@ -39,6 +64,14 @@ export function loadEvalCases(dir: string): EvalCase[] {
   if (!existsSync(dir)) return [];
   const files = collect(join(dir));
   const cases = files.map(parseCase);
+  // 留出集不是「附加题」：全是 holdout 时没有优化信号，RSI 会拿着零条 train 失败
+  // 去做归因，然后声称「没有失败无需改进」。这是配置错，必须在加载期炸。
+  if (cases.length > 0 && cases.every((c) => c.split === 'holdout')) {
+    throw new HarnessError(
+      'eval.invalid',
+      `evals 全被标成 split: holdout —— 至少要留一条 train 用例供 RSI 归因与提案`,
+    );
+  }
   const seen = new Map<string, string>();
   for (const c of cases) {
     const prev = seen.get(c.name);
@@ -77,10 +110,14 @@ function parseCase(path: string): EvalCase {
     }
   }
   const name = scalar(fm, 'name', path) ?? path.replace(/.*\//, '').replace(/\.md$/, '');
-  const task = fm.body.trim();
-  if (task === '') {
-    throw new HarnessError('eval.invalid', `${path}: 正文必须是任务描述（不能为空）`);
+  const split = scalar(fm, 'split', path);
+  if (split !== undefined && split !== 'train' && split !== 'holdout') {
+    throw new HarnessError(
+      'eval.invalid',
+      `${path}: split 只能是 train / holdout（收到 "${split}"）—— 拼错会让用例静默混进 train，留出集就此失效`,
+    );
   }
+  const { task, followUps } = splitTurns(fm.body, path);
 
   const contains = list(fm, 'expect_contains');
   const notContains = list(fm, 'expect_not_contains');
@@ -140,7 +177,33 @@ function parseCase(path: string): EvalCase {
     );
   }
 
-  return { name, task, expect, path };
+  return {
+    name,
+    task,
+    ...(followUps.length > 0 ? { followUps } : {}),
+    expect,
+    ...(split !== undefined ? { split } : {}),
+    path,
+  };
+}
+
+/**
+ * 把正文切成轮次。
+ *
+ * 空段一律拒绝：`<!-- turn -->` 后面忘了写内容，跑起来会变成「发一条空消息」——
+ * 那在真实会话里根本不存在，测出来的东西也就不是用户会遇到的问题。
+ */
+function splitTurns(body: string, path: string): { task: string; followUps: string[] } {
+  const segments = body.split(TURN_LINE).map((s) => s.trim());
+  const empty = segments.indexOf('');
+  if (empty !== -1) {
+    throw new HarnessError(
+      'eval.invalid',
+      `${path}: 第 ${empty + 1} 段轮次是空的（多轮用例用 "${TURN_SEPARATOR}" 分行，每段都必须有内容）`,
+    );
+  }
+  const [first = '', ...rest] = segments;
+  return { task: first, followUps: rest };
 }
 
 function positive(raw: string | undefined, label: string): number | undefined {

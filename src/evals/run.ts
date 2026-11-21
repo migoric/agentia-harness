@@ -2,7 +2,9 @@ import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { costOf } from '../run/cost.js';
 import { createRunner, type RunOutcome } from '../run/runner.js';
+import { mergeTraces } from '../run/trace-merge.js';
 import { combineAbort } from '../util/abort.js';
 import { loadEvalCases } from './load.js';
 import { toolInvocations } from './tool-events.js';
@@ -117,17 +119,31 @@ async function runOne(
   opts: RunSuiteOptions,
 ): Promise<CaseResult> {
   const retries = Math.max(0, opts.retries ?? 0);
+  const plannedTurns = turnsOf(c);
   let out: RunOutcome | undefined;
   let lastError: unknown;
   let timedOut = false;
+  /** 本次尝试里已经跑完的轮次（只有多轮才非空）—— 超时/异常时靠它保住这笔账 */
+  let partial: RunOutcome[] = [];
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    // 每次尝试一个**新的**数组，并且回调只闭包它：上一轮超时后 `work` 仍可能跑完并
+    // 触发回调，若回调捕获的是外层的 `partial`，那几轮会被算进下一次尝试的账单
+    const collected: RunOutcome[] = [];
+    partial = collected;
     const gate = combineAbort(opts.signal, opts.timeoutMs);
     try {
-      const work = runner.run(c.task, {
+      const runOpts = {
         ...(opts.client !== undefined ? { client: opts.client } : {}),
         ...(gate.signal !== undefined ? { signal: gate.signal } : {}),
-      });
+        onTurn: (o: RunOutcome) => collected.push(o),
+      };
+      // 单轮走 `run`（与线上同一条路），多轮才接会话。分支放在这里而不是 Runner 内部：
+      // 「这条用例是几轮」是评测数据本身的性质，不是运行时的开关。
+      const work =
+        c.followUps === undefined || c.followUps.length === 0
+          ? runner.run(c.task, runOpts)
+          : runner.runTurns([c.task, ...c.followUps], runOpts);
       // race 输掉之后 work 仍可能 reject（abort 常常正好让下游抛）—— 挂个空 catch，
       // 否则会变成 unhandled rejection 把进程带崩
       work.catch(() => undefined);
@@ -157,21 +173,41 @@ async function runOne(
 
   if (out === undefined) {
     // 装配/客户端层的异常也要变成「这条用例失败」，而不是让整轮崩掉
+    //
+    // 多轮用例在这里最容易失真：`Promise.race` 一输，整段 `runTurns` 的结果就没了。
+    // 但已经跑完的那几轮真花过 token —— 所以先合并它们，报告才能说清「崩在第几轮、
+    // 前面花了多少」，而不是把成本一律记成 0（成本未知不等于免费）。
+    const spent = partial.length === 0 ? undefined : mergeTraces(partial.map((p) => p.trace));
+    const tokens =
+      spent === undefined
+        ? 0
+        : spent.totalUsage.inputTokens +
+          spent.totalUsage.outputTokens +
+          spent.totalUsage.cacheReadTokens +
+          spent.totalUsage.cacheCreationTokens;
+    const failedTurn =
+      plannedTurns === undefined ? undefined : Math.min(partial.length + 1, plannedTurns);
+    const done = partial.length === 0 ? '' : `（前 ${partial.length} 轮已完成，${tokens} token）`;
     return {
       name: c.name,
       task: c.task,
+      split: c.split,
       passed: false,
       failures: [
-        `${timedOut ? '用例超时' : 'run 抛出'}: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+        `${timedOut ? '用例超时' : 'run 抛出'}${failedTurn === undefined ? '' : `（第 ${failedTurn} 轮）`}${done}: ${
+          lastError instanceof Error ? lastError.message : String(lastError)
+        }`,
       ],
-      tokens: 0,
-      costUsd: undefined,
-      iterations: 0,
-      durationMs: 0,
+      tokens,
+      costUsd: spent === undefined ? undefined : costOf(spent),
+      iterations: partial.reduce((sum, p) => sum + p.iterations, 0),
+      durationMs: partial.reduce((sum, p) => sum + p.durationMs, 0),
       stopReason: timedOut ? 'timeout' : 'threw',
       excerpt: '',
       skills: [],
       subagents: [],
+      ...(plannedTurns === undefined ? {} : { turns: plannedTurns }),
+      ...(failedTurn === undefined ? {} : { failedTurn }),
     };
   }
 
@@ -180,6 +216,7 @@ async function runOne(
   return {
     name: c.name,
     task: c.task,
+    split: c.split,
     passed: failures.length === 0,
     failures,
     tokens: out.tokens,
@@ -191,7 +228,15 @@ async function runOne(
     traceId: out.trace.traceId,
     skills: out.skills,
     subagents: out.subagents,
+    ...(out.turns === undefined ? {} : { turns: out.turns }),
+    ...(out.failedTurn === undefined ? {} : { failedTurn: out.failedTurn }),
   };
+}
+
+/** 计划轮数（单轮用例返回 undefined，报告里就不出现这个字段） */
+function turnsOf(c: EvalCase): number | undefined {
+  const extra = c.followUps?.length ?? 0;
+  return extra === 0 ? undefined : extra + 1;
 }
 
 /** 断言。返回空数组 = 通过 */
@@ -205,7 +250,11 @@ export function check(c: EvalCase, out: RunOutcome): string[] {
   const invocations = needsTools ? toolInvocations(out.trace) : [];
   const wantOk = c.expect.ok ?? true;
   if (wantOk && !out.ok) {
-    f.push(`期望正常收尾，实际 stopReason=${out.stopReason}`);
+    f.push(
+      out.failedTurn === undefined
+        ? `期望正常收尾，实际 stopReason=${out.stopReason}`
+        : `第 ${out.failedTurn} 轮非正常收尾（stopReason=${out.stopReason}），后续轮次已中止`,
+    );
   }
   if (!wantOk && out.ok) {
     f.push('期望非正常收尾，实际正常收尾');

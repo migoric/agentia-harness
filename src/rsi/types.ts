@@ -3,6 +3,30 @@ import type { EvalReport } from '../evals/types.js';
 import type { CodeJournal } from './code/types.js';
 
 /**
+ * 变更清单（AHE 的 decision observability）—— 每一次采纳都要能回答四个问题：
+ * 依据是什么、判断哪里坏了、期望发生什么、可能坏在哪里。
+ *
+ * 没有它时，journal 只留「before/after + 通过率涨了」：三个月后的人看到一个改动的
+ * 文本，看不出当时为什么相信它有用，也就无法判断现在该不该保留。
+ *
+ * 清单在**提案时**就写好（验证之前），不是事后补的解释 —— 事后写等于让结果污染假设。
+ *
+ * 定义放在这里（而不是 `manifest.ts`）是为了断开 `types ↔ manifest` 的类型级环：
+ * manifest.ts 要 `FailureMode`，types.ts 要 `ChangeManifest`，两边互指会让「哪个模块
+ * 是数据模型的家」变得说不清。`manifest.ts` 继续 re-export，老调用方不用改。
+ */
+export interface ChangeManifest {
+  /** 证据引用：`mode:<id>` / `case:<用例名>` / `trace:<traceId>` */
+  readonly evidence: readonly string[];
+  /**  hypothesis：我们判断哪个失败机制在起作用 */
+  readonly hypothesis: string;
+  /** prediction：改动后应该观察到什么（验证时逐条对照） */
+  readonly prediction: string;
+  /** risk：这次改动可能连带弄坏什么（由回归门兜底，但要先说出来） */
+  readonly risk: string;
+}
+
+/**
  * Harness —— RSI 的数据模型。
  *
  * 五步：采集（collect）→ 归因（attribute）→ 提案（propose）→ 验证（verify）→
@@ -45,6 +69,11 @@ export interface FailureSample {
   readonly tokens: number;
   readonly iterations: number;
   readonly excerpt: string;
+  /**
+   * 这次运行的 traceId（有 `--keep-traces` 时才有）。
+   * 它是「证据」与「这次失败」之间的硬连接：manifest 引用它，evidence 语料按它找原始 trace。
+   */
+  readonly traceId?: string | undefined;
   /** 这条用例实际走过的技能 —— 归因据此判断「该改哪个文件」 */
   readonly skills: readonly string[];
   readonly subagents: readonly string[];
@@ -77,8 +106,25 @@ export interface FailureMode {
   readonly targets: readonly TargetHint[];
 }
 
-/** 一次资产改写：只允许改**正文**（frontmatter 由 harness 维护） */
-export interface AssetPatch {
+/**
+ * 一条「试过但没成立」的教训 —— 提案器的输入。
+ *
+ * 从 `LedgerEntry` 映射过来而不是直接传账本：提案器只需要「改哪儿、当时预测什么、
+ * 为什么没成」三件事，把整条账本（含 evidence / holdout 细节）塞进提示词只会挤占
+ * 真正有用的失败证据。更重要的是解耦：propose 不该依赖 ledger（后者要读 cycle 目录）。
+ */
+export interface LessonEntry {
+  readonly proposalId: string;
+  /** `skill:x` / `agent:y` */
+  readonly target: string;
+  readonly prediction: string | undefined;
+  /** 当时被否掉的原因（门结论 / 留出集结论） */
+  readonly reason: string | undefined;
+  /** `not_realized` = 验过没兑现；`reverted` = 采纳后又被回滚 */
+  readonly outcome: 'not_realized' | 'reverted';
+}
+
+/** 一次资产改写：只允许改**正文**（frontmatter 由 harness 维护） */ export interface AssetPatch {
   /** `skill:repo-triage` 或 `agent:triage` */
   readonly target: string;
   readonly before: string;
@@ -92,15 +138,31 @@ export interface Proposal {
   readonly kind: FailureKind;
   readonly rationale: string;
   readonly patch: AssetPatch;
+  /**
+   * 变更前写下的依据 / 假设 / 预测 / 风险。缺席 = 外部提案没带（LLM 提案一定有），
+   * 读取侧不得把它当成「有预测」—— 没有就是没有，审计记录要如实。
+   */
+  readonly manifest?: ChangeManifest | undefined;
   /** L1 = 只改文本资产。L2（改代码）刻意不在首版 */
   readonly layer: 'L1';
 }
 
-export interface VerifyOutcome {
-  readonly proposal: Proposal;
+/** 留出集验证结果：候选在 train 上胜出之后才做，不参与候选排序 */
+export interface HoldoutResult {
   readonly baseline: EvalReport;
   readonly candidate: EvalReport;
   readonly gate: GateResult;
+}
+
+export interface VerifyOutcome {
+  readonly proposal: Proposal;
+  /** train 视图（没有留出集时就是完整报告） */
+  readonly baseline: EvalReport;
+  /** train 视图下的候选 */
+  readonly candidate: EvalReport;
+  readonly gate: GateResult;
+  /** 留出集最终验证；没有配置 holdout 用例时为 undefined */
+  readonly holdout?: HoldoutResult | undefined;
 }
 
 export type ProposalStatus = 'accepted' | 'rejected';
@@ -114,6 +176,8 @@ export interface JournalEntry {
   readonly before: string;
   readonly after: string;
   readonly reason: string;
+  /** 当初写下的预测与依据，随采纳一起进审计线索 */
+  readonly manifest?: ChangeManifest | undefined;
   /** 采纳前后的资产指纹（回滚时校验：中间被手改过就不许自动回退） */
   readonly assetsBefore: string;
   readonly assetsAfter: string;
@@ -124,6 +188,8 @@ export interface JournalEntry {
    * `asset`，这样「回滚哪一条」的判定不必到处写 `=== undefined` 的分支。
    */
   readonly kind?: 'asset' | 'code';
+  /** 这条记录是回滚产生的（复用原 proposalId，但语义不是「又被拒了一次提案」） */
+  readonly reverted?: boolean | undefined;
   /** `kind === 'code'` 时才有：补丁本身与逐文件指纹 */
   readonly code?: CodeJournal;
 }
@@ -140,7 +206,7 @@ export interface JournalEntry {
 export interface CycleBudget {
   readonly limitUsd: number;
   readonly spentUsd: number;
-  /** true = 因超限提前收工（基线之后或验证中途） */
+  /** true = 这一轮结束时预算已经用完（提前收工，或者跑完才发现超了）—— 调用方据此决定还开不开下一轮 */
   readonly stopped: boolean;
 }
 
@@ -163,6 +229,21 @@ export interface CycleReport {
   readonly costKnown: boolean;
   /** 预算闸的结论；没设上限时为 undefined */
   readonly budget: CycleBudget | undefined;
+  /**
+   * 本轮提案器**实际看到**的「试过但没成立」条目数。
+   *
+   * 三态，缺一不可：
+   * - `undefined` = 本轮根本没提案（基线就超预算 / 没有失败模式可归因）；
+   * - `0` = 提了案，但仓里还没有教训可参考；
+   * - `N` = 提了案，提示词里带了 N 条历史。
+   *
+   * 刻意不用「早停时也写 N」的写法：那会让「提案器看到了 3 条历史」与「跑都没跑到
+   * 提案那一步」在记录里长得一样，而这正是审计最想分开的两件事。
+   *
+   * 记它的理由：账本回灌是**软约束**（写进提示词），不落这个数就永远看不出
+   * 「提案器到底有没有看到历史」—— 而它恰恰是最容易接线漏掉的一环。
+   */
+  readonly historyConsulted?: number | undefined;
   /** 本轮记录的落盘路径（dryRun 也写：人审需要证据） */
   readonly path: string;
 }

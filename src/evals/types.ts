@@ -35,10 +35,29 @@ export interface EvalExpect {
   readonly maxIterations?: number;
 }
 
+/**
+ * 用例的分组。`train` 参与归因与提案；`holdout` 只在候选选定后验一次。
+ *
+ * 两者不分的后果不是「评测不够多」，而是**闭环必然过拟合**：提案照着验收用例改，
+ * 验收门当然会放行。留出集一旦被用来挑候选，它就变成了 train —— 所以
+ * `runCycle` 里留出集只跑一次，且不参与排序。
+ */
+export type EvalSplit = 'train' | 'holdout';
+
 export interface EvalCase {
   readonly name: string;
+  /** 首轮任务原文。多轮用例的后续轮次在 `followUps` 里 */
   readonly task: string;
+  /**
+   * 后续轮次（只有多轮用例才有）。首轮永远是 `task`，这里存第 2 轮起的用户输入。
+   *
+   * 为什么单独一个字段而不是把整段塞进 `task`：`task` 被 harvest、报告、evidence
+   * 三处当成「一句话任务」消费，变成数组会让这三处全部失真。多轮是**增量**语义。
+   */
+  readonly followUps?: readonly string[] | undefined;
   readonly expect: EvalExpect;
+  /** 缺省 `train`：老用例不必改一个字也能继续用 */
+  readonly split?: EvalSplit | undefined;
   /** 来源文件（报错定位） */
   readonly path: string;
 }
@@ -74,6 +93,20 @@ export interface CaseResult {
    * 跑崩 / 超时时没有可用 trace，此字段缺席（不是空串）。
    */
   readonly traceId?: string | undefined;
+  /**
+   * 实际跑了几轮。单轮用例缺席（老报告兼容），多轮用例 ≥ 2。
+   *
+   * 存在的理由：报告只记 `task`（首轮），不带这个数时人看不出「这条用例失败在第
+   * 二轮追问」——而多轮失败与单轮失败的修法完全不同。
+   */
+  readonly turns?: number | undefined;
+  /** 第一处非正常收尾的轮次（1-based）。全部正常时缺席 */
+  readonly failedTurn?: number | undefined;
+  /**
+   * 这条用例属于哪个分组。缺席 = `train`（老报告兼容），由 `runOne` 透传。
+   * 报告是 `harness evidence` / `harvest --from-report` 的唯一任务来源，分组也必须随它落盘。
+   */
+  readonly split?: EvalSplit | undefined;
   /** 本次实际调用过的技能（去重）—— RSI 据此判断「该改哪个文件」 */
   readonly skills: readonly string[];
   /** 本次实际委派过的子 agent（去重） */

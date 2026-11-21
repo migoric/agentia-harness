@@ -41,7 +41,7 @@ export { CONFIG_FILENAME, type HarnessConfig, loadConfig, type ModelPrice } from
 export { describeError, HarnessError, type HarnessErrorCode, isHarnessError } from './errors.js';
 export { type GateOptions, type GateResult, gate } from './evals/gate.js';
 export { type HarvestedCase, harvestCase } from './evals/harvest.js';
-export { loadEvalCases } from './evals/load.js';
+export { loadEvalCases, TURN_SEPARATOR } from './evals/load.js';
 export {
   check,
   type RunSuiteOptions,
@@ -50,12 +50,14 @@ export {
   toolInvocations,
   toolSequence,
 } from './evals/run.js';
+export { HOLDOUT_GATE_OPTIONS, type SplitViews, splitReport } from './evals/split.js';
 export {
   type AssetHit,
   type CaseResult,
   type EvalCase,
   type EvalExpect,
   type EvalReport,
+  type EvalSplit,
   summarize,
   type ToolArgExpect,
 } from './evals/types.js';
@@ -81,16 +83,39 @@ export {
   verifyInSandbox,
 } from './rsi/code/sandbox.js';
 export type { CodeFileState, CodeJournal, CodePatch, CodeVerify } from './rsi/code/types.js';
+export {
+  buildEvidenceCorpus,
+  type EvidenceCorpus,
+  type EvidenceItem,
+  type EvidenceOptions,
+} from './rsi/evidence.js';
+export { type HoldoutOptions, validateHoldout } from './rsi/holdout.js';
 export { appendJournal, atomicWrite } from './rsi/journal.js';
-export { type CycleOptions, cyclesDir, runCycle } from './rsi/loop.js';
+export { type LedgerEntry, lessonsOf, readLedger } from './rsi/ledger.js';
+export { type CycleOptions, cyclesDir, runCycle, writeCycle } from './rsi/loop.js';
+export { type ChangeManifest, manifestFor, validateManifest } from './rsi/manifest.js';
 export { readProposal, writeProposal } from './rsi/manual.js';
 export { LlmProposer, type ProposeContext, type Proposer } from './rsi/propose.js';
+export {
+  checkRegression,
+  lastAccepted,
+  type Regression,
+  type RegressOptions,
+  type RegressReport,
+} from './rsi/regress.js';
+export {
+  type RoundStopReason,
+  type RoundsReport,
+  type RunRoundsOptions,
+  runRounds,
+} from './rsi/rounds.js';
 export type {
   AssetPatch,
   CycleReport,
   FailureKind,
   FailureMode,
   FailureSample,
+  HoldoutResult,
   JournalEntry,
   Proposal,
   ProposalStatus,
@@ -122,4 +147,5 @@ export {
   type RunOutcome,
 } from './run/runner.js';
 export { assertNoCycles, buildSkillTools, buildTools } from './run/tools.js';
+export { mergeTraces, mergeUsage } from './run/trace-merge.js';
 export { type CapabilityHits, capabilityHits } from './run/trace-read.js';

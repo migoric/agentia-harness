@@ -1,9 +1,16 @@
-import type { ModelClient, Trace } from '@migor/agentia';
-import { isSuccessStopReason } from '@migor/agentia';
+import { randomUUID } from 'node:crypto';
+import {
+  InMemorySessionStore,
+  isSuccessStopReason,
+  type ModelClient,
+  type SessionStore,
+  type Trace,
+} from '@migor/agentia';
 import type { AgentAsset, AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { buildApp } from './app.js';
 import { costOf, usageReported } from './cost.js';
+import { mergeTraces } from './trace-merge.js';
 import { capabilityHits } from './trace-read.js';
 
 /**
@@ -42,6 +49,13 @@ export interface RunOutcome {
   readonly skills: readonly string[];
   /** 本次实际委派过的子 agent（去重） */
   readonly subagents: readonly string[];
+  /**
+   * 这条用例**计划**跑几轮（单轮缺席）。中途失败中止时它仍是原计划轮数 ——
+   * 报告要回答的是「这是不是一条多轮用例」，而「跑到第几轮崩的」由 `failedTurn` 说。
+   */
+  readonly turns?: number | undefined;
+  /** 第一处非正常收尾的轮次（1-based）。全部正常时缺席 */
+  readonly failedTurn?: number | undefined;
 }
 
 export type CostNote = 'unpriced' | 'unreported';
@@ -50,6 +64,22 @@ export interface RunOptions {
   /** 注入模型客户端（评测用脚本客户端；不传给真实模型调用） */
   readonly client?: ModelClient | undefined;
   readonly signal?: AbortSignal | undefined;
+  /**
+   * 会话接线（只有 `runTurns` 内部会传）。
+   *
+   * 传它才接历史：agentia 的 `app.run` 明确不消费 `sessionId`（那是给异步宿主的
+   * 可序列化引用），只认 `{ store, id }`，且**只在 run 成功收尾时**把消息追加回
+   * store —— 失败轮不留历史，这一点直接决定了 `runTurns` 的中止策略。
+   */
+  readonly session?: { readonly store: SessionStore; readonly id: string } | undefined;
+  /**
+   * 每跑完一轮就回调一次（**只有 `runTurns` 会调**）。
+   *
+   * 存在的唯一理由是多轮超时：`Promise.race` 输掉之后整段 `runTurns` 的结果就没了，
+   * 但已经跑完的那几轮真花过 token。把它们留在手上，报告才能说「第 3 轮超时，
+   * 前两轮花了多少」—— 而不是把多轮用例的成本一律记成 0。
+   */
+  readonly onTurn?: ((outcome: RunOutcome) => void) | undefined;
 }
 
 export class Runner {
@@ -77,14 +107,8 @@ export class Runner {
     const { result } = await this.built.app.run([{ role: 'user', content: task }], {
       ...(opts.client !== undefined ? { client: opts.client } : {}),
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      ...(opts.session !== undefined ? { session: opts.session } : {}),
     });
-    const u = result.trace.totalUsage;
-    const reported = usageReported(result.trace);
-    const costNote: CostNote | undefined = reported
-      ? u.costEstimate === undefined
-        ? 'unpriced'
-        : undefined
-      : 'unreported';
     const hits = capabilityHits(result.trace, this.skillNames);
     return {
       text: result.finalText,
@@ -92,11 +116,11 @@ export class Runner {
       stopReason: result.stopReason,
       iterations: result.iterations,
       trace: result.trace,
-      tokens: u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens,
+      tokens: tokensOf(result.trace),
       // 端点没报计量时 `costEstimate` 是 **0** 而不是 undefined（上游按「0 token × 单价」算），
       // 直接透传会让预算闸以为这一轮免费 —— 所以先问「到底报没报读数」
       costUsd: costOf(result.trace),
-      costNote,
+      costNote: costNoteOf(result.trace),
       durationMs: Date.now() - started,
       error:
         result.error === undefined
@@ -106,6 +130,108 @@ export class Runner {
       subagents: [...new Set(hits.subagents)],
     };
   }
+
+  /**
+   * 跑一段多轮会话。
+   *
+   * 每轮是一次独立 `app.run`，靠 agentia 的 `InMemorySessionStore` 接历史：第 2 轮起
+   * 上游会把已有消息拼在本轮 user 消息**之前**，所以这里每轮只投本轮那一句。
+   *
+   * 一条刻意的规矩：**中间轮失败就中止**，不再往下跑。
+   * 上游只在 `succeeded` 时把消息追加回会话 —— 中间轮崩了，历史里就缺了这一轮，
+   * 后面几轮是在一段**真实会话里不会出现**的上下文上作答。那种结果既不能当失败
+   * 证据（病根在前面），也不能当通过（它测的不是用户会遇到的事）。
+   *
+   * 合并后的 trace / 文本 / 成本口径见 `trace-merge.ts` 与本函数的返回说明。
+   */
+  async runTurns(turns: readonly string[], opts: RunOptions = {}): Promise<RunOutcome> {
+    const started = Date.now();
+    if (turns.length === 0) throw new Error('runTurns 至少需要一轮');
+    // 加载期已经拦过空轮次，但这是**库 API**：绕过 eval 直接调它时也得拦。
+    // 发一条空消息在真实会话里不存在，测出来的结论也就无从修起。
+    const blank = turns.findIndex((t) => t.trim() === '');
+    if (blank !== -1) throw new Error(`runTurns 第 ${blank + 1} 轮是空的`);
+    const session = { store: new InMemorySessionStore(), id: `harness-${randomUUID()}` };
+
+    const parts: RunOutcome[] = [];
+    let threwAt: number | undefined;
+    let thrown: RunOutcome['error'];
+    for (const [i, task] of turns.entries()) {
+      let part: RunOutcome;
+      try {
+        part = await this.run(task, { ...opts, session });
+      } catch (e) {
+        // 单轮抛异常**不放弃整段会话**：前面几轮真花掉的 token 必须留在账上
+        // （成本未知不是免费），而且报告要能说清「跑崩在第几轮」。
+        // 整段一起抛出去，调用方只会看到 tokens=0、没有轮次 —— 等于把证据烧了。
+        threwAt = i;
+        thrown = {
+          type: e instanceof Error ? e.name : 'Error',
+          message: e instanceof Error ? e.message : String(e),
+        };
+        break;
+      }
+      parts.push(part);
+      opts.onTurn?.(part);
+      if (!part.ok && i < turns.length - 1) break;
+    }
+
+    const first = parts[0];
+    const last = parts[parts.length - 1];
+    // 一轮都没跑完（首轮就抛）时没有 trace 可合并 —— 造一条空 trace 而不是让整个
+    // 用例变成「run 抛出」：那条路会丢掉 `turns`，报告就看不出这是多轮用例
+    const merged = first === undefined ? emptyTrace() : mergeTraces(parts.map((p) => p.trace));
+    const hits = capabilityHits(merged, this.skillNames);
+    // 失败轮次：优先取「跑完了但收尾不正常的」那一轮；一轮都没跑完时取抛异常的那一轮
+    const badPart = parts.findIndex((p) => !p.ok);
+    const failedIndex = badPart === -1 ? (threwAt ?? -1) : badPart;
+    const failed = failedIndex === -1 ? undefined : parts[failedIndex];
+    return {
+      text: last?.text ?? '',
+      ok: failedIndex === -1,
+      stopReason:
+        failed?.stopReason ?? (failedIndex === -1 ? (last?.stopReason ?? 'end_turn') : 'threw'),
+      iterations: parts.reduce((sum, p) => sum + p.iterations, 0),
+      trace: merged,
+      tokens: tokensOf(merged),
+      costUsd: costOf(merged),
+      costNote: costNoteOf(merged),
+      durationMs: Date.now() - started,
+      error: thrown ?? parts.find((p) => p.error !== undefined)?.error,
+      skills: [...new Set(hits.skills)],
+      subagents: [...new Set(hits.subagents)],
+      turns: turns.length,
+      ...(failedIndex === -1 ? {} : { failedTurn: failedIndex + 1 }),
+    };
+  }
+}
+
+/** 一轮都没跑成时的占位 trace：没有 span、没有用量 —— 下游断言与成本口径照常工作 */
+function emptyTrace(): Trace {
+  const id = randomUUID();
+  return {
+    traceId: id,
+    rootSpanId: id,
+    spans: [],
+    status: 'error',
+    totalUsage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    },
+  };
+}
+
+function tokensOf(trace: Trace): number {
+  const u = trace.totalUsage;
+  return u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+}
+
+/** 没有成本读数的两种病因（见 `RunOutcome.costNote`）—— run 与 runTurns 共用一份判定 */
+function costNoteOf(trace: Trace): CostNote | undefined {
+  if (!usageReported(trace)) return 'unreported';
+  return trace.totalUsage.costEstimate === undefined ? 'unpriced' : undefined;
 }
 
 export function createRunner(

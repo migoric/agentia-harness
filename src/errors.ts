@@ -13,6 +13,8 @@ export type HarnessErrorCode =
   | 'eval.invalid'
   | 'rsi.no_signal'
   | 'rsi.gate_blocked'
+  /** 没有可用于对比的基准（没采纳过 / 找不到那次验证记录）—— 属于「用错/没准备好」 */
+  | 'rsi.no_baseline'
   | 'run.failed'
   /** 请求体超上限（HTTP 面映射到 413） */
   | 'run.payload_too_large'

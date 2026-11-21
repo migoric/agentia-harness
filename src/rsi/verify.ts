@@ -33,6 +33,11 @@ export interface VerifyOptions extends SuiteTuning {
   readonly client?: ModelClient | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly gateOptions?: GateOptions | undefined;
+  /**
+   * 只跑这些用例。RSI 传 train 用例名，`baseline` 也必须是 train 视图 ——
+   * 两边口径不一致时，gate 比较的就不是一个东西（见 `evals/split.ts`）。
+   */
+  readonly only?: readonly string[] | undefined;
 }
 
 /**
@@ -45,6 +50,9 @@ export interface VerifyOptions extends SuiteTuning {
  * 自动 RSI 与手写提案共用这一条：提案**来源**可以是人或模型，采纳标准不能变。
  */
 export function isWorthAccepting(outcome: VerifyOutcome): boolean {
+  if (!outcome.gate.ok) return false;
+  // 留出集用默认门：train 涨分但留出集退步，是过拟合最典型的形状，必须拒
+  if (outcome.holdout !== undefined && !outcome.holdout.gate.ok) return false;
   return outcome.gate.fixedCases.length > 0 || outcome.gate.passRateDelta > 0;
 }
 
@@ -60,6 +68,7 @@ export async function verifyProposal(opts: VerifyOptions): Promise<VerifyOutcome
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
     ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+    ...(opts.only !== undefined ? { only: opts.only } : {}),
   });
   return {
     proposal: opts.proposal,

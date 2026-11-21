@@ -62,7 +62,7 @@ export function reportCommand(
   return g.ok ? 0 : 1;
 }
 
-function readReport(root: string, path: string): EvalReport {
+export function readReport(root: string, path: string): EvalReport {
   const full = resolve(root, path);
   let parsed: unknown;
   try {

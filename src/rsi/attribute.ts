@@ -23,6 +23,7 @@ export function collectFailures(report: EvalReport): FailureSample[] {
       tokens: c.tokens,
       iterations: c.iterations,
       excerpt: c.excerpt,
+      ...(c.traceId !== undefined ? { traceId: c.traceId } : {}),
       skills: c.skills,
       subagents: c.subagents,
     }));

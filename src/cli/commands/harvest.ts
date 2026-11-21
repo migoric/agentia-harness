@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { HarnessError } from '../../errors.js';
 import { harvestCase } from '../../evals/harvest.js';
-import { loadEvalCases } from '../../evals/load.js';
+import { loadEvalCases, TURN_SEPARATOR } from '../../evals/load.js';
 import type { EvalReport } from '../../evals/types.js';
 import { boolFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
@@ -92,6 +92,15 @@ function taskFromReport(ctx: CliContext, path: string, traceId: string): string 
   }
   if (typeof hit.task !== 'string' || hit.task.trim() === '') {
     throw new HarnessError('eval.invalid', `${path} 里那条用例没有可用的 task 原文`);
+  }
+  // 多轮 trace 只有一条 traceId，但任务原文是好几段。回流成单条 task 会把
+  // 「先问 A、再纠正成 B」压成一句 —— 生成出来的用例测的是另一件事，
+  // 而它还会以「回归用例」的名义长期留在仓里。宁可拒绝。
+  if (typeof hit.turns === 'number' && hit.turns > 1) {
+    throw new HarnessError(
+      'eval.invalid',
+      `${path} 里那条用例是多轮（${hit.turns} 轮）—— harvest 只生成单轮用例，会把多轮场景压成一句话。请用 "${TURN_SEPARATOR}" 手写多轮用例`,
+    );
   }
   return hit.task;
 }

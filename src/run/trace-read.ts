@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import type { Span, Trace } from '@migor/agentia';
 
 /**
@@ -37,4 +38,43 @@ export function capabilityHits(trace: Trace, skillNames: ReadonlySet<string>): C
 /** 去重且保持首次出现顺序 —— 报告里要的是「用过哪些」，不是「用了几次」 */
 export function distinct(names: readonly string[]): string[] {
   return [...new Set(names)];
+}
+
+/**
+ * 读 `traces.jsonl`。唯一的 trace 文件解析实现 —— CLI 展示、harvest、evidence 语料共用。
+ *
+ * 半行只跳过并计数：进程被杀时可能留下半截 JSON，让整条命令失败只会妨碍取证。
+ */
+export interface TraceLine {
+  readonly trace: Trace;
+  /** 与 trace 严格配对的原始行（evidence 的 raw/ 就存它） */
+  readonly line: string;
+}
+
+export function readTraceLines(
+  path: string,
+  tail?: number,
+): { traces: Trace[]; entries: TraceLine[]; bad: number; lines: readonly string[] } {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    throw new Error(`读不到 ${path} —— 还没跑过任何任务（或路径不对）`);
+  }
+  const all = text.split('\n').filter((l) => l.trim() !== '');
+  const lines = tail !== undefined && tail > 0 ? all.slice(-tail) : all;
+  const traces: Trace[] = [];
+  const entries: TraceLine[] = [];
+  let bad = 0;
+  for (const line of lines) {
+    try {
+      const trace = JSON.parse(line) as Trace;
+      traces.push(trace);
+      // 必须在同一次循环里配对：两条数组分别 push 会让坏行之后的所有 raw 存错内容
+      entries.push({ trace, line });
+    } catch {
+      bad++;
+    }
+  }
+  return { traces, entries, bad, lines };
 }

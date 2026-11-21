@@ -1,14 +1,20 @@
 import { resolve } from 'node:path';
-import { HarnessError } from '../../errors.js';
+import type { ModelClient } from '@migor/agentia';
+import { describeError, HarnessError } from '../../errors.js';
 import { runSuite } from '../../evals/run.js';
-import { acceptProposal, readJournal, revertLast } from '../../rsi/accept.js';
-import { runCycle } from '../../rsi/loop.js';
+import { splitReport } from '../../evals/split.js';
+import { acceptProposal, revertLast } from '../../rsi/accept.js';
+import { validateHoldout } from '../../rsi/holdout.js';
+import { writeCycle } from '../../rsi/loop.js';
 import { readProposal, writeProposal } from '../../rsi/manual.js';
 import { LlmProposer } from '../../rsi/propose.js';
+import { type RoundStopReason, runRounds } from '../../rsi/rounds.js';
+import type { CycleReport, HoldoutResult } from '../../rsi/types.js';
 import { isWorthAccepting, verifyProposal } from '../../rsi/verify.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
+import { ledger, regress, status } from './rsi-inspect.js';
 import { tuningOf } from './run.js';
 
 /** `harness rsi [revert|status|propose|accept]` —— 闭环的入口 */
@@ -19,12 +25,14 @@ export async function rsiCommand(
 ): Promise<number> {
   if (sub === 'revert') return revert(ctx, argsId);
   if (sub === 'status') return status(ctx);
+  if (sub === 'ledger') return ledger(ctx);
+  if (sub === 'regress') return regress(ctx);
   if (sub === 'propose') return proposeFrom(ctx);
   if (sub === 'accept') return acceptFrom(ctx);
   if (sub !== undefined) {
     throw new HarnessError(
       'config.invalid',
-      `rsi 没有子命令 "${sub}"（可用: revert, status, propose, accept）`,
+      `rsi 没有子命令 "${sub}"（可用: revert, status, ledger, regress, propose, accept）`,
     );
   }
   return cycle(ctx);
@@ -53,19 +61,26 @@ function proposeFrom(ctx: CliContext): number {
  * 没有 `--yes` 之类的跳门开关是刻意的：`acceptManually` 作为库 API 存在，但把它
  * 暴露成 CLI 选项，等于给「评测门在 RSI 写权限之外」这条不变量开后门。
  */
-async function acceptFrom(ctx: CliContext): Promise<number> {
+export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise<number> {
   const proposal = readProposal(fromFlag(ctx, 'accept'));
   const assets = assetsOf(ctx);
   const shared = {
     config: ctx.config,
     assets,
+    ...(client !== undefined ? { client } : {}),
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...tuningOf(ctx),
   };
-  const baseline = await runSuite(shared);
-  const outcome = await verifyProposal({ ...shared, baseline, proposal });
+  const fullBaseline = await runSuite(shared);
+  const views = splitReport(fullBaseline);
+  let outcome = await verifyProposal({
+    ...shared,
+    baseline: views.train,
+    proposal,
+    only: views.trainCases,
+  });
   if (!outcome.gate.ok) {
-    warn(`验证门未通过，拒绝采纳 ${proposal.id}：${outcome.gate.reason}`);
+    warn(`train 验证门未通过，拒绝采纳 ${proposal.id}：${outcome.gate.reason}`);
     return 1;
   }
   // 与自动 RSI 同一道「必须真的变好」检查 —— 手写提案不许靠 no-op 改动混进 git 历史
@@ -73,48 +88,157 @@ async function acceptFrom(ctx: CliContext): Promise<number> {
     warn(`提案 ${proposal.id} 没有任何用例变好（仅"没变差"），拒绝采纳`);
     return 1;
   }
-  if (boolFlag(ctx.flags, 'dry-run')) {
-    say(`dry-run：${proposal.id} 过了门，未落盘（${outcome.gate.reason}）`);
-    return 0;
+  if (views.holdout !== undefined) {
+    let holdout: HoldoutResult | undefined;
+    try {
+      holdout = await validateHoldout({
+        ...shared,
+        proposal,
+        baseline: views.holdout,
+        cases: views.holdoutCases,
+      });
+    } catch (e) {
+      // 与 runCycle 同口径：验证本身出问题记为「拒绝」，不让命令以异常退出
+      warn(
+        `留出集验证失败，拒绝采纳 ${proposal.id}：${e instanceof Error ? e.message : String(e)}`,
+      );
+      return 1;
+    }
+    outcome = { ...outcome, holdout };
+    if (!isWorthAccepting(outcome)) {
+      warn(`留出集未通过，拒绝采纳 ${proposal.id}：${holdout.gate.reason}`);
+      return 1;
+    }
+    say(`留出集验证通过：${holdout.gate.reason}`);
   }
-  const entry = acceptProposal(ctx.config, assets, outcome);
-  say(`已采纳 ${entry.proposalId} → ${entry.target}（${entry.reason}）`);
+  const dryRun = boolFlag(ctx.flags, 'dry-run');
+  // 成本口径与自动 RSI 一致：基线 + 候选（+ 留出集候选）
+  let spent = fullBaseline.costUsd + outcome.candidate.costUsd;
+  let costKnown = fullBaseline.costKnown && outcome.candidate.costKnown;
+  if (outcome.holdout !== undefined) {
+    spent += outcome.holdout.candidate.costUsd;
+    costKnown = costKnown && outcome.holdout.candidate.costKnown;
+  }
+  if (dryRun) {
+    say(`dry-run：${proposal.id} 过了门，未落盘（${outcome.gate.reason}）`);
+  } else {
+    const entry = acceptProposal(ctx.config, assets, outcome);
+    say(`已采纳 ${entry.proposalId} → ${entry.target}（${entry.reason}）`);
+  }
+  // 手工采纳也要落一份轮次记录：`rsi regress` 的基准取自 cycle JSON 的 candidate，
+  // 没有记录就只能报「找不到基准」—— 而那意味着手工采纳的改动永远监测不到
+  try {
+    writeCycle(ctx.config, {
+      modes: [],
+      proposals: [proposal],
+      verified: [outcome],
+      accepted: [proposal],
+      rejected: [],
+      baseline: fullBaseline,
+      dryRun,
+      costUsd: spent,
+      costKnown,
+      budget: undefined,
+    });
+  } catch (e) {
+    // 采纳已经落盘了，记录写失败不能反过来把这条命令判死 —— 但要喊出来：
+    // 缺这条记录等于这条改动以后没法做回归监测
+    warn(`轮次记录写入失败（采纳已生效，但 rsi regress 将找不到基准）：${describeError(e)}`);
+  }
   return 0;
 }
 
 async function cycle(ctx: CliContext): Promise<number> {
+  const rounds = roundsFlag(ctx);
   const maxModes = numFlag(ctx.flags, 'max-modes');
   const maxVerify = numFlag(ctx.flags, 'max-verify');
   const dryRun = boolFlag(ctx.flags, 'dry-run');
   // `--max-cost` 覆盖配置：CI 里想临时收紧预算不必改文件
   const maxCost = numFlag(ctx.flags, 'max-cost') ?? ctx.config.maxCostUsd;
+  const asJson = boolFlag(ctx.flags, 'json');
 
-  const report = await runCycle({
+  const result = await runRounds({
     config: ctx.config,
     assets: assetsOf(ctx),
+    rounds,
+    // 每轮新建提案器：它带累计花费状态，复用会把两轮的账并成一条
+    makeProposer: () =>
+      new LlmProposer(ctx.config, {
+        ...(maxModes !== undefined ? { maxModes } : {}),
+        // 提不出方案的模式要**说出来**：静默跳过会让「这轮为什么没改」无从解释
+        onSkip: (modeId, reason) => warn(`  跳过 ${modeId}: ${reason}`),
+      }),
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
-    proposer: new LlmProposer(ctx.config, {
-      ...(maxModes !== undefined ? { maxModes } : {}),
-      // 提不出方案的模式要**说出来**：静默跳过会让「这轮为什么没改」无从解释
-      onSkip: (modeId, reason) => warn(`  跳过 ${modeId}: ${reason}`),
-    }),
     ...(maxVerify !== undefined ? { maxVerify } : {}),
     ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
     ...(dryRun ? { dryRun: true } : {}),
     ...tuningOf(ctx),
+    ...(asJson
+      ? {}
+      : {
+          onRound: (report: CycleReport, i: number) => {
+            if (rounds > 1) say(`\n=== 第 ${i + 1}/${rounds} 轮 ===`);
+            renderCycle(report);
+          },
+        }),
   });
 
-  if (boolFlag(ctx.flags, 'json')) {
-    json(report);
-    return report.accepted.length > 0 ? 0 : 1;
+  if (asJson) {
+    json(rounds === 1 ? result.rounds[0] : result);
+  } else if (rounds > 1) {
+    const why =
+      result.stopReason === 'rounds' ? '' : `（提前结束：${stopLabel(result.stopReason)}）`;
+    say(`\n共跑 ${result.rounds.length} 轮，采纳 ${result.acceptedRounds} 轮${why}`);
+    if (maxCost !== undefined) {
+      // 成本未知时不能印一个确切的美元数：它只是**已知部分**的下限
+      say(
+        result.costKnown
+          ? `累计成本 $${result.costUsd.toFixed(4)} / $${maxCost.toFixed(4)}`
+          : `累计成本未知（已知下限 $${result.costUsd.toFixed(4)} / $${maxCost.toFixed(4)}）—— 有轮次没定价或端点没报计量`,
+      );
+    }
   }
 
+  // 「没有失败样本」是正常状态（资产已经够了），不能算失败 —— 否则全绿的仓
+  // 跑一次 RSI 就红，CI 会教人忽略这个退出码
+  return result.acceptedRounds > 0 || result.stopReason === 'no_failures' ? 0 : 1;
+}
+
+function roundsFlag(ctx: CliContext): number {
+  const raw = numFlag(ctx.flags, 'rounds');
+  if (raw === undefined) return 1;
+  if (!Number.isInteger(raw) || raw < 1) {
+    throw new HarnessError('config.invalid', `--rounds 必须是正整数（收到 ${raw}）`);
+  }
+  return raw;
+}
+
+function stopLabel(reason: RoundStopReason): string {
+  switch (reason) {
+    case 'rounds':
+      return '跑满轮数';
+    case 'budget':
+      return '预算用完';
+    case 'no_progress':
+      return '本轮没有可采纳的改动';
+    case 'no_failures':
+      return '没有失败样本';
+  }
+}
+
+/** 单轮的完整回执（多轮时每轮打一遍） */
+function renderCycle(report: CycleReport): void {
   say(`轮次 ${report.cycleId}（记录 ${report.path}）`);
   if (report.modes.length === 0) {
     say('没有失败样本，无需改进');
-    return 0;
+    return;
   }
   say(`失败模式 ${report.modes.length} 个：`);
+  // 账本回灌是软约束（写进提示词），看不见就等于没有 —— 把条数打出来，
+  // 「这轮为什么又提了同一个方向」才有第一个可查的地方
+  if ((report.historyConsulted ?? 0) > 0) {
+    say(`（提案前参考了 ${report.historyConsulted} 条历史教训：试过但没成立的方向）`);
+  }
   for (const m of report.modes) {
     const target = m.targets[0]?.target ?? '（无资产命中）';
     say(`  [${m.kind}] ${m.signature}  ×${m.count} → 偏向改 ${target}`);
@@ -122,13 +246,15 @@ async function cycle(ctx: CliContext): Promise<number> {
   say(
     report.costKnown
       ? `\n本轮成本 $${report.costUsd.toFixed(4)}`
-      : `\n本轮成本未知（模型不在价格表内），token 只能当代理`,
+      : `\n本轮成本未知（模型不在价格表内或端点没报计量），token 只能当代理`,
   );
   if (report.budget !== undefined) {
     const b = report.budget;
+    // spentUsd 是**跨轮累计**（`--rounds` 下上限只在整次运行上生效），措辞必须跟着变，
+    // 否则第 3 轮会显示「预算 12.4 / 5 —— 本轮提前收工」，读起来像闸每轮都失灵
     say(
-      `预算 $${b.spentUsd.toFixed(4)} / $${b.limitUsd.toFixed(4)}` +
-        (b.stopped ? ' —— 已超限，本轮提前收工' : ''),
+      `预算：累计已花 $${b.spentUsd.toFixed(4)} / 上限 $${b.limitUsd.toFixed(4)}` +
+        (b.stopped ? ' —— 已用完，不再开下一轮' : ''),
     );
   }
   say(`\n提出 ${report.proposals.length} 个提案，验证 ${report.verified.length} 个：`);
@@ -144,25 +270,10 @@ async function cycle(ctx: CliContext): Promise<number> {
     );
   }
   for (const r of report.rejected) say(`  拒绝 ${r.proposal.id}：${r.reason}`);
-  return report.accepted.length > 0 ? 0 : 1;
 }
 
 function revert(ctx: CliContext, id: string | undefined): number {
   const r = revertLast(ctx.config, id);
   say(`已回滚 ${r.entry.proposalId}：${r.entry.target}`);
-  return 0;
-}
-
-function status(ctx: CliContext): number {
-  const entries = readJournal(ctx.config);
-  if (entries.length === 0) {
-    say('还没有任何采纳记录');
-    return 0;
-  }
-  for (const e of entries) {
-    const when = new Date(e.at).toISOString().replace('T', ' ').slice(0, 19);
-    say(`${when}  ${e.status.padEnd(8)}  ${e.proposalId}  ${e.target}`);
-    say(`            ${e.reason}`);
-  }
   return 0;
 }

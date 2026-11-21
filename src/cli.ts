@@ -3,6 +3,7 @@ import { join, resolve } from 'node:path';
 import { loadEnvFile } from '@migor/agentia';
 import { assertKnownFlags, parseArgs, strFlag } from './cli/args.js';
 import { lockCommand } from './cli/commands/assets.js';
+import { evidenceCommand } from './cli/commands/evidence.js';
 import { harvestCommand } from './cli/commands/harvest.js';
 import { reportCommand, traceCommand } from './cli/commands/observe.js';
 import { patchCommand } from './cli/commands/patch.js';
@@ -48,16 +49,23 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   harvest <traceId>       把一条 trace 回流成 eval/<name>.md 回归用例
     --task <文本>         任务原文（trace 里没存，必须外来）
     --from-report <文件>  或从 eval --save 的报告按 traceId 反查任务原文
+  evidence                把一份评测报告导出成三层证据语料（overview/detail/raw）
+    --from-report <文件>  eval --save 生成的报告（带任务原文与 traceId）
+    --id <名字>           语料 id（缺省按时间生成；已存在则拒绝覆盖）
   lock                    按当前资产重写 harness.lock.json
   lock --check            校验资产与锁是否一致（CI 用），不一致退出码 1
   rsi                     跑一轮 RSI：采集→归因→提案→验证→采纳
-    --dry-run             只验证不落盘（人审模式）
+    --rounds <n>          连续跑 n 轮（每轮最多采纳一个；预算跨轮共享）
+    --dry-run             只验证不落盘（人审模式；不能与 --rounds 同用）
     --max-modes <n>       最多给几个失败模式提方案（缺省 3）
     --max-verify <n>      最多验证几个提案（缺省 3）
-    --max-cost <usd>      本轮成本上限（覆盖配置 maxCostUsd）
+    --max-cost <usd>      整次运行的成本上限（--rounds 下跨轮共享；覆盖配置 maxCostUsd）
     --timeout/--concurrency/--retries   见 eval 节
   rsi revert [id]         回滚最近一次采纳（给 id 可防期间插入新采纳）
   rsi status              看采纳历史
+  rsi ledger              决策账本：当初的预测 vs 实际验证结果（--json 机器可读）
+  rsi regress             采纳之后那些用例还通过吗；有回归退出码 1
+    --revert              检测到回归就自动回滚（仍过指纹校验）
   rsi propose --from <json>  登记手写 L1 提案（不调模型）
   rsi accept --from <json>   手写提案也要过完整验证门才能采纳
   patch <diff>             验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
@@ -85,12 +93,15 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   report: ['max-token-growth', 'max-cost-growth'],
   trace: ['tail'],
   harvest: ['task', 'from-report'],
+  evidence: ['from-report', 'id'],
   lock: ['check'],
   rsi: [
     'dry-run',
     'max-modes',
     'max-verify',
     'max-cost',
+    'rounds',
+    'revert',
     'from',
     'timeout',
     'concurrency',
@@ -145,6 +156,8 @@ async function main(): Promise<number> {
       return traceCommand(ctx, args._[0]);
     case 'harvest':
       return harvestCommand(ctx, args._[0]);
+    case 'evidence':
+      return evidenceCommand(ctx);
     case 'lock':
       return lockCommand(ctx);
     case 'rsi':
@@ -162,7 +175,13 @@ async function main(): Promise<number> {
 /** 用法/配置/资产层面的错 → 2；结果不达标的错 → 1 */
 function isUsageError(e: unknown): boolean {
   if (!isHarnessError(e)) return false;
-  return e.code.startsWith('config') || e.code.startsWith('asset') || e.code === 'eval.invalid';
+  return (
+    e.code.startsWith('config') ||
+    e.code.startsWith('asset') ||
+    e.code === 'eval.invalid' ||
+    // 「没基准可监测」是没准备好，不是「检测到回归」（后者 1）
+    e.code === 'rsi.no_baseline'
+  );
 }
 
 /**
@@ -173,8 +192,10 @@ function isUsageError(e: unknown): boolean {
  */
 function needsModel(cmd: string, sub: string | undefined): boolean {
   if (cmd === 'run' || cmd === 'eval' || cmd === 'serve') return true;
-  // `rsi propose` 只是校验+落盘一份 JSON，不调模型；`accept` 要跑两遍评测
-  if (cmd === 'rsi') return sub === undefined || sub === 'accept';
+  // `rsi propose` 只是校验+落盘一份 JSON，不调模型。
+  // `accept` 要跑两遍评测；`regress` 要重跑当前全集 —— 漏掉它就会在缺凭据时
+  // 把一排 stopReason=error 当成「用例退步」，`--revert` 还会回滚一条正常采纳
+  if (cmd === 'rsi') return sub === undefined || sub === 'accept' || sub === 'regress';
   return false;
 }
 

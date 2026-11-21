@@ -5,7 +5,8 @@ import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { effectiveModel } from '../run/app.js';
 import { costOf } from '../run/cost.js';
-import type { FailureMode, Proposal } from './types.js';
+import { manifestFor } from './manifest.js';
+import type { FailureMode, LessonEntry, Proposal } from './types.js';
 
 /**
  * 提案 —— RSI 里唯一「需要创造力」的一步，因此也是唯一用 LLM 的一步。
@@ -28,6 +29,13 @@ export interface ProposeContext {
   readonly agent?: string | undefined;
   /** 最多给几个模式提方案（按失败数降序取前 N） */
   readonly maxModes?: number | undefined;
+  /**
+   * 账本里的教训（试过但没成立的方向）。缺省 / 空数组 = 没有历史可参考。
+   *
+   * 这是「自进化能跨轮」的关键一环：不看历史时，提案器每轮都在重置，会把
+   * 上一轮刚被门否掉的改法原样再提一遍，白烧一遍评测钱。
+   */
+  readonly history?: readonly LessonEntry[] | undefined;
 }
 
 export interface Proposer {
@@ -83,13 +91,14 @@ export class LlmProposer implements Proposer {
     this.spentUsd = 0;
     this.known = true;
     const model = this.effectiveModel(ctx);
+    const lessons = ctx.history ?? [];
     let seq = 0;
     for (const mode of modes) {
       // 单个模式提不出方案（模型输出 NONE 或输出不像正文）**不该让整轮崩掉**：
       // 后面还有别的失败模式等着被修，而一次崩溃会把已经花掉的评测成本一起浪费。
       try {
         const target = this.pickTarget(ctx, mode);
-        const after = await this.ask(mode, target.body, ctx, model);
+        const after = await this.ask(mode, target.body, ctx, model, lessons);
         if (after === null) continue; // 模型明确说改不出
         this.assertSane(mode, target.body, after, target.key);
 
@@ -98,6 +107,8 @@ export class LlmProposer implements Proposer {
           modeId: mode.id,
           kind: mode.kind,
           rationale: `${mode.signature}（${mode.count} 例：${mode.cases.join(', ')}）；目标 ${target.key}（${target.why}）`,
+          // 清单在调模型之后、跑验证之前生成 —— 假设不能由验证结果倒推
+          manifest: manifestFor(mode, target.key),
           patch: { target: target.key, before: target.body, after },
           layer: 'L1',
         });
@@ -164,6 +175,7 @@ export class LlmProposer implements Proposer {
     current: string,
     ctx: ProposeContext,
     model: string,
+    lessons: readonly LessonEntry[],
   ): Promise<string | null> {
     const app = new AgentApp({
       name: 'harness-proposer',
@@ -174,7 +186,7 @@ export class LlmProposer implements Proposer {
         : {}),
       ...(this.config.maxCostUsd !== undefined ? { maxCostUsd: this.config.maxCostUsd } : {}),
     });
-    const prompt = renderPrompt(mode, current);
+    const prompt = renderPrompt(mode, current, lessons);
     const { result } = await app.run([{ role: 'user', content: prompt }], {
       ...(ctx.client !== undefined ? { client: ctx.client } : {}),
     });
@@ -206,7 +218,7 @@ export class LlmProposer implements Proposer {
   }
 }
 
-function renderPrompt(mode: FailureMode, current: string): string {
+function renderPrompt(mode: FailureMode, current: string, lessons: readonly LessonEntry[]): string {
   const evidence = mode.samples
     .map(
       (s, i) =>
@@ -223,7 +235,7 @@ function renderPrompt(mode: FailureMode, current: string): string {
 
 ## 失败证据
 ${evidence}
-
+${renderLessons(lessons)}
 ## 当前正文（你的输出将完整替换它）
 """
 ${current}
@@ -231,6 +243,32 @@ ${current}
 
 ## 你的任务
 改写上面这段正文，使这类失败不再发生。直接输出新正文。改不出有把握的方案就输出 NONE。`;
+}
+
+/**
+ * 「试过但没成立」的历史。
+ *
+ * 写成**约束而不是参考**：不加这一段时，提案器会把刚被门否掉的改法再提一遍 ——
+ * 模型看不到上一轮，它以为自己在第一次尝试。这段话的作用是让它知道自己在一段
+ * 有记忆的历史里工作。
+ *
+ * 刻意不给它「上次的完整正文」：那会把上下文撑大，也会诱导它做「在旧稿上微调」
+ * 这类最容易过拟合的改动。只给目标、预测、被否的原因。
+ */
+function renderLessons(lessons: readonly LessonEntry[]): string {
+  if (lessons.length === 0) return '';
+  const lines = lessons.map((l) => {
+    const why = l.outcome === 'reverted' ? '采纳后又被回滚' : '验证后没兑现预测';
+    const prediction = l.prediction === undefined ? '（当时没写预测）' : l.prediction;
+    const reason = l.reason === undefined ? '无门结论记录' : l.reason;
+    return `- 改 ${l.target}，预测「${prediction}」→ ${why}：${reason}`;
+  });
+  return `## 已经试过、但没成立的方向
+${lines.join('\n')}
+
+这些方向被真实验证否定过。如果你的方案与其中某条本质相同（同一个目标 + 同一种改法），
+换个不同的改法；如果你认为上次失败另有原因，不要解释，直接给出**不同**的写法。
+`;
 }
 
 /** 模型习惯包 ``` 围栏；剥掉它，否则正文里会混进 Markdown 代码块标记 */

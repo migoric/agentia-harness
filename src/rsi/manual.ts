@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { atomicWrite } from './journal.js';
+import { validateManifest } from './manifest.js';
 import { FAILURE_KINDS, type Proposal } from './types.js';
 
 /**
@@ -41,7 +42,7 @@ function validate(raw: unknown, source: string): Proposal {
     throw new HarnessError('config.invalid', `${source}: 提案应是 JSON 对象`);
   }
   const p = raw as Record<string, unknown>;
-  keys(p, source, ['id', 'modeId', 'kind', 'rationale', 'layer', 'patch']);
+  keys(p, source, ['id', 'modeId', 'kind', 'rationale', 'layer', 'patch', 'manifest']);
   const patch = p.patch;
   if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
     throw new HarnessError('config.invalid', `${source}: patch 应是对象`);
@@ -86,6 +87,9 @@ function validate(raw: unknown, source: string): Proposal {
     modeId: text(p.modeId, `${source}.modeId`),
     kind: kind as Proposal['kind'],
     rationale: text(p.rationale, `${source}.rationale`),
+    ...(p.manifest !== undefined
+      ? { manifest: validateManifest(p.manifest, `${source}.manifest`) }
+      : {}),
     layer: 'L1',
     patch: { target, before, after },
   };

@@ -12,7 +12,7 @@
  * 用法：`node scripts/offline-e2e.mjs`（需先 `npm run build`）
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -480,6 +480,47 @@ const root = await project();
 
   fake.stop();
   rmSync(manual, { recursive: true, force: true });
+}
+
+{
+  // 多轮评测：真实 HTTP 路径下，第 2 轮必须带上第 1 轮的历史。
+  // 判据用假端点日志里的 `in=<tokens>`（它按 messages 的 JSON 长度估）——
+  // 带了历史就一定更长。删掉技能是为了让每轮只发一次请求，读数才可比。
+  const fake = await startFake();
+  // 自建最小工程而不是 `init`：init 会带一条 example 用例，`--only` 之外的噪声
+  // 会让 `in=` 的读数对不上（那是按用例顺序排的）
+  const multi = mkdtempSync(join(tmpdir(), 'harness-multi-'));
+  mkdirSync(join(multi, 'agents'), { recursive: true });
+  mkdirSync(join(multi, 'evals'), { recursive: true });
+  writeFileSync(
+    join(multi, 'harness.config.json'),
+    `${JSON.stringify({ appName: 'multi', model: 'deepseek-flash', pricing: { 'deepseek-flash': { in: 5, out: 25 } } }, null, 2)}\n`,
+    'utf8',
+  );
+  // 不带工具的主 agent：每轮只发一次请求，`in=` 读数才可比
+  writeFileSync(
+    join(multi, 'agents', 'main.md'),
+    '---\ndescription: 离线多轮测试\n---\n你是执行者，回答要短。\n',
+    'utf8',
+  );
+  writeFileSync(
+    join(multi, 'evals', 'multi.md'),
+    '---\nname: multi\nexpect_contains: 结论\n---\n任务甲：先看 foo.c\n<!-- turn -->\n任务乙：不对，我要 bar.c\n',
+    'utf8',
+  );
+
+  const ran = await cli(['eval', '--save', 'multi.json'], { root: multi, base: fake.url });
+  const saved = JSON.parse(readFileSync(join(multi, 'multi.json'), 'utf8'));
+  const c = saved.cases?.[0];
+  const ins = [...fake.log().matchAll(/#\d+ .*? in=(\d+)/g)].map((m) => Number(m[1]));
+  check(
+    '多轮用例真跑了两轮，且第 2 轮请求带上了第 1 轮的历史',
+    ran.code === 0 && c?.turns === 2 && c?.passed === true && ins.length === 2 && ins[1] > ins[0],
+    `code=${ran.code} turns=${c?.turns} passed=${c?.passed} in=${ins.join(',')}\n${fake.log()}`,
+  );
+
+  fake.stop();
+  rmSync(multi, { recursive: true, force: true });
 }
 
 rmSync(root, { recursive: true, force: true });

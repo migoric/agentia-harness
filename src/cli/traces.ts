@@ -1,7 +1,7 @@
-import { readFileSync } from 'node:fs';
 import type { Trace } from '@migor/agentia';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { readTraceLines } from '../run/trace-read.js';
 import { warn } from './output.js';
 
 /**
@@ -11,29 +11,17 @@ import { warn } from './output.js';
  * 两边若各写一份前缀匹配，「trace 看的是这条、harvest 生成的是另一条」会很难发现。
  */
 export function readTraces(config: HarnessConfig, tail?: number): Trace[] {
-  let text: string;
   try {
-    text = readFileSync(config.tracesPath, 'utf8');
-  } catch {
+    const { traces, bad } = readTraceLines(config.tracesPath, tail);
+    if (bad > 0) warn(`跳过 ${bad} 行无法解析的记录（可能是进程中途被杀写下的半行）`);
+    return traces;
+  } catch (e) {
     throw new HarnessError(
       'run.failed',
-      `读不到 ${config.tracesPath} —— 还没跑过任何任务（或路径不对）`,
+      e instanceof Error ? e.message : `读不到 ${config.tracesPath}`,
+      e,
     );
   }
-  const lines = text.split('\n').filter((l) => l.trim() !== '');
-  const slice = tail !== undefined && tail > 0 ? lines.slice(-tail) : lines;
-  const out: Trace[] = [];
-  let bad = 0;
-  for (const line of slice) {
-    try {
-      out.push(JSON.parse(line) as Trace);
-    } catch {
-      // 半行（进程被杀）不该让整条命令失败 —— 但也不能装作没看见
-      bad++;
-    }
-  }
-  if (bad > 0) warn(`跳过 ${bad} 行无法解析的记录（可能是进程中途被杀写下的半行）`);
-  return out;
 }
 
 /**
