@@ -1,0 +1,71 @@
+name: Bug 报告
+description: 行为与预期不符
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠️ 安全漏洞请**不要**在这里报 —— 走 [私有通道](https://github.com/migoric/agentia-harness/security/advisories/new)。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: '@migor/agentia-harness 的版本（`package.json` 或 `npm ls @migor/agentia-harness`）'
+      placeholder: '0.2.0'
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node 版本
+      placeholder: 'node -v 的输出，如 v22.14.0'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 出问题的环节
+      options:
+        - 资产（init / lock / 发现与校验）
+        - 评测（eval / report / 断言 / 门）
+        - 多轮用例（<!-- turn -->）
+        - RSI（提案 / 验证 / 采纳 / 回滚）
+        - 账本与监测（ledger / regress）
+        - L2 代码补丁（patch / 沙箱）
+        - CLI（参数、退出码、输出）
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象与预期
+      description: 实际发生了什么？你期望什么？若退出码不对，请写清实际值与期望值
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现
+      description: 命令 + 相关资产（`harness.config.json`、`agents/`、`skills/`、`evals/`）。越简越好
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: 输出 / 报告 / 报错
+      description: 贴原文而非转述；有 traceId 就一起给（`harness trace <id>`）
+      render: text
+
+  - type: input
+    id: model
+    attributes:
+      label: 模型 / 端点
+      description: 如 deepseek-chat · claude-opus-5 · 自建兼容网关

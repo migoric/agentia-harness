@@ -1,5 +1,9 @@
 # agentia-harness
 
+[![ci](https://github.com/migoric/agentia-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/migoric/agentia-harness/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](./package.json)
+
 基于 [`@migor/agentia`](https://github.com/migoric/agentia) 的 **Agent harness 工程基座**：把「一个能跑的 agent」变成「一套能被评测、被改进、被回滚的 agent 工程」。
 
 agentia 提供运行时（循环、工具、trace、审批、持久化）。这个仓提供围着运行时的**工程设施**：资产库、评测台、RSI 闭环。
@@ -447,3 +451,15 @@ CLI 与渲染端到端、配置与端点桥接（含价格表口径）、L2 代�
 HTTP 面（含并发峰值必须为 1）。另有 `tests/architecture.test.ts` 守分层与文件体量 ——
 分层写在文档里等于没有，能执行才算。`npm run e2e:offline` 是第九组：它不在 `npm test` 里，
 因为它要 `dist/` 且起子进程。
+
+## 参与
+
+约定只有一份： [`AGENTS.md`](./AGENTS.md)（它同时是 AI 编码助手的权威入口）。人的流程——
+本地并排检出的原因、提交前必须跑什么、几条会红的硬约定——见 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
+
+发现安全问题请走 [私有通道](https://github.com/migoric/agentia-harness/security/advisories/new)，
+不要开公开 issue（见 [`SECURITY.md`](./SECURITY.md)）。
+
+## 许可
+
+[MIT](./LICENSE) © 2026 migor

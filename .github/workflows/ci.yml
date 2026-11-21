@@ -5,9 +5,19 @@ on:
     branches: [main]
   pull_request:
 
+# 连续推送时旧的那次跑完也没人看 —— 直接取消，省 runner 分钟也省噪音
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# 只读：CI 不需要写仓库任何东西
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       # 依赖是 `file:../agentia` —— 两个仓必须并排 checkout，否则 npm 解析不到。
       # 这也是本仓「暂不发 npm」的直接后果：等上游发布后换成版本号即可删掉第二个 checkout。
@@ -22,6 +32,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          # 两份 lockfile 各自缓存：只写 harness 那份会让上游每次都从头装
+          cache: npm
+          cache-dependency-path: |
+            agentia/package-lock.json
+            harness/package-lock.json
 
       # 上游要先构建：file: 依赖指向它的 dist（.d.ts 在那），而 dist 不进 git
       - run: npm ci && npm run build

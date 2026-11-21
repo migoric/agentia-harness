@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 使用方式与设计理由（README）
+    url: https://github.com/migoric/agentia-harness/blob/main/README.md
+    about: 命令表、资产契约、评测与 RSI 的取舍多数已写在这里
+  - name: 架构不变量（AGENTS.md）
+    url: https://github.com/migoric/agentia-harness/blob/main/AGENTS.md
+    about: 依赖方向、RSI 七条不变量、L2 五条不变量、已知的坑
+  - name: 运行时的问题（agentia）
+    url: https://github.com/migoric/agentia/issues
+    about: 循环、工具、trace、审批、持久化、传输层的问题请报到上游
+  - name: 安全漏洞（请勿开公开 issue）
+    url: https://github.com/migoric/agentia-harness/security/advisories/new
+    about: 走私有通道上报

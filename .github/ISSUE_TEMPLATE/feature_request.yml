@@ -1,0 +1,31 @@
+name: 功能建议
+description: 想要 harness 支持的新能力或新用法
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题
+      description: 先讲**场景与痛点**，再讲想要的方案 —— 方案常有多种，痛点只有一个
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的方案
+      description: 若涉及 CLI，写下你期望的命令与参数；若涉及资产，写下你期望的 Markdown 形状
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 试过的替代方案
+      description: 例如：能否用现有技能 / 中间件 / `harness.config.json` 配置解决？为什么不够？
+
+  - type: markdown
+    attributes:
+      value: |
+        > 请先对照本仓的**边界**：只做「工程设施」（资产版本化 / 可断言的评测 / 能改进的闭环），
+        > 运行时能力归 [`agentia`](https://github.com/migoric/agentia)；改动必须是**文本级**的，
+        > 要改 TS 才生效的方案首版一律不做；`evals/` 与 `gate()` 不接受来自闭环的自动修改。
+        > 详见 [`AGENTS.md`](https://github.com/migoric/agentia-harness/blob/main/AGENTS.md)。
