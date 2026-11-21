@@ -1,23 +1,21 @@
-# 依赖更新自动化。唯一的运行时依赖是 `@migor/agentia`，且写法是 `file:../agentia`
-# —— 那是**本地并排检出**，dependabot 管不到也不该管；上游的版本跟进靠 CI 那条
-# 并排 checkout（见 .github/workflows/ci.yml）。
+# 依赖更新自动化。
+#
+# 只有 github-actions 这一路能开：唯一的运行时依赖 `@migor/agentia` 写的是
+# `file:../agentia`（本地并排检出），npm 生态的 updater 在解析清单时就会以
+# `path_dependencies_not_reachable` 失败 —— 每周一次红叉，只会训练人忽略 CI 通知。
+# 上游版本靠 CI 里那条并排 checkout 跟着走；devDependencies（biome / typescript /
+# tsx / @types/node）按需手动升：
+#
+#   npx npm-check-updates -u && npm install && npm run check && npm run e2e:offline
+#
+# 别为了「省事」把它们钉成 `latest`：类型检查是硬门，跨大版本要单独一次提交，
+# 这样真红了能一眼定位到「就是这次升级」。
 version: 2
 updates:
-  - package-ecosystem: npm
-    directory: /
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: 'chore(deps)'
-    groups:
-      # 把开发依赖合成一个 PR，避免每周被若干琐碎 PR 淹没
-      dev-dependencies:
-        dependency-type: development
-
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
     commit-message:
       prefix: 'chore(ci)'
