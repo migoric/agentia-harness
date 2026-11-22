@@ -1,7 +1,13 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { HarnessError } from '../errors.js';
+import { type Fail, isPlainObject, readJsonObject } from '../util/shape.js';
 import { type AssetSet, assetKey } from './types.js';
+
+/** 锁的形状错是一个**独立的事实**（`lock.mismatch`，不是 config.invalid）—— 码在这里定 */
+const fail: Fail = (message, cause) => {
+  throw new HarnessError('lock.mismatch', message, cause);
+};
 
 /**
  * 资产锁 —— `harness.lock.json`。
@@ -53,28 +59,20 @@ export function buildLock(set: AssetSet): AssetLock {
 
 export function readLock(path: string): AssetLock {
   if (!existsSync(path)) return EMPTY_LOCK;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (e) {
-    throw new HarnessError('lock.mismatch', `${path} 不是合法 JSON`, e);
-  }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new HarnessError('lock.mismatch', `${path} 顶层必须是对象`);
-  }
-  const lock = parsed as Partial<AssetLock>;
-  if (lock.version !== 1 || typeof lock.assets !== 'object' || lock.assets === null) {
+  // 读 / 解析 / 顶层是对象三步与 harness.json、手写提案同一份实现（util/shape.ts）
+  const lock = readJsonObject(path, fail) as Partial<AssetLock>;
+  // `assets` 也要按「普通对象」判 —— 数组同样 typeof object，放过它会让下面拿下标当资产键
+  if (lock.version !== 1 || !isPlainObject(lock.assets)) {
     throw new HarnessError('lock.mismatch', `${path} 形状不对：需要 { version: 1, assets: {...} }`);
   }
   const assets: Record<string, LockEntry> = {};
   for (const [key, v] of Object.entries(lock.assets)) {
     if (
-      typeof v !== 'object' ||
-      v === null ||
-      typeof (v as LockEntry).version !== 'string' ||
-      typeof (v as LockEntry).fingerprint !== 'string'
+      !isPlainObject(v) ||
+      typeof (v as Partial<LockEntry>).version !== 'string' ||
+      typeof (v as Partial<LockEntry>).fingerprint !== 'string'
     ) {
-      throw new HarnessError('lock.mismatch', `${path}: 条目 "${key}" 形状不对`);
+      fail(`${path}: 条目 "${key}" 形状不对`);
     }
     assets[key] = { version: (v as LockEntry).version, fingerprint: (v as LockEntry).fingerprint };
   }

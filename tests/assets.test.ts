@@ -12,6 +12,7 @@ import {
   readLock,
   writeLock,
 } from '../src/assets/lockfile.ts';
+import { HarnessError } from '../src/errors.ts';
 import { list, parseFrontmatter, scalar } from '../src/util/frontmatter.ts';
 
 /** 每个用例一个独立目录 —— 资产发现会读真实文件，共享目录会互相污染 */
@@ -187,5 +188,29 @@ describe('lockfile', () => {
 
   it('锁文件缺失时 readLock 返回空锁，不抛', () => {
     assert.deepEqual(readLock(join(root, 'missing.json')), { version: 1, assets: {} });
+  });
+
+  /**
+   * 锁的形状错必须**在启动时**响亮 —— `lock --check` 是 CI 门，读到的半个锁如果被当成
+   * 「没锁过」（空锁），症状是「资产全都新增」这种看起来像正常漂移的东西，而真因在解析。
+   * 四条分支各一条：解析失败 / 顶层不是对象 / `assets` 是数组 / 条目缺字段。
+   * ⚠️ `assets` 是数组那条是 2026-11-22 抽 `util/shape.ts` 时补的：数组同样
+   * `typeof === 'object'`，旧判据会放过它，然后拿 `"0"` 当资产键。
+   */
+  it('锁的形状错一律拒（lock.mismatch，而不是静默当空锁）', () => {
+    const dir = workspace();
+    const path = join(dir, 'harness.lock.json');
+    const reject = (text: string, re: RegExp): void => {
+      writeFileSync(path, text, 'utf8');
+      assert.throws(
+        () => readLock(path),
+        (e: unknown) =>
+          e instanceof HarnessError && e.code === 'lock.mismatch' && re.test(e.message),
+      );
+    };
+    reject('{ nope', /不是合法 JSON/);
+    reject('[1]', /顶层必须是对象/);
+    reject('{"version":1,"assets":[{"version":"1","fingerprint":"x"}]}', /形状不对/);
+    reject('{"version":1,"assets":{"skill:a":{"version":"1"}}}', /条目 "skill:a" 形状不对/);
   });
 });

@@ -1,6 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { HarnessError } from './errors.js';
+import { type Fail, isPlainObject, objectAt, onlyKeys, readJsonObject } from './util/shape.js';
+
+// ⚠️ 必须**注解在变量上**（`const fail: Fail`）而不是只注解箭头函数的返回类型：
+// TS 的「never 返回 ⇒ 后续分支已收敛」只认「变量有显式类型」的那种声明，否则
+// `if (!isPlainObject(v)) fail(…)` 之后 `v` 仍是 unknown（类型守卫白写）。
+const fail: Fail = (message, cause) => {
+  throw new HarnessError('config.invalid', message, cause);
+};
 
 /**
  * Harness —— 工程配置。
@@ -119,7 +127,7 @@ export function loadConfig(root: string): HarnessConfig {
   const absRoot = resolve(root);
   const cfgPath = join(absRoot, CONFIG_FILENAME);
   const raw: RawConfig = existsSync(cfgPath) ? readJson(cfgPath) : {};
-  rejectUnknownKeys(raw, CONFIG_FILENAME, CONFIG_KEYS);
+  onlyKeys(raw, CONFIG_FILENAME, CONFIG_KEYS, fail);
 
   const workspaceDir = joinPath(
     absRoot,
@@ -156,12 +164,10 @@ function readEndpoint(v: unknown): { baseURL: string | undefined; apiKeyEnv: str
   if (v === undefined) {
     return { baseURL: undefined, apiKeyEnv: DEFAULTS.apiKeyEnv };
   }
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-    throw new HarnessError('config.invalid', '配置字段 "endpoint" 应为对象');
-  }
-  rejectUnknownKeys(v, 'endpoint', ['baseURL', 'apiKeyEnv']);
+  const o = objectAt(v, '配置字段 "endpoint"', fail);
+  onlyKeys(o, '配置字段 "endpoint"', ['baseURL', 'apiKeyEnv'], fail);
 
-  const url = readString((v as { baseURL?: unknown }).baseURL, 'endpoint.baseURL');
+  const url = readString(o.baseURL, 'endpoint.baseURL');
   if (url !== undefined) {
     if (!/^https?:\/\//i.test(url) || /\s/.test(url)) {
       throw new HarnessError(
@@ -170,7 +176,7 @@ function readEndpoint(v: unknown): { baseURL: string | undefined; apiKeyEnv: str
       );
     }
   }
-  const envName = readString((v as { apiKeyEnv?: unknown }).apiKeyEnv, 'endpoint.apiKeyEnv');
+  const envName = readString(o.apiKeyEnv, 'endpoint.apiKeyEnv');
   if (envName === undefined) return { baseURL: url, apiKeyEnv: DEFAULTS.apiKeyEnv };
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envName)) {
     throw new HarnessError(
@@ -185,23 +191,16 @@ function readEndpoint(v: unknown): { baseURL: string | undefined; apiKeyEnv: str
 /** `pricing` 段：每条都要有 `in` / `out` 两个非负有限数，键名只认那四个 */
 function readPricing(v: unknown): Readonly<Record<string, ModelPrice>> {
   if (v === undefined) return {};
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-    throw new HarnessError(
-      'config.invalid',
-      '配置字段 "pricing" 应为 { 模型名: { in, out } } 对象',
-    );
-  }
+  if (!isPlainObject(v)) fail('配置字段 "pricing" 应为 { 模型名: { in, out } } 对象');
   const out: Record<string, ModelPrice> = {};
-  for (const [model, raw] of Object.entries(v as Record<string, unknown>)) {
+  for (const [model, raw] of Object.entries(v)) {
     const where = `pricing["${model}"]`;
     if (model.trim() === '') {
       throw new HarnessError('config.invalid', '配置字段 "pricing" 里有空模型名');
     }
-    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-      throw new HarnessError('config.invalid', `${where} 应为 { in, out } 对象`);
-    }
-    rejectUnknownKeys(raw, where, PRICE_KEYS);
-    const e = raw as Record<string, unknown>;
+    if (!isPlainObject(raw)) fail(`${where} 应为 { in, out } 对象`);
+    onlyKeys(raw, where, PRICE_KEYS, fail);
+    const e = raw;
     out[model] = {
       in: priceOf(e.in, where, 'in'),
       out: priceOf(e.out, where, 'out'),
@@ -225,22 +224,6 @@ function priceOf(v: unknown, where: string, key: string): number {
   return v;
 }
 
-/**
- * 未知键一律拒。理由与 `code` / `endpoint` 同款：`pricng`（少个 i）或
- * `cache_read`（下划线）静默被忽略时，症状是「成本数字不对」——而那是最难往
- * 拼写错误上想的症状。
- */
-function rejectUnknownKeys(v: object, where: string, allowed: readonly string[]): void {
-  for (const k of Object.keys(v)) {
-    if (!allowed.includes(k)) {
-      throw new HarnessError(
-        'config.invalid',
-        `配置字段 "${where}" 不认识 "${k}"（只认 ${allowed.join(' / ')}）`,
-      );
-    }
-  }
-}
-
 const CODE_DEFAULTS = {
   verify: ['npm', 'test'] as readonly string[],
   timeoutMs: 600_000,
@@ -251,11 +234,9 @@ function readCode(v: unknown): { codeVerify: readonly string[]; codeVerifyTimeou
   if (v === undefined) {
     return { codeVerify: CODE_DEFAULTS.verify, codeVerifyTimeoutMs: CODE_DEFAULTS.timeoutMs };
   }
-  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-    throw new HarnessError('config.invalid', '配置字段 "code" 应为对象');
-  }
-  rejectUnknownKeys(v, 'code', ['verify', 'timeoutMs']);
-  const { verify, timeoutMs } = v as { verify?: unknown; timeoutMs?: unknown };
+  const o = objectAt(v, '配置字段 "code"', fail);
+  onlyKeys(o, '配置字段 "code"', ['verify', 'timeoutMs'], fail);
+  const { verify, timeoutMs } = o;
   let cmd = CODE_DEFAULTS.verify;
   if (verify !== undefined) {
     if (
@@ -275,22 +256,8 @@ function readCode(v: unknown): { codeVerify: readonly string[]; codeVerifyTimeou
 }
 
 function readJson(path: string): RawConfig {
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch (e) {
-    throw new HarnessError('config.invalid', `读不到 ${path}`, e);
-  }
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new HarnessError('config.invalid', `${path} 顶层必须是对象`);
-    }
-    return parsed as RawConfig;
-  } catch (e) {
-    if (e instanceof HarnessError) throw e;
-    throw new HarnessError('config.invalid', `${path} 不是合法 JSON`, e);
-  }
+  // 三步（读 / 解析 / 顶层是对象）与锁文件、手写提案同一份实现，见 util/shape.ts
+  return readJsonObject(path, fail) as RawConfig;
 }
 
 /** 目录名可用相对路径（`../shared/skills`），解析后必须是绝对路径 */

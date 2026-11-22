@@ -63,7 +63,10 @@ describe('配置 —— endpoint 段', () => {
   });
 
   it('endpoint 里的未知字段不静默忽略', () => {
-    assertConfigError(() => cfg({ endpoint: { base_url: 'https://x' } }), /不认识 "base_url"/);
+    assertConfigError(
+      () => cfg({ endpoint: { base_url: 'https://x' } }),
+      /不认识的字段 "base_url"/,
+    );
   });
 });
 
@@ -79,7 +82,7 @@ describe('配置 —— pricing 段', () => {
     assertConfigError(() => cfg({ pricing: { m: { in: '1', out: 1 } } }), /"m"\]\.in/);
     assertConfigError(
       () => cfg({ pricing: { m: { in: 1, out: 1, cache_read: 0.1 } } }),
-      /不认识 "cache_read"/,
+      /不认识的字段 "cache_read"/,
     );
   });
 
@@ -91,12 +94,12 @@ describe('配置 —— pricing 段', () => {
 
 describe('配置 —— 拼错字段与非法预算必须响亮', () => {
   it('顶层未知键不静默忽略（modle 拼错不能变成「配了没用」）', () => {
-    assertConfigError(() => cfg({ modle: 'deepseek-flash' }), /不认识 "modle"/);
-    assertConfigError(() => cfg({ maxCost: 1 }), /不认识 "maxCost"/);
+    assertConfigError(() => cfg({ modle: 'deepseek-flash' }), /不认识的字段 "modle"/);
+    assertConfigError(() => cfg({ maxCost: 1 }), /不认识的字段 "maxCost"/);
   });
 
   it('code 段未知键也不静默忽略（注释承诺过，实现此前漏了）', () => {
-    assertConfigError(() => cfg({ code: { verfiy: ['npm', 'test'] } }), /不认识 "verfiy"/);
+    assertConfigError(() => cfg({ code: { verfiy: ['npm', 'test'] } }), /不认识的字段 "verfiy"/);
   });
 
   it('maxCostUsd / maxIterations 必须为正数：0 在 agentia 里是「不设上限」', () => {

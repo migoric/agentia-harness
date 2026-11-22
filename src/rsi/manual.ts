@@ -1,10 +1,16 @@
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { type Fail, objectAt, onlyKeys, readJsonObject, requiredText } from '../util/shape.js';
 import { atomicWrite } from './journal.js';
 import { validateManifest } from './manifest.js';
 import { FAILURE_KINDS, type Proposal } from './types.js';
+
+/** 手写提案与清单都是「配置形状」类失败（退出码 2）——码由本模块定，判定共用 util/shape */
+const fail: Fail = (message, cause) => {
+  throw new HarnessError('config.invalid', message, cause);
+};
 
 /**
  * 手写提案的读写边界。
@@ -17,13 +23,7 @@ import { FAILURE_KINDS, type Proposal } from './types.js';
  * 门在 `verifyProposal` 里，是纯函数、吃两份评测报告，手写提案也必须过。
  */
 export function readProposal(path: string): Proposal {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8'));
-  } catch (e) {
-    throw new HarnessError('config.invalid', `读不到或不是合法 JSON 的提案：${path}`, e);
-  }
-  return validate(parsed, path);
+  return validate(readJsonObject(path, fail), path);
 }
 
 export function writeProposal(config: HarnessConfig, proposal: Proposal): string {
@@ -38,19 +38,12 @@ export function writeProposal(config: HarnessConfig, proposal: Proposal): string
 }
 
 function validate(raw: unknown, source: string): Proposal {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new HarnessError('config.invalid', `${source}: 提案应是 JSON 对象`);
-  }
-  const p = raw as Record<string, unknown>;
-  keys(p, source, ['id', 'modeId', 'kind', 'rationale', 'layer', 'patch', 'manifest']);
-  const patch = p.patch;
-  if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
-    throw new HarnessError('config.invalid', `${source}: patch 应是对象`);
-  }
-  const q = patch as Record<string, unknown>;
-  keys(q, `${source}.patch`, ['target', 'before', 'after']);
+  const p = objectAt(raw, `${source}: 提案`, fail);
+  onlyKeys(p, source, ['id', 'modeId', 'kind', 'rationale', 'layer', 'patch', 'manifest'], fail);
+  const q = objectAt(p.patch, `${source}: patch`, fail);
+  onlyKeys(q, `${source}.patch`, ['target', 'before', 'after'], fail);
 
-  const id = text(p.id, `${source}.id`);
+  const id = requiredText(p.id, `${source}.id`, fail);
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) {
     throw new HarnessError(
       'config.invalid',
@@ -61,7 +54,7 @@ function validate(raw: unknown, source: string): Proposal {
   if (typeof kind !== 'string' || !FAILURE_KINDS.includes(kind as (typeof FAILURE_KINDS)[number])) {
     throw new HarnessError('config.invalid', `${source}.kind 不是已知失败类型：${String(kind)}`);
   }
-  const target = text(q.target, `${source}.patch.target`);
+  const target = requiredText(q.target, `${source}.patch.target`, fail);
   if (!/^(skill|agent):[A-Za-z0-9][A-Za-z0-9_-]*$/.test(target)) {
     throw new HarnessError(
       'config.invalid',
@@ -84,31 +77,13 @@ function validate(raw: unknown, source: string): Proposal {
   }
   return {
     id,
-    modeId: text(p.modeId, `${source}.modeId`),
+    modeId: requiredText(p.modeId, `${source}.modeId`, fail),
     kind: kind as Proposal['kind'],
-    rationale: text(p.rationale, `${source}.rationale`),
+    rationale: requiredText(p.rationale, `${source}.rationale`, fail),
     ...(p.manifest !== undefined
       ? { manifest: validateManifest(p.manifest, `${source}.manifest`) }
       : {}),
     layer: 'L1',
     patch: { target, before, after },
   };
-}
-
-function keys(obj: Record<string, unknown>, source: string, allowed: readonly string[]): void {
-  for (const k of Object.keys(obj)) {
-    if (!allowed.includes(k)) {
-      throw new HarnessError(
-        'config.invalid',
-        `${source}: 不认识的字段 "${k}"（只认 ${allowed.join(' / ')}）—— 拼错会静默丢字段`,
-      );
-    }
-  }
-}
-
-function text(v: unknown, label: string): string {
-  if (typeof v !== 'string' || v.trim() === '') {
-    throw new HarnessError('config.invalid', `${label} 应是非空字符串`);
-  }
-  return v;
 }
