@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { loadConfig } from '../src/config.ts';
 import type { GateResult } from '../src/evals/gate.ts';
 import type { EvalReport } from '../src/evals/types.ts';
-import { readLedger } from '../src/rsi/ledger.ts';
+import { lessonsOf, readLedger } from '../src/rsi/ledger.ts';
+import { writeCycle as persistCycle } from '../src/rsi/loop.ts';
 import type { Proposal } from '../src/rsi/types.ts';
 import { runCli } from './support/cli.ts';
 
@@ -205,6 +206,87 @@ describe('readLedger —— dry-run 不能被读成「被门拒」', () => {
     writeJournal(root, [entry(p, 1, 'accepted', '过了门')]);
     const entries = readLedger(loadConfig(root));
     assert.equal(entries[0]?.outcome, 'unverified');
+  });
+});
+
+describe('账本的时间口径 —— 读字段，不读文件名', () => {
+  /** 一份「被门拒」的轮次记录，`at` 与文件名**刻意可以不一致** */
+  function writeRejected(root: string, cycleId: string, at: string | undefined, p: Proposal): void {
+    const dir = join(root, '.workspace', 'rsi', 'cycles');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `${cycleId}.json`),
+      JSON.stringify({
+        cycleId,
+        ...(at === undefined ? {} : { at }),
+        modes: [],
+        proposals: [p],
+        verified: [
+          {
+            proposal: p,
+            baseline: report([]),
+            candidate: report([]),
+            gate: {
+              ...gate([]),
+              ok: false,
+              code: 'case_regression',
+              passRateDelta: 0,
+              reason: '用例 a 退步',
+            },
+          },
+        ],
+        accepted: [],
+        rejected: [],
+        baseline: report([]),
+        dryRun: false,
+        costUsd: 0,
+        costKnown: true,
+      }),
+      'utf8',
+    );
+  }
+
+  it('取「最近一条」按 at，而不是按文件名 —— 两者相反时不能选错', () => {
+    const root = project();
+    // 文件名排序与真实时刻**相反**：靠文件名解析会得到相反的结论
+    writeRejected(
+      root,
+      '2026-02-09T00-00-00-000Z',
+      '2026-02-01T00:00:00.000Z',
+      proposal('p-early'),
+    );
+    writeRejected(root, '2026-02-01T00-00-00-000Z', '2026-02-09T00:00:00.000Z', proposal('p-late'));
+
+    const lessons = lessonsOf(loadConfig(root), 1);
+    assert.equal(lessons.length, 1);
+    assert.equal(lessons[0]?.proposalId, 'p-late', '应按记录里的时刻，而不是文件名');
+  });
+
+  it('旧记录（没有 at）仍能读：回落到文件名，不许整份账本读不出来', () => {
+    const root = project();
+    writeRejected(root, '2026-02-09T00-00-00-000Z', undefined, proposal('p-old'));
+    const lessons = lessonsOf(loadConfig(root), 1);
+    assert.equal(lessons.length, 1);
+    assert.equal(lessons[0]?.proposalId, 'p-old');
+  });
+
+  it('writeCycle 落盘带 at（新记录不再依赖文件名）', () => {
+    const root = project();
+    const out = persistCycle(loadConfig(root), {
+      modes: [],
+      proposals: [],
+      verified: [],
+      accepted: [],
+      rejected: [],
+      baseline: undefined,
+      dryRun: false,
+      costUsd: 0,
+      costKnown: true,
+      budget: undefined,
+    });
+    const raw = JSON.parse(readFileSync(out.path, 'utf8')) as { at?: string };
+    assert.ok(raw.at !== undefined, '新记录必须带 at');
+    assert.ok(!Number.isNaN(Date.parse(raw.at)), 'at 必须可解析');
   });
 });
 

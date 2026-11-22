@@ -11,6 +11,7 @@ import { LlmProposer } from '../../rsi/propose.js';
 import { type RoundStopReason, runRounds } from '../../rsi/rounds.js';
 import type { CycleReport, HoldoutResult } from '../../rsi/types.js';
 import { isWorthAccepting, verifyProposal } from '../../rsi/verify.js';
+import { usd } from '../../util/usd.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
@@ -193,8 +194,8 @@ async function cycle(ctx: CliContext): Promise<number> {
       // 成本未知时不能印一个确切的美元数：它只是**已知部分**的下限
       say(
         result.costKnown
-          ? `累计成本 $${result.costUsd.toFixed(4)} / $${maxCost.toFixed(4)}`
-          : `累计成本未知（已知下限 $${result.costUsd.toFixed(4)} / $${maxCost.toFixed(4)}）—— 有轮次没定价或端点没报计量`,
+          ? `累计成本 ${usd(result.costUsd)} / ${usd(maxCost)}`
+          : `累计成本未知（已知下限 ${usd(result.costUsd)} / ${usd(maxCost)}）—— 有轮次没定价或端点没报计量`,
       );
     }
   }
@@ -245,7 +246,7 @@ function renderCycle(report: CycleReport): void {
   }
   say(
     report.costKnown
-      ? `\n本轮成本 $${report.costUsd.toFixed(4)}`
+      ? `\n本轮成本 ${usd(report.costUsd)}`
       : `\n本轮成本未知（模型不在价格表内或端点没报计量），token 只能当代理`,
   );
   if (report.budget !== undefined) {
@@ -253,7 +254,7 @@ function renderCycle(report: CycleReport): void {
     // spentUsd 是**跨轮累计**（`--rounds` 下上限只在整次运行上生效），措辞必须跟着变，
     // 否则第 3 轮会显示「预算 12.4 / 5 —— 本轮提前收工」，读起来像闸每轮都失灵
     say(
-      `预算：累计已花 $${b.spentUsd.toFixed(4)} / 上限 $${b.limitUsd.toFixed(4)}` +
+      `预算：累计已花 ${usd(b.spentUsd)} / 上限 ${usd(b.limitUsd)}` +
         (b.stopped ? ' —— 已用完，不再开下一轮' : ''),
     );
   }

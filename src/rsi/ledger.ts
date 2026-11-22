@@ -4,6 +4,7 @@ import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { readJournal } from './journal.js';
 import { cyclesDir } from './paths.js';
+import { revertNote } from './revert-note.js';
 import type {
   ChangeManifest,
   CycleReport,
@@ -11,6 +12,12 @@ import type {
   LessonEntry,
   VerifyOutcome,
 } from './types.js';
+
+/**
+ * 生成在 `revert-note.ts`（与解析同处一地），这里 re-export 是为了账本的取用面不变：
+ * `rsi-inspect` 一直从账本取它。
+ */
+export { revertNote };
 
 /**
  * 决策账本 —— 把「当初的预测」和「实际观察到的结果」接到同一行上。
@@ -72,9 +79,9 @@ export function readLedger(config: HarnessConfig): LedgerEntry[] {
       const runner = accepted.get(id);
       return entryOf(
         {
-          // 用轮次 id 还原时间而不是写 0：`lessonsOf` 按时间取最近的 N 条，
+          // 用轮次的**时刻**而不是写 0：`lessonsOf` 按时间取最近的 N 条，
           // at=0 会让「被门拒的提案」永远排在最后 —— 而它们恰恰是最该被记住的教训
-          at: cycleTime(hit.cycleId),
+          at: timeOf(hit),
           proposalId: id,
           status: runner === undefined ? 'rejected' : 'accepted',
           target: hit.proposal.patch.target,
@@ -168,22 +175,23 @@ export function lessonsOf(config: HarnessConfig, limit = 8): LessonEntry[] {
 }
 
 /**
- * 把回滚条目的 journal reason 改写成能直接给人/给模型读的一句话。
+ * 轮次的毫秒时刻：**优先读记录里的 `at` 字段**，读不到才回落到文件名。
  *
- * 落盘时写的是 `回滚了 p-xxx（原采纳理由：…）`：括号里是**当初采纳**的理由，
- * 不是回滚原因 —— `rsi revert` 是人工决定，不记原因。原样使用会出现
- * 「采纳后又被回滚：修好 1 条（a）」，读起来像「修好 1 条」是它被回滚的理由。
+ * 曾经只用文件名 —— 那等于把**命名格式**变成数据接口：改一次命名（加前缀、换分隔符、
+ * 带时区后缀），解析就失败并回落 0，于是 `lessonsOf` 按时间取最近 N 条时把这些记录
+ * **排到最后**，最该记住的教训被静默丢掉。字段是数据，文件名只该给人看。
  */
-export function revertNote(reason: string | undefined): string | undefined {
-  if (reason === undefined) return undefined;
-  const m = /（原采纳理由：(.*)）$/s.exec(reason);
-  return m?.[1] === undefined
-    ? reason
-    : `人工回滚，回滚记录没写原因（当初的采纳理由是「${m[1]}」）`;
+function timeOf(hit: { readonly at?: string | undefined; readonly cycleId: string }): number {
+  if (hit.at !== undefined) {
+    const t = Date.parse(hit.at);
+    if (!Number.isNaN(t)) return t;
+  }
+  return cycleTime(hit.cycleId);
 }
 
 /**
- * 从 cycleId 还原毫秒时间。cycleId 是 `2026-11-20T14-30-05-123Z`（ISO 把 `:` `.` 换成 `-`）。
+ * 从 cycleId 还原毫秒时间 —— **只给 2026-11-22 之前落盘的记录兜底**（那时还没有 `at` 字段）。
+ * cycleId 是 `2026-11-20T14-30-05-123Z`（ISO 把 `:` `.` 换成 `-`）。
  *
  * 解析不出来就返回 0：老记录或人手改名不该让账本整个读不出来 —— 它们只会排到最后，
  * 而「排后」在截断时意味着可能被丢掉，所以只在真的解析不了时才退到这一支。
@@ -196,11 +204,11 @@ function cycleTime(cycleId: string): number {
 }
 
 function loadOutcomes(config: HarnessConfig): {
-  verified: Map<string, VerifyOutcome & { cycleId: string }>;
+  verified: Map<string, VerifyOutcome & { cycleId: string; at?: string | undefined }>;
   /** 被 cycle 记进 `accepted` 的提案 —— 用来认出 dry-run（它没有 journal 记录） */
   accepted: Map<string, { cycleId: string; dryRun: boolean }>;
 } {
-  const verified = new Map<string, VerifyOutcome & { cycleId: string }>();
+  const verified = new Map<string, VerifyOutcome & { cycleId: string; at?: string | undefined }>();
   const accepted = new Map<string, { cycleId: string; dryRun: boolean }>();
   const dir = cyclesDir(config);
   if (!existsSync(dir)) return { verified, accepted };
@@ -215,7 +223,15 @@ function loadOutcomes(config: HarnessConfig): {
     } catch (e) {
       throw new HarnessError('rsi.no_signal', `坏掉的轮次记录 ${path} —— 账本拒绝跳过它`, e);
     }
-    for (const v of report.verified) verified.set(v.proposal.id, { ...v, cycleId: report.cycleId });
+    for (const v of report.verified) {
+      // `at` 缺席 = 旧记录（字段 2026-11-22 才有）；条件展开是为了满足
+      // exactOptionalPropertyTypes —— 显式 `at: undefined` 与「没有这个属性」不是一回事
+      verified.set(v.proposal.id, {
+        ...v,
+        cycleId: report.cycleId,
+        ...(report.at === undefined ? {} : { at: report.at }),
+      });
+    }
     for (const p of report.accepted) {
       accepted.set(p.id, { cycleId: report.cycleId, dryRun: report.dryRun === true });
     }

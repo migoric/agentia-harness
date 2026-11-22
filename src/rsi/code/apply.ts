@@ -6,6 +6,7 @@ import type { HarnessConfig } from '../../config.js';
 import { HarnessError } from '../../errors.js';
 import { fingerprint } from '../../util/hash.js';
 import { appendJournal, readJournal } from '../journal.js';
+import { revertNoteOf } from '../revert-note.js';
 import type { JournalEntry } from '../types.js';
 import type { CodeFileState, CodePatch, CodeVerify } from './types.js';
 
@@ -134,7 +135,7 @@ export function revertLastCode(config: HarnessConfig): CodeRevertResult {
     ...last,
     at: Date.now(),
     status: 'rejected',
-    reason: `回滚了 ${last.proposalId}（原采纳理由：${last.reason}）`,
+    reason: revertNoteOf(last.proposalId, last.reason),
   };
   appendJournal(config, reverted);
   return { entry: reverted, files: last.code.files.map((f) => f.path) };

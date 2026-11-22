@@ -8,6 +8,7 @@ import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { loadEvalCases } from '../evals/load.js';
 import { appendJournal, atomicWrite, journalPath, readJournal } from './journal.js';
+import { revertNoteOf } from './revert-note.js';
 import type { JournalEntry, Proposal, VerifyOutcome } from './types.js';
 import { renderFile } from './verify.js';
 
@@ -166,7 +167,7 @@ export function revertLast(config: HarnessConfig, id?: string): RevertResult {
     at: Date.now(),
     status: 'rejected',
     reverted: true,
-    reason: `回滚了 ${last.proposalId}（原采纳理由：${last.reason}）`,
+    reason: revertNoteOf(last.proposalId, last.reason),
     assetsBefore: current.fingerprint,
     assetsAfter: restored.fingerprint,
   };

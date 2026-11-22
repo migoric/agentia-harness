@@ -6,6 +6,7 @@ import type { HarnessConfig } from '../config.js';
 import type { GateOptions } from '../evals/gate.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import { splitReport } from '../evals/split.js';
+import { usd } from '../util/usd.js';
 import { acceptProposal } from './accept.js';
 import { attribute, collectFailures } from './attribute.js';
 import { validateHoldout } from './holdout.js';
@@ -71,7 +72,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
    * 写失败的策略是**让整轮失败**：一个「跑了但没记录」的 RSI 轮次比不跑更糟，
    * 因为它动过（或差点动过）资产，事后却无从复盘。
    */
-  const emit = (body: Omit<CycleReport, 'cycleId' | 'path'>): CycleReport =>
+  const emit = (body: Omit<CycleReport, 'cycleId' | 'path' | 'at'>): CycleReport =>
     writeCycle(opts.config, body, cycleId);
 
   const limit = opts.maxCostUsd;
@@ -167,7 +168,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       budgetStopped = true;
       rejected.push({
         proposal,
-        reason: `预算已用完（已花 $${totalSpent().toFixed(4)} ≥ 上限 $${limit.toFixed(4)}），本次不验证`,
+        reason: `预算已用完（已花 ${usd(totalSpent())} ≥ 上限 ${usd(limit)}），本次不验证`,
       });
       continue;
     }
@@ -225,7 +226,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       budgetStopped = true;
       rejected.push({
         proposal: winner.proposal,
-        reason: `train 已选出候选，但预算不足以做留出集验证（$${totalSpent().toFixed(4)} / $${limit.toFixed(4)}），拒绝采纳`,
+        reason: `train 已选出候选，但预算不足以做留出集验证（${usd(totalSpent())} / ${usd(limit)}），拒绝采纳`,
       });
       winner = undefined;
     } else {
@@ -310,11 +311,13 @@ export { cyclesDir };
  */
 export function writeCycle(
   config: HarnessConfig,
-  body: Omit<CycleReport, 'cycleId' | 'path'>,
+  body: Omit<CycleReport, 'cycleId' | 'path' | 'at'>,
   cycleId = makeCycleId(),
 ): CycleReport {
-  const path = persistCycle(config, { cycleId, ...body });
-  return { ...body, cycleId, path };
+  // 时刻写成**字段**，不靠文件名反解：文件名是给人看的，不该同时是数据接口
+  const at = new Date().toISOString();
+  const path = persistCycle(config, { at, cycleId, ...body });
+  return { at, ...body, cycleId, path };
 }
 
 function persistCycle(config: HarnessConfig, report: Omit<CycleReport, 'path'>): string {

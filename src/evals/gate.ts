@@ -1,3 +1,4 @@
+import { usd } from '../util/usd.js';
 import type { EvalReport } from './types.js';
 
 /**
@@ -135,7 +136,7 @@ export function gate(
         code: 'cost_regression',
         reason:
           `通过率没变（${(candidate.passRate * 100).toFixed(1)}%）但成本涨了 ${(costDelta * 100).toFixed(1)}%` +
-          `（$${baseline.costUsd.toFixed(4)} → $${candidate.costUsd.toFixed(4)}，阈值 ${(maxCostGrowth * 100).toFixed(0)}%）`,
+          `（${usd(baseline.costUsd)} → ${usd(candidate.costUsd)}，阈值 ${(maxCostGrowth * 100).toFixed(0)}%）`,
       };
     }
     if (costDelta === undefined && tokenDelta > maxTokenGrowth) {

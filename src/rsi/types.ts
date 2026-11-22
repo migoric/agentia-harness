@@ -214,6 +214,15 @@ export interface CycleReport {
   /** 本轮 id（时间戳 + 序号），也是落盘文件名 |
    *  有它才能把「CLI 打印的这一轮」与「.workspace 里那份记录」对上 */
   readonly cycleId: string;
+  /**
+   * 本轮开始的时刻（ISO 8601）。
+   *
+   * 可选**只为兼容旧记录**（本字段 2026-11-22 起才写）：账本曾用文件名
+   * （`2026-11-21T23-13-14-044Z`）正则反解时间 —— 那等于把**命名格式**变成隐式接口，
+   * 改一次命名就让排序静默退化（解析失败回落 0，最该被记住的教训被排到最后）。
+   * 新记录一律写字段；读的时候字段优先、文件名只作兜底。
+   */
+  readonly at?: string | undefined;
   readonly modes: readonly FailureMode[];
   readonly proposals: readonly Proposal[];
   readonly verified: readonly VerifyOutcome[];
