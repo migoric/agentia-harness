@@ -38,8 +38,24 @@ export function endpointSummary(config: HarnessConfig): EndpointSummary {
   };
 }
 
-/** 把 `endpoint` 段落到环境变量上（只填空位，不覆盖已有值） */
-export function applyEndpointEnv(config: HarnessConfig): void {
+/**
+ * 把 `endpoint` 段落到环境变量上（**只填空位，不覆盖已有值**）。
+ *
+ * 名字里的 `ensure` 是契约，不是风格：这个函数有**三个必须成立的性质**，调用点
+ * 越多越要守住 ——
+ *
+ * 1. **幂等**：调多少次结果一样。`createRunner`、`LlmProposer` 构造、CLI 入口各调
+ *    一次是刻意的，不是重复劳动。
+ * 2. **不覆盖**：`process.env` 里已经有值就不动。真实环境变量（命令行 / CI / docker）
+ *    永远赢过配置文件的便利层。
+ * 3. **进程级、只写一次**：这是它唯一的、已知的副作用。同进程里跑两个不同 `config`
+ *    （多租户、并行测试）时**第一个赢** —— 想要两套端点就得起两个进程。这条写在这里
+ *    是因为它不会自己报错：第二个 config 会安安静静地用上第一个的端点。
+ *
+ * 真正的解在上游：agentia 若支持显式注入 `baseURL` / `apiKey` 的 client 工厂，这里
+ * 就不必碰环境变量。已作为上游诉求记着，不在本仓再绕一层。
+ */
+export function ensureEndpointEnv(config: HarnessConfig): void {
   if (process.env[AGENTIA_BASE_URL] === undefined && config.baseURL !== undefined) {
     process.env[AGENTIA_BASE_URL] = config.baseURL;
   }
@@ -53,7 +69,7 @@ export function applyEndpointEnv(config: HarnessConfig): void {
  * key 从哪儿来：`null` = 一个都没有。
  *
  * 顺序就是客户端实际用的顺序（`ANTHROPIC_API_KEY` 先），所以这个函数和
- * `applyEndpointEnv` 必须保持一致 —— 否则「诊断说没有 key」而「请求却带着 key 出去了」。
+ * `ensureEndpointEnv` 必须保持一致 —— 否则「诊断说没有 key」而「请求却带着 key 出去了」。
  */
 function keySource(config: HarnessConfig): string | null {
   if (nonEmpty(process.env[AGENTIA_API_KEY])) return AGENTIA_API_KEY;

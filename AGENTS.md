@@ -143,6 +143,9 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
   （`createRunner` 与 `LlmProposer` 构造时，幂等）—— 只在 CLI 落的话，库用法下
   endpoint 段静默不生效，症状是「主 agent 走得通、子循环 401」的分裂故障。
   新增「会现造默认 client」的库入口时，记得同样落一次。
+- **`ensureEndpointEnv` 是进程级的**：同进程里两个不同 `config` 跑起来，**第一个赢**，
+  而且第二个不会报错 —— 它会安静地用上第一个的端点。多租户或并行测试想要两套端点，
+  只能起两个进程。所以那个函数叫 `ensure`（幂等、只填空位），不叫 `set`。
 - **子循环继承 client，但不继承 model**。上游 `runCapabilityLoop` 的设计如此
   （见 `toolkit/capability-loop.ts` 的边界段）：端点不会分裂，**模型名会** —— 不给
   `model` 就落到 `claude-opus-5`。harness 在 `buildApp` 把生效模型传给 `buildTools`，

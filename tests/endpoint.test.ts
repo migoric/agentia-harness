@@ -10,7 +10,7 @@ import { createRunner } from '../src/run/runner.ts';
 
 /**
  * endpoint 段的落地纪律：agentia 的默认 client 每次 run 现造、只读环境变量，
- * 所以「配置里的 endpoint 生效」只能靠 `applyEndpointEnv` 把值搬到
+ * 所以「配置里的 endpoint 生效」只能靠 `ensureEndpointEnv` 把值搬到
  * `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`。
  *
  * 这组用例钉的是**库入口**（不走 CLI 的调用方）：`createRunner` 与 `LlmProposer`

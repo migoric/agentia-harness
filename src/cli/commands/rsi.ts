@@ -4,6 +4,7 @@ import { describeError, HarnessError } from '../../errors.js';
 import { runSuite } from '../../evals/run.js';
 import { splitReport } from '../../evals/split.js';
 import { acceptProposal, revertLast } from '../../rsi/accept.js';
+import { Budget } from '../../rsi/budget.js';
 import { validateHoldout } from '../../rsi/holdout.js';
 import { writeCycle } from '../../rsi/loop.js';
 import { readProposal, writeProposal } from '../../rsi/manual.js';
@@ -114,12 +115,13 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
     say(`留出集验证通过：${holdout.gate.reason}`);
   }
   const dryRun = boolFlag(ctx.flags, 'dry-run');
-  // 成本口径与自动 RSI 一致：基线 + 候选（+ 留出集候选）
-  let spent = fullBaseline.costUsd + outcome.candidate.costUsd;
-  let costKnown = fullBaseline.costKnown && outcome.candidate.costKnown;
+  // 成本口径与自动 RSI 一致：基线 + 候选（+ 留出集候选）。走同一个 `Budget` 而不是
+  // 在这里再写一遍累加 —— 「花费怎么算」只能有一处定义，否则两条路径迟早对不上
+  const budget = new Budget(undefined, 0);
+  budget.charge(fullBaseline.costUsd, fullBaseline.costKnown);
+  budget.charge(outcome.candidate.costUsd, outcome.candidate.costKnown);
   if (outcome.holdout !== undefined) {
-    spent += outcome.holdout.candidate.costUsd;
-    costKnown = costKnown && outcome.holdout.candidate.costKnown;
+    budget.charge(outcome.holdout.candidate.costUsd, outcome.holdout.candidate.costKnown);
   }
   if (dryRun) {
     say(`dry-run：${proposal.id} 过了门，未落盘（${outcome.gate.reason}）`);
@@ -138,8 +140,8 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
       rejected: [],
       baseline: fullBaseline,
       dryRun,
-      costUsd: spent,
-      costKnown,
+      costUsd: budget.spentUsd,
+      costKnown: budget.costKnown,
       budget: undefined,
     });
   } catch (e) {

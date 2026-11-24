@@ -142,10 +142,10 @@ export {
 } from './rsi/verify.js';
 export { type BuildAppOptions, type BuiltApp, buildApp, effectiveModel } from './run/app.js';
 export {
-  applyEndpointEnv,
   assertEndpointKey,
   type EndpointSummary,
   endpointSummary,
+  ensureEndpointEnv,
   unpricedHint,
 } from './run/endpoint.js';
 export {

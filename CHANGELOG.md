@@ -158,6 +158,10 @@
 - **`acceptProposal()` / `acceptManually()` 返回 `{ entry, assets }`**（`writePatch` 同），
   `assets` 是落盘之后的资产快照。此前调用方（`rounds`）只能重新扫一遍磁盘来避开
   「下一轮还在用旧快照」—— 那是在替实现的缺口兜底，而不是设计。
+- **`applyEndpointEnv()` 改名 `ensureEndpointEnv()`**。它的语义一直是「只填空位」：
+  幂等、不覆盖真实环境变量、且是**进程级**的（同进程两个 config，第一个赢）。
+  名字里带 `ensure` 是让「调多次没关系」这件事在调用点一眼可见 —— 现在有三处调用
+  （CLI 入口、`createRunner`、`LlmProposer` 构造），看起来像重复劳动，实际是刻意的。
 
 ### 严格化（拼错就退出码 2）
 

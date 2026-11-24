@@ -15,7 +15,7 @@ import { initCommand } from './cli/init.js';
 import { say, warn } from './cli/output.js';
 import { loadConfig } from './config.js';
 import { describeError, isHarnessError } from './errors.js';
-import { applyEndpointEnv, assertEndpointKey } from './run/endpoint.js';
+import { assertEndpointKey, ensureEndpointEnv } from './run/endpoint.js';
 
 /**
  * CLI —— 八个命令，每个对应闭环的一段。
@@ -144,7 +144,7 @@ async function main(): Promise<number> {
   // 端点与凭据只在**真会调模型**的命令上校验：`lock` / `trace` / `report` /
   // `rsi status|revert` 一个模型都不调，没 key 时拦它们只会让人以为工具坏了
   if (needsModel(cmd, args._[0])) {
-    applyEndpointEnv(ctx.config);
+    ensureEndpointEnv(ctx.config);
     assertEndpointKey(ctx.config);
   }
 

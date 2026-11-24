@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { type HarnessConfig, loadConfig } from '../src/config.ts';
 import {
-  applyEndpointEnv,
   assertEndpointKey,
   endpointSummary,
+  ensureEndpointEnv,
   unpricedHint,
 } from '../src/run/endpoint.ts';
 
@@ -136,7 +136,7 @@ describe('端点桥接 —— 配置 → 进程环境变量', () => {
         endpoint: { baseURL: 'https://api.deepseek.com/anthropic', apiKeyEnv: 'DEEPSEEK_API_KEY' },
       });
       process.env.DEEPSEEK_API_KEY = 'sk-test';
-      applyEndpointEnv(c);
+      ensureEndpointEnv(c);
 
       assert.equal(process.env.ANTHROPIC_BASE_URL, 'https://api.deepseek.com/anthropic');
       assert.equal(process.env.ANTHROPIC_API_KEY, 'sk-test', '客户端只认这一个变量名');
@@ -157,7 +157,7 @@ describe('端点桥接 —— 配置 → 进程环境变量', () => {
       process.env.DEEPSEEK_API_KEY = 'sk-file';
       process.env.ANTHROPIC_API_KEY = 'sk-env';
 
-      applyEndpointEnv(c);
+      ensureEndpointEnv(c);
       assert.equal(process.env.ANTHROPIC_BASE_URL, 'https://from-env');
       assert.equal(process.env.ANTHROPIC_API_KEY, 'sk-env');
     });
@@ -166,7 +166,7 @@ describe('端点桥接 —— 配置 → 进程环境变量', () => {
   it('显式声明了 apiKeyEnv 却没有 key ⇒ 开跑前就报错（不等到 401）', () => {
     withCleanEnv(() => {
       const c = cfg({ endpoint: { apiKeyEnv: 'DEEPSEEK_API_KEY' } });
-      applyEndpointEnv(c);
+      ensureEndpointEnv(c);
       assertConfigError(() => assertEndpointKey(c), /缺少模型凭据：DEEPSEEK_API_KEY/);
     });
   });
@@ -174,7 +174,7 @@ describe('端点桥接 —— 配置 → 进程环境变量', () => {
   it('没声明 apiKeyEnv 的老工程不受影响（e2e 的假端点不需要 key）', () => {
     withCleanEnv(() => {
       const c = cfg({ endpoint: { baseURL: 'http://127.0.0.1:9/fake' } });
-      applyEndpointEnv(c);
+      ensureEndpointEnv(c);
       assert.doesNotThrow(() => assertEndpointKey(c));
       assert.equal(endpointSummary(c).keyFrom, null);
     });
@@ -184,7 +184,7 @@ describe('端点桥接 —— 配置 → 进程环境变量', () => {
     withCleanEnv(() => {
       const c = cfg({ endpoint: { apiKeyEnv: 'DEEPSEEK_API_KEY' } });
       process.env.ANTHROPIC_API_KEY = 'sk-env';
-      applyEndpointEnv(c);
+      ensureEndpointEnv(c);
       assert.doesNotThrow(() => assertEndpointKey(c));
     });
   });
