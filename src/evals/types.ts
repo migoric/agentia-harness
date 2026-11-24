@@ -96,6 +96,22 @@ export interface CaseResult {
    */
   readonly traceId?: string | undefined;
   /**
+   * 本次实际**尝试过**的模型（去重、按首次出现序）。缺席 = 没有可用 trace
+   * （首轮就抛异常），或这是老报告。
+   *
+   * 与 `EvalReport.model`（生效模型，单值）并列而不是取代它：那个回答「配了哪个」，
+   * 这个回答「真用了哪些」。接上 fallback 链之后两者会在降级发生后分叉，而
+   * 「两份报告能不能比」要读的正是后者。
+   */
+  readonly models?: readonly string[] | undefined;
+  /**
+   * 本次发生了几次模型降级。缺席语义同 `models`。
+   *
+   * 写 0 而不是省略：`0` 是「有 trace、明确没降级」，缺席是「不知道」——
+   * 两者混成一个会让门分不清「没降级」与「老报告没记」。
+   */
+  readonly fallbackUsed?: number | undefined;
+  /**
    * 实际跑了几轮。单轮用例缺席（老报告兼容），多轮用例 ≥ 2。
    *
    * 存在的理由：报告只记 `task`（首轮），不带这个数时人看不出「这条用例失败在第
@@ -184,6 +200,16 @@ export interface EvalReport {
   readonly finishedAt?: string | undefined;
   /** 实际生效的模型名；缺席 = 老报告 */
   readonly model?: string | undefined;
+  /**
+   * 全轮实际尝试过的模型（各用例并集，按首次出现序）；缺席 = 老报告。
+   *
+   * 存在的理由：`model` 是单值，而 fallback 链会让一次 run 内部换模型。单值时
+   * 「A → B 才跑完」会被记成「用了 A」，于是 `sameModel` 判据静默失效 ——
+   * 基线降级过、候选没降级，通过率差异被读成 agent 的进退步。
+   */
+  readonly models?: readonly string[] | undefined;
+  /** 全轮降级次数（各用例求和）；缺席 = 老报告 */
+  readonly fallbackUsed?: number | undefined;
   /** 本轮被用到的资产（按用例数降序）—— 提案选目标的数据来源 */
   readonly skillHits: readonly AssetHit[];
 }
@@ -215,6 +241,7 @@ export function summarize(
 ): EvalReport {
   const passed = cases.filter((c) => c.passed).length;
   const priced = cases.filter((c) => c.costUsd !== undefined);
+  const modelFacts = aggregateModels(cases);
   return {
     total: cases.length,
     passed,
@@ -232,8 +259,38 @@ export function summarize(
     ...(env.harnessVersion !== undefined ? { harnessVersion: env.harnessVersion } : {}),
     ...(env.finishedAt !== undefined ? { finishedAt: env.finishedAt } : {}),
     ...(env.model !== undefined ? { model: env.model } : {}),
+    ...modelFacts,
     skillHits: aggregateHits(cases),
   };
+}
+
+/**
+ * 全轮的模型事实 —— 并集与降级次数。
+ *
+ * **只要有一条用例没记，就整体返回空**（与 `costKnown` 同一条纪律）：并集少一个模型、
+ * 次数少算几次，都会让 `sameModel` 得出「两边一样」的假结论；而假结论比「不知道」
+ * 贵得多 —— 它会让人照着去改提示词。
+ *
+ * 两种「不知道」的处理不同，因为病因不同：
+ * - 某条用例没有 trace（首轮就抛）⇒ 本轮确实无法确认模型集合；
+ * - 有 trace 但一个 `llm.turn` 都没有 ⇒ 集合为空，不算「不知道」，只是没跑回合。
+ */
+function aggregateModels(cases: readonly CaseResult[]): {
+  models?: readonly string[] | undefined;
+  fallbackUsed?: number | undefined;
+} {
+  if (cases.length === 0 || cases.some((c) => c.models === undefined)) return {};
+  const seen = new Set<string>();
+  const models: string[] = [];
+  for (const c of cases) {
+    for (const m of c.models ?? []) {
+      if (seen.has(m)) continue;
+      seen.add(m);
+      models.push(m);
+    }
+  }
+  const fallbackUsed = cases.reduce((sum, c) => sum + (c.fallbackUsed ?? 0), 0);
+  return models.length === 0 ? { fallbackUsed } : { models, fallbackUsed };
 }
 
 /**

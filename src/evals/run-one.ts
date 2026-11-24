@@ -1,5 +1,6 @@
 import type { ModelClient } from '@migor/agentia';
 import { costOf } from '../run/cost.js';
+import { modelUsage } from '../run/model-read.js';
 import type { Runner, RunOutcome } from '../run/runner.js';
 import { mergeTraces } from '../run/trace-merge.js';
 import { combineAbort } from '../util/abort.js';
@@ -111,6 +112,9 @@ export async function runOne(
     const failedTurn =
       plannedTurns === undefined ? undefined : Math.min(partial.length + 1, plannedTurns);
     const done = partial.length === 0 ? '' : `（前 ${partial.length} 轮已完成，${tokens} token）`;
+    // 前几轮真跑过，模型事实就得留下：把「降级到 B 才崩」记成「什么都没跑」，
+    // 会让这一轮的模型集合与降级次数凭空消失，而报告是可比性判断的唯一依据
+    const mu = spent === undefined ? undefined : modelUsage(spent);
     return {
       name: c.name,
       task: c.task,
@@ -129,6 +133,7 @@ export async function runOne(
       excerpt: '',
       skills: [],
       subagents: [],
+      ...(mu === undefined ? {} : { models: mu.models, fallbackUsed: mu.fallbacks }),
       ...(plannedTurns === undefined ? {} : { turns: plannedTurns }),
       ...(failedTurn === undefined ? {} : { failedTurn }),
     };
@@ -151,6 +156,9 @@ export async function runOne(
     traceId: out.trace.traceId,
     skills: out.skills,
     subagents: out.subagents,
+    // 条件展开：外部构造的 outcome 可能没这两个字段（见 `RunOutcome.models`），
+    // 写 `[]` 会让「没记」与「一个回合都没跑」在报告里长成一样
+    ...(out.models === undefined ? {} : { models: out.models, fallbackUsed: out.fallbacks ?? 0 }),
     ...(out.turns === undefined ? {} : { turns: out.turns }),
     ...(out.failedTurn === undefined ? {} : { failedTurn: out.failedTurn }),
   };

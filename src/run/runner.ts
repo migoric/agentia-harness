@@ -11,6 +11,7 @@ import type { HarnessConfig } from '../config.js';
 import { buildApp } from './app.js';
 import { costOf, usageReported } from './cost.js';
 import { ensureEndpointEnv } from './endpoint.js';
+import { modelUsage } from './model-read.js';
 import { mergeTraces } from './trace-merge.js';
 import { capabilityHits } from './trace-read.js';
 
@@ -50,6 +51,23 @@ export interface RunOutcome {
   readonly skills: readonly string[];
   /** 本次实际委派过的子 agent（去重） */
   readonly subagents: readonly string[];
+  /**
+   * 本次**实际尝试过**的模型（去重、按首次出现序）。
+   *
+   * 与 `Runner.model`（生效模型）不是一件事：那个是「配了哪个」，这个是「真用了哪些」。
+   * 配了 fallback 链时两者在降级发生后就会分叉，而报告的可比性判据要读的正是后者。
+   *
+   * 可选是因为 `RunOutcome` 也能被外部构造（测试夹具、自定义 Runner）：那种 outcome
+   * 没跑过模型，写 `[]` 会让「没记」与「确实一个回合都没跑」变成同一件事。
+   */
+  readonly models?: readonly string[] | undefined;
+  /**
+   * 本次发生了几次模型降级（`llm.fallback` 事件数）。缺席语义同 `models`。
+   *
+   * 0 有两种读法，且都是真的：没配 fallback 链；或者配了但一次没触发。
+   * 想区分它们要读根属性 `config.fallbacks`（`modelUsage().declared`）。
+   */
+  readonly fallbacks?: number | undefined;
   /**
    * 这条用例**计划**跑几轮（单轮缺席）。中途失败中止时它仍是原计划轮数 ——
    * 报告要回答的是「这是不是一条多轮用例」，而「跑到第几轮崩的」由 `failedTurn` 说。
@@ -111,6 +129,7 @@ export class Runner {
       ...(opts.session !== undefined ? { session: opts.session } : {}),
     });
     const hits = capabilityHits(result.trace, this.skillNames);
+    const mu = modelUsage(result.trace);
     return {
       text: result.finalText,
       ok: isSuccessStopReason(result.stopReason),
@@ -129,6 +148,8 @@ export class Runner {
           : { type: result.error.type, message: result.error.message },
       skills: [...new Set(hits.skills)],
       subagents: [...new Set(hits.subagents)],
+      models: mu.models,
+      fallbacks: mu.fallbacks,
     };
   }
 
@@ -183,6 +204,8 @@ export class Runner {
     // 用例变成「run 抛出」：那条路会丢掉 `turns`，报告就看不出这是多轮用例
     const merged = first === undefined ? emptyTrace() : mergeTraces(parts.map((p) => p.trace));
     const hits = capabilityHits(merged, this.skillNames);
+    // 模型集合从**合并后**的 trace 读：多轮里第 2 轮降级了，整段会话就跨了两个模型
+    const mu = modelUsage(merged);
     // 失败轮次：优先取「跑完了但收尾不正常的」那一轮；一轮都没跑完时取抛异常的那一轮
     const badPart = parts.findIndex((p) => !p.ok);
     const failedIndex = badPart === -1 ? (threwAt ?? -1) : badPart;
@@ -201,6 +224,8 @@ export class Runner {
       error: thrown ?? parts.find((p) => p.error !== undefined)?.error,
       skills: [...new Set(hits.skills)],
       subagents: [...new Set(hits.subagents)],
+      models: mu.models,
+      fallbacks: mu.fallbacks,
       turns: turns.length,
       ...(failedIndex === -1 ? {} : { failedTurn: failedIndex + 1 }),
     };

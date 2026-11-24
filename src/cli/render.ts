@@ -128,7 +128,7 @@ export function renderComparison(
   const lines = [
     `基线  ${baseline.passed}/${baseline.total}（${(baseline.passRate * 100).toFixed(1)}%）· ${baseline.tokens} token${baseline.costKnown ? fmtCost(baseline.costUsd) : ''} · ${baseline.assetFingerprint}`,
     `候选  ${candidate.passed}/${candidate.total}（${(candidate.passRate * 100).toFixed(1)}%）· ${candidate.tokens} token${candidate.costKnown ? fmtCost(candidate.costUsd) : ''} · ${candidate.assetFingerprint}`,
-    `环境  模型 ${baseline.model ?? '未记录'} → ${candidate.model ?? '未记录'} · ` +
+    `环境  模型 ${fmtModel(baseline)} → ${fmtModel(candidate)} · ` +
       `agent ${baseline.agent} → ${candidate.agent} · ` +
       `harness ${baseline.harnessVersion ?? '未记录'} → ${candidate.harnessVersion ?? '未记录'}`,
     '',
@@ -173,4 +173,23 @@ export function renderComparison(
   };
   for (const n of names) lines.push(`  ${tag(n)}`);
   return lines.join('\n');
+}
+
+/**
+ * 报告里的模型集合 + 降级次数。
+ *
+ * 打印集合而不是单值：配了 fallback 链之后「用了哪个模型」可能不是一个名字。
+ * 只在真有降级时写次数 —— 每份报告都挂个「降级 0 次」只会让人忽略这一栏。
+ */
+function fmtModel(r: EvalReport): string {
+  const set =
+    r.models !== undefined && r.models.length > 0
+      ? r.models
+      : r.model !== undefined
+        ? [r.model]
+        : [];
+  if (set.length === 0) return '未记录';
+  const fb =
+    r.fallbackUsed !== undefined && r.fallbackUsed > 0 ? `（降级 ${r.fallbackUsed} 次）` : '';
+  return set.join(' + ') + fb;
 }

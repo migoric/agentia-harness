@@ -19,8 +19,20 @@ export interface SplitViews {
 export function splitReport(report: EvalReport): SplitViews {
   const train = report.cases.filter((c) => c.split !== 'holdout');
   const holdout = report.cases.filter((c) => c.split === 'holdout');
+  // 环境事实必须一起带过去。此前 `view()` 不传 env，于是 train / holdout 视图丢了
+  // `model` —— 门在视图上比对时，`sameModel` 退化成「不知道」，而那本来是可确认的。
+  //
+  // **`caseFingerprint` 刻意不带**：它是按「一整批用例」算的哈希，而视图只是子集。
+  // 带过去会让基线（全量指纹）与候选（只跑 train 得到的子集指纹）永远不相等，
+  // 于是每轮验证都被判成 `case_set_changed` —— 那不是「判定标准变了」，是拿两把
+  // 不同刻度的尺子量同一件事。
+  const env = {
+    ...(report.model !== undefined ? { model: report.model } : {}),
+    ...(report.harnessVersion !== undefined ? { harnessVersion: report.harnessVersion } : {}),
+    ...(report.finishedAt !== undefined ? { finishedAt: report.finishedAt } : {}),
+  };
   const view = (cases: EvalReport['cases']): EvalReport =>
-    summarize(cases, report.assetFingerprint, report.agent);
+    summarize(cases, report.assetFingerprint, report.agent, env);
   return {
     train: view(train),
     holdout: holdout.length === 0 ? undefined : view(holdout),

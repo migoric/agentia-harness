@@ -1,13 +1,13 @@
 import type { Trace } from '@migor/agentia';
+import { TOOL_INPUT_EVENT } from '../run/trace-events.js';
 
 /**
- * agentia 的工具入参事件名（`core/trace.ts` 的 `TOOL_INPUT_EVENT`）。
+ * 从 trace 还原工具调用。
  *
- * 写字面量而不是 import：agentia 的公共导出面里没有它（它属于「core 词汇表」，
- * 只对内部三层可见）。上游改名会让我们静默读到 0 条工具调用 —— 防线是测试：
- * `tests/evals.test.ts` 用真实调用产生的 trace 断言序列非空，改名会立刻红。
+ * 事件名从 `run/trace-events.ts` 取：agentia 的公共导出面里没有它（它属于「core 词汇表」，
+ * 只对内部三层可见），所以那边集中了全部字面量副本。上游改名时只改一处，而不是
+ * 在每个读取点各找一次。
  */
-const TOOL_INPUT_EVENT = 'tool.input';
 
 export interface ToolInvocation {
   readonly tool: string;

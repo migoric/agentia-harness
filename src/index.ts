@@ -148,6 +148,7 @@ export {
   ensureEndpointEnv,
   unpricedHint,
 } from './run/endpoint.js';
+export { type ModelUsage, modelUsage, sameModelSet } from './run/model-read.js';
 export {
   type CostNote,
   createRunner,

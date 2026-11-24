@@ -1,3 +1,4 @@
+import { sameModelSet } from '../run/model-read.js';
 import { usd } from '../util/usd.js';
 import type { EvalReport } from './types.js';
 
@@ -94,10 +95,22 @@ export interface GateResult {
   /**
    * 两边模型相同。`undefined` = 至少一边没记（老报告）。
    *
+   * 判据是**集合**而不是单值：配了 fallback 链之后，一次 run 内部就可能换模型。
+   * 单值判据在那种情况下会得出「两边都是 A ⇒ 可比」的假结论，而实际候选降级过、
+   * 基线没降级 —— 通过率差异被读成 agent 的进退步。
+   *
    * 不据此否决：跨模型对比是合法实验（「换个便宜模型还过不过」）。但**成本/通过率
    * 的增减必须带着它读** —— 换模型后 token 与单价的基准都变了。
    */
   readonly sameModel: boolean | undefined;
+  /**
+   * 模型事实的附注（集合不同 / 发生过降级），已并入 `reason`；没有可说的就是
+   * `undefined`。单独留一个字段是为了让调用方不必去解析 `reason` 的字符串。
+   *
+   * 可选**只为兼容手写的 `GateResult` 夹具**（测试里那几份）。真实结论一律由
+   * `gate()` 产出，它总会显式写这个键 —— 缺席意味着「不是 gate 算的」。
+   */
+  readonly modelNote?: string | undefined;
   /** 两边 agent 相同（`name@version`）。不同则比的根本不是同一个 agent */
   readonly sameAgent: boolean;
 }
@@ -107,6 +120,15 @@ export function gate(
   candidate: EvalReport,
   opts: GateOptions = {},
 ): GateResult {
+  const verdict = gateCore(baseline, candidate, opts);
+  // 模型事实必须挂在**每一条**结论上（通过和否决都算）：它是「这份结论能不能当结论」
+  // 的前提，而不是只在出问题时才提一句的备注。包在唯一出口上，才不会新增分支时漏掉
+  return verdict.modelNote === undefined
+    ? verdict
+    : { ...verdict, reason: `${verdict.reason}；${verdict.modelNote}` };
+}
+
+function gateCore(baseline: EvalReport, candidate: EvalReport, opts: GateOptions = {}): GateResult {
   const maxTokenGrowth = opts.maxTokenGrowth ?? 0.1;
   const base = new Map(baseline.cases.map((c) => [c.name, c]));
   const cand = new Map(candidate.cases.map((c) => [c.name, c]));
@@ -162,10 +184,13 @@ export function gate(
     : undefined;
   const costBasis: 'cost' | 'tokens' = costDelta === undefined ? 'tokens' : 'cost';
   const sameAssets = baseline.assetFingerprint === candidate.assetFingerprint;
-  const sameModel =
-    baseline.model !== undefined && candidate.model !== undefined
-      ? baseline.model === candidate.model
-      : undefined;
+  // 判据单位是**集合**：配了 fallback 链之后一次 run 内部就可能换模型，单值判据会
+  // 得出「两边都是 A ⇒ 可比」的假结论（候选降级过、基线没降级）。老报告没有集合时才
+  // 退回 `model` 单值 —— 那条路仍然可用，只是看不见降级
+  const setB = modelSetOf(baseline);
+  const setC = modelSetOf(candidate);
+  const sameModel = setB !== undefined && setC !== undefined ? sameModelSet(setB, setC) : undefined;
+  const modelNote = modelNoteOf(baseline, candidate, sameModel);
 
   const common = {
     regressedCases,
@@ -179,6 +204,7 @@ export function gate(
     onlyInBaseline,
     onlyInCandidate,
     sameModel,
+    modelNote,
     sameAgent: baseline.agent === candidate.agent,
   } as const;
 
@@ -293,4 +319,44 @@ function sharedPassed(
 ): string {
   const passed = names.filter((n) => cases.get(n)?.passed === true).length;
   return `${passed}/${names.length}`;
+}
+
+/** 报告里的模型集合；老报告没有 `models` 时用单值 `model` 造一个一元素集合 */
+function modelSetOf(r: EvalReport): readonly string[] | undefined {
+  if (r.models !== undefined && r.models.length > 0) return r.models;
+  return r.model === undefined ? undefined : [r.model];
+}
+
+function modelLabel(r: EvalReport): string {
+  const set = modelSetOf(r);
+  return set === undefined ? '未记录' : set.join(', ');
+}
+
+/**
+ * 模型事实的附注 —— 两类事都会让「通过率变化」不再可读成「改动效果」：
+ *
+ * - **集合不同**：跨模型对比本身是合法实验（「换个便宜模型还过不过」），但成本与
+ *   token 的阈值是按同一个模型的噪声水平定的；
+ * - **发生过降级**：降级轮与未降级轮不是同一个基准。混在一起算通过率，等于拿两种
+ *   分布当一种 —— 而这恰恰是 fallback 链最容易制造出来的假象。
+ *
+ * 两条都不否决（否决权只给回归与成本），但都必须说出来。
+ */
+function modelNoteOf(
+  baseline: EvalReport,
+  candidate: EvalReport,
+  sameModel: boolean | undefined,
+): string | undefined {
+  const notes: string[] = [];
+  if (sameModel === false) {
+    notes.push(`模型集合不同（基线 ${modelLabel(baseline)}；候选 ${modelLabel(candidate)}）`);
+  }
+  const fbB = baseline.fallbackUsed;
+  const fbC = candidate.fallbackUsed;
+  if ((fbB ?? 0) > 0 || (fbC ?? 0) > 0) {
+    notes.push(
+      `发生过模型降级（基线 ${fbB ?? '未记录'} 次、候选 ${fbC ?? '未记录'} 次）—— 降级轮与未降级轮不是同一个基准`,
+    );
+  }
+  return notes.length === 0 ? undefined : notes.join('；');
 }

@@ -1,12 +1,12 @@
 import type { Trace } from '@migor/agentia';
+import { USAGE_MISSING_EVENT } from './trace-events.js';
 
 /**
  * 从 trace 读成本的**唯一口径**，run / eval / RSI 提案器共用。
  *
- * 上游的 `usage.missing` 不在公共导出面（与 `tool.input` 同款），所以这里复制字面量。
- * 风险是上游改名后静默读不到 —— 防线是 `tests/evals.test.ts` 里那条真实 trace 断言。
+ * 事件名从 `trace-events.ts` 取（上游没进公共导出面，那里集中了全部字面量副本）——
+ * 上游改名时只需改一个文件，而不是在每个读取点各找一次。
  */
-const USAGE_MISSING_EVENT = 'usage.missing';
 
 /** 这一轮有没有回合「根本没报计量」 */
 export function usageReported(trace: Trace): boolean {
