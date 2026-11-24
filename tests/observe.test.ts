@@ -70,6 +70,25 @@ describe('runSuite —— 并发、超时、重试', () => {
     assert.equal(report.passed, 2);
   });
 
+  it('并发度给 NaN 不丢用例（非有限值按「不限制」处理，不是 0 个 worker）', async () => {
+    // 这条钉的是「为什么用上游 mapWithConcurrency 而不是本地再写一份」：本地那份按
+    // `Array.from({ length: Math.min(limit, n) })` 起 worker，NaN 会让 worker 数为 0 ——
+    // fn 一次都不调，results 全是 undefined，整轮用例**静默消失**。上游把非正/非有限值
+    // 一律当「不限制」。CLI 有 positive() 校验，所以这只影响库调用方。
+    const root = project({
+      'evals/a.md': '---\nname: a\nexpect_contains: 结论\n---\n任务A\n',
+    });
+    const { config, assets } = assetsOf(root);
+    const report = await runSuite({
+      config,
+      assets,
+      concurrency: Number.NaN,
+      client: scriptedClient([endTurn('结论：好')]),
+    });
+    assert.equal(report.cases.length, 1, 'NaN 并发度不能让用例消失');
+    assert.equal(report.passed, 1);
+  });
+
   it('单条用例超时 ⇒ 记为该用例失败，整轮不崩', async () => {
     // 用例按名字排序执行：a-slow 先跑（拿第一步＝延迟的那步），b-fast 后跑
     const root = project({

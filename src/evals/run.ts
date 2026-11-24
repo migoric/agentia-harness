@@ -1,4 +1,4 @@
-import type { ModelClient } from '@migor/agentia';
+import { type ModelClient, mapWithConcurrency } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
@@ -80,37 +80,15 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
 
   const runner = createRunner(opts.config, opts.assets, opts.agent, opts.keepTraces === true);
   const limit = Math.max(1, opts.concurrency ?? 1);
-  const results = await mapLimit(cases, limit, (c) => runOne(runner, c, opts));
+  // 有界并发 + 保序直接用上游实现（agentia 公共面导出，边界处理更细）——
+  // 结果顺序决定两次跑分的 diff 是不是噪声；本地曾有过一份逐行等价的实现，
+  // 那种「改一处漏一处」的重复比复用的耦合贵得多
+  const results = await mapWithConcurrency(cases, limit, (c) => runOne(runner, c, opts));
   return summarize(
     results,
     opts.assets.fingerprint,
     `${runner.agent.name}@${runner.agent.version}`,
   );
-}
-
-/**
- * 有界并发，**保持输入顺序**。
- *
- * 顺序很重要：报告里用例的排列不该取决于谁先跑完，否则两次跑分的 diff 全是噪声。
- */
-async function mapLimit<T, R>(
-  items: readonly T[],
-  limit: number,
-  fn: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      const item = items[i];
-      if (item === undefined) return;
-      out[i] = await fn(item);
-    }
-  });
-  await Promise.all(workers);
-  return out;
 }
 
 async function runOne(
