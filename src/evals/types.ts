@@ -60,6 +60,17 @@ export interface EvalCase {
   readonly expect: EvalExpect;
   /** 缺省 `train`：老用例不必改一个字也能继续用 */
   readonly split?: EvalSplit | undefined;
+  /**
+   * 这条用例要水合的记忆键（frontmatter `memory_keys`）。缺席 = 不接记忆（裸 agent）。
+   *
+   * 存在理由：记忆一旦参与，「同一条用例两次跑结果不同」就是**设计如此**而不是抖动。
+   * 用例不声明它走不走记忆，评测与线上到底测的是不是同一个东西就无从判断 ——
+   * 而这件事只能由用例自己说，因为「该带哪些键」是任务语义，不是全局配置。
+   *
+   * 种子刻意只支持「空 store + 这些键」：预置内容需要一个格式（JSON？md 旁挂？），
+   * 那要等业务框架的记忆形态定下来再定，现在猜一个格式只会提前锁死设计。
+   */
+  readonly memoryKeys?: readonly string[] | undefined;
   /** 来源文件（报错定位） */
   readonly path: string;
 }
@@ -228,6 +239,11 @@ export function caseSetFingerprint(cases: readonly EvalCase[]): string {
       followUps: c.followUps ?? [],
       expect: c.expect,
       split: c.split ?? 'train',
+      // 只在**非空**时进指纹：给每条老用例平白加一个 `memoryKeys: []` 会让所有
+      // 既有报告立刻变成「用例集变了」，那不是判定标准变了，只是我们换了个写法
+      ...(c.memoryKeys !== undefined && c.memoryKeys.length > 0
+        ? { memoryKeys: c.memoryKeys }
+        : {}),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return fingerprint(JSON.stringify(rows));

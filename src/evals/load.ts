@@ -8,6 +8,7 @@ import type { EvalCase, EvalExpect, ToolArgExpect } from './types.js';
 const CASE_KEYS: readonly string[] = [
   'name',
   'split',
+  'memory_keys',
   'expect_contains',
   'expect_not_contains',
   'expect_tools',
@@ -118,6 +119,15 @@ function parseCase(path: string): EvalCase {
     );
   }
   const { task, followUps } = splitTurns(fm.body, path);
+  // 记忆键：空列表等于没写（不接记忆）—— 「写了空数组」与「没写」是同一件事，
+  // 硬要区分只会让指纹多一个永远为空的字段。
+  //
+  // 这里与 `caseSetFingerprint` 各挡一次是**刻意**的双保险，不是重复：这一处管
+  // 「从 Markdown 读进来」的那条路，那一处管「调用方手写 EvalCase」的那条路。
+  // 只在其中一处挡，另一条路就会悄悄给指纹塞个空字段（变异测试在这里不会红，
+  // 就是因为另一层还挡着 —— 记下来，免得下次有人以为它是死代码删掉）。
+  const memoryKeysRaw = list(fm, 'memory_keys');
+  const memoryKeys = memoryKeysRaw.filter((k) => k.trim() !== '');
 
   const contains = list(fm, 'expect_contains');
   const notContains = list(fm, 'expect_not_contains');
@@ -183,6 +193,7 @@ function parseCase(path: string): EvalCase {
     ...(followUps.length > 0 ? { followUps } : {}),
     expect,
     ...(split !== undefined ? { split } : {}),
+    ...(memoryKeys.length > 0 ? { memoryKeys } : {}),
     path,
   };
 }

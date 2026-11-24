@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   InMemorySessionStore,
   isSuccessStopReason,
+  type MemoryStore,
   type ModelClient,
   type SessionStore,
   type Trace,
@@ -92,6 +93,20 @@ export interface RunOptions {
    */
   readonly session?: { readonly store: SessionStore; readonly id: string } | undefined;
   /**
+   * 跨 run 记忆（agentia 的 `MemoryStore`）—— run 级，不是装配级。
+   *
+   * 之所以开在这里而不是 `buildApp`：agentia 的语义就是 run 边界水合/回写
+   * （`app.run(messages, { memory })`），装配期根本没有它的位置。上轮评审里说的
+   * 「记忆缝」指的是**这个口子存在**，不是「装配层多个参数」。
+   *
+   * 为什么必须有：评测与线上要是同一条路。线上有记忆而评测没有时，报告通过率再高
+   * 也证明不了线上；反过来，同一条用例两次跑结果本就该不同，评测会把「设计如此」
+   * 读成「抖动」，回归门永远在抖。
+   *
+   * 缺省不传 = 不接记忆（裸 agent）。这不是省略而是刻意的缺省：老用例一个字都不用改。
+   */
+  readonly memory?: { readonly store: MemoryStore; readonly keys: readonly string[] } | undefined;
+  /**
    * 每跑完一轮就回调一次（**只有 `runTurns` 会调**）。
    *
    * 存在的唯一理由是多轮超时：`Promise.race` 输掉之后整段 `runTurns` 的结果就没了，
@@ -127,6 +142,11 @@ export class Runner {
       ...(opts.client !== undefined ? { client: opts.client } : {}),
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
       ...(opts.session !== undefined ? { session: opts.session } : {}),
+      // `keys` 复制一份再交出去：上游会把这个数组存进 run 上下文，调用方之后往
+      // 自己的数组里 push 一个键，就等于在 run 进行中改了它的水合范围
+      ...(opts.memory !== undefined
+        ? { memory: { store: opts.memory.store, keys: [...opts.memory.keys] } }
+        : {}),
     });
     const hits = capabilityHits(result.trace, this.skillNames);
     const mu = modelUsage(result.trace);

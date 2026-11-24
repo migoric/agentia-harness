@@ -1,4 +1,4 @@
-import type { ModelClient } from '@migor/agentia';
+import { InMemoryMemoryStore, type ModelClient } from '@migor/agentia';
 import { costOf } from '../run/cost.js';
 import { modelUsage } from '../run/model-read.js';
 import type { Runner, RunOutcome } from '../run/runner.js';
@@ -57,9 +57,17 @@ export async function runOne(
     partial = collected;
     const gate = combineAbort(opts.signal, opts.timeoutMs);
     try {
+      // 记忆**每个尝试各造一个**：上一次尝试写到黑板上的键若留下来，重试就不是
+      // 「同样条件再来一次」，而是「带着上次的残留再跑」—— 那会让重试看起来像运气，
+      // 而重试的语义必须和首跑一致，否则 `--retries` 会静默改变被测对象
+      const memory =
+        c.memoryKeys === undefined || c.memoryKeys.length === 0
+          ? undefined
+          : { store: new InMemoryMemoryStore(), keys: c.memoryKeys };
       const runOpts = {
         ...(opts.client !== undefined ? { client: opts.client } : {}),
         ...(gate.signal !== undefined ? { signal: gate.signal } : {}),
+        ...(memory !== undefined ? { memory } : {}),
         onTurn: (o: RunOutcome) => collected.push(o),
       };
       // 单轮走 `run`（与线上同一条路），多轮才接会话。分支放在这里而不是 Runner 内部：
