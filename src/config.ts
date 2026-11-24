@@ -20,7 +20,16 @@ const fail: Fail = (message, cause) => {
  * 所有路径在返回前都解析成绝对路径：CLI 的工作目录由用户决定，配置里存相对路径
  * 是合理的，但代码里不再做第二次拼接。
  */
-export interface HarnessConfig {
+/**
+ * 「这个工程的文件在哪儿」—— 纯路径，没有一处运行时语义。
+ *
+ * 单独成一个值对象，是因为**读路径的模块不该拿到模型与预算的旋钮**：此前 21 个
+ * config 消费者里有 18 个只用到 1–3 个字段（平均 1.4 个），而它们拿到的是一整个
+ * 20 字段的对象 —— 于是「这个模块依赖哪些配置」在类型上无法回答，新增字段也会无声
+ * 扩散到所有持有 config 的模块。`HarnessConfig extends WorkspacePaths`，所以调用方
+ * 照旧传整个 config，收窄只发生在**被调方**。
+ */
+export interface WorkspacePaths {
   readonly root: string;
   readonly skillsDir: string;
   readonly agentsDir: string;
@@ -29,7 +38,10 @@ export interface HarnessConfig {
   /** 运行时产物根（trace / 跑分 / 提案），默认 `.workspace/` */
   readonly workspaceDir: string;
   readonly tracesPath: string;
-  readonly appName: string;
+}
+
+/** 「用哪个模型、花多少钱」—— 与路径无关的另一组旋钮 */
+export interface ModelSettings {
   readonly model: string | undefined;
   readonly maxIterations: number | undefined;
   readonly maxCostUsd: number | undefined;
@@ -55,6 +67,20 @@ export interface HarnessConfig {
    * 没有读数时明确说出来（见 `run/endpoint.ts` 的 `unpricedHint`）。
    */
   readonly pricing: Readonly<Record<string, ModelPrice>>;
+}
+
+/**
+ * Harness —— 工程配置（= 路径 + 模型设置 + 装配/服务面）。
+ *
+ * 约定优于配置：不写 `harness.config.json` 也能跑（全部落缺省目录）。写了的字段
+ * 才覆盖 —— 这与仓库里「显式 undefined 与不传不同」的口径一致，所以 `readConfig`
+ * 只认**出现过的键**。
+ *
+ * 所有路径在返回前都解析成绝对路径：CLI 的工作目录由用户决定，配置里存相对路径
+ * 是合理的，但代码里不再做第二次拼接。
+ */
+export interface HarnessConfig extends WorkspacePaths, ModelSettings {
+  readonly appName: string;
   /**
    * L2（代码补丁）的验证命令，缺省 `['npm', 'test']`。
    *

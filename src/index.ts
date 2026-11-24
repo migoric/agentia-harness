@@ -68,7 +68,6 @@ export {
   acceptProposal,
   journalPath,
   type RevertResult,
-  readJournal,
   revertLast,
 } from './rsi/accept.js';
 export { attribute, classify, collectFailures } from './rsi/attribute.js';
@@ -85,6 +84,7 @@ export {
   verifyInSandbox,
 } from './rsi/code/sandbox.js';
 export type { CodeFileState, CodeJournal, CodePatch, CodeVerify } from './rsi/code/types.js';
+export { CYCLE_SCHEMA, type CycleRecord, readCycles } from './rsi/cycles.js';
 export {
   buildEvidenceCorpus,
   type EvidenceCorpus,
@@ -92,7 +92,14 @@ export {
   type EvidenceOptions,
 } from './rsi/evidence.js';
 export { type HoldoutOptions, validateHoldout } from './rsi/holdout.js';
-export { appendJournal, atomicWrite, liveAccepted } from './rsi/journal.js';
+export {
+  appendJournal,
+  atomicWrite,
+  type JournalRepair,
+  liveAccepted,
+  readJournal,
+  repairJournal,
+} from './rsi/journal.js';
 export { type LedgerEntry, lessonsOf, readLedger } from './rsi/ledger.js';
 export { type CycleOptions, cyclesDir, runCycle, writeCycle } from './rsi/loop.js';
 export { type ChangeManifest, manifestFor, validateManifest } from './rsi/manifest.js';

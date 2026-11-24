@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { HarnessConfig } from '../config.js';
+import type { WorkspacePaths } from '../config.js';
+import { HarnessError } from '../errors.js';
 import { isRevertEntry } from './revert-note.js';
 import type { JournalEntry } from './types.js';
 
@@ -14,12 +15,18 @@ import type { JournalEntry } from './types.js';
  * 读取侧刻意**宽容**：老记录没有 `kind` 字段（那时只有文本资产），一律按 `asset` 读；
  * 文件不存在返回空数组（第一次跑 RSI 之前的正常状态），但**解析失败要炸** —— 半截
  * JSON 意味着有人中断过写入，静默跳过会让回滚基于不完整的历史做决定。
+ *
+ * 「炸」也分两种，这是 2026-11-24 补的：此前一律让 `JSON.parse` 的原生 `SyntaxError`
+ * 冒到调用方，症状是 `Unterminated string in JSON` 且没有 `code`、没有修复建议。
+ * append-only 文件被杀在写系统调用中间，只会产出**末行半截**（前面的行是完整的），
+ * 那是「中断的追加」，不是「历史损坏」—— 它不该让 `rsi accept/regress/ledger/cycle`
+ * 永久失效，而 `repairJournal` 正是为这一种情况准备的。中间行坏了才是真损坏，仍然炸。
  */
-export function journalPath(config: HarnessConfig): string {
+export function journalPath(config: WorkspacePaths): string {
   return join(config.workspaceDir, 'rsi', 'journal.jsonl');
 }
 
-export function readJournal(config: HarnessConfig): JournalEntry[] {
+export function readJournal(config: WorkspacePaths): JournalEntry[] {
   const path = journalPath(config);
   let text: string;
   try {
@@ -27,13 +34,128 @@ export function readJournal(config: HarnessConfig): JournalEntry[] {
   } catch {
     return [];
   }
-  return text
-    .split('\n')
-    .filter((l) => l.trim() !== '')
-    .map((l) => withKind(JSON.parse(l) as JournalEntry));
+  return parseJournal(text, path);
 }
 
-export function appendJournal(config: HarnessConfig, entry: JournalEntry): void {
+/** 文本 → 记录。抽出来是为了 `repairJournal` 能「先试读截断结果再落盘」，不靠复制一套判定 */
+function parseJournal(text: string, path: string): JournalEntry[] {
+  // 每行都以 \n 收尾是正常形态；结尾没有换行 = 最后一次追加可能被截断
+  const terminated = text.endsWith('\n');
+  const lines = text.split('\n');
+  const out: JournalEntry[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (line.trim() === '') continue;
+    const isLast = i === lines.length - 1;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      out.push(withKind(entryAt(parsed, path, i)));
+    } catch (e) {
+      if (e instanceof HarnessError) throw e;
+      if (isLast && !terminated) {
+        throw new HarnessError(
+          'rsi.no_signal',
+          `journal 的最后一行是半截的（追加写到一半就中断了）：${path}\n` +
+            '这不是历史损坏，前面每一行都是完整的。先备份，再执行 ' +
+            '`harness rsi journal --repair` 截掉那半行',
+          e,
+        );
+      }
+      throw new HarnessError(
+        'rsi.no_signal',
+        `journal 第 ${i + 1} 行不是合法 JSON（${path}）—— 拒绝跳过坏记录`,
+        e,
+      );
+    }
+  }
+  return out;
+}
+
+/** 一条记录的最小形状。「不是对象 / 没有 proposalId」在这里就该停，而不是让下游解引用崩 */
+function entryAt(v: unknown, path: string, i: number): JournalEntry {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    throw new HarnessError(
+      'rsi.no_signal',
+      `journal 第 ${i + 1} 行不是对象（${path}）—— 拒绝读坏记录`,
+    );
+  }
+  const o = v as Record<string, unknown>;
+  if (typeof o.proposalId !== 'string' || o.proposalId === '') {
+    throw new HarnessError(
+      'rsi.no_signal',
+      `journal 第 ${i + 1} 行缺少 proposalId（${path}）—— 拒绝读坏记录`,
+    );
+  }
+  if (o.status !== 'accepted' && o.status !== 'rejected') {
+    throw new HarnessError(
+      'rsi.no_signal',
+      `journal 第 ${i + 1} 行的 status 只能是 accepted/rejected（实为 ${String(o.status)}）`,
+    );
+  }
+  return o as unknown as JournalEntry;
+}
+
+export interface JournalRepair {
+  /** 截掉了半行（false = 本来就没有半行，什么都没做） */
+  readonly truncated: boolean;
+  /** 备份文件路径（没截断时为 undefined） */
+  readonly backupPath: string | undefined;
+  /** 截断前 / 后的行数 */
+  readonly linesBefore: number;
+  readonly linesAfter: number;
+}
+
+/**
+ * 修掉「末行半截」—— **只允许截尾**，不重写任何历史行。
+ *
+ * 为什么不是「读的时候宽容跳过」：那会让「回滚基于不完整的历史」变成静默行为。
+ * 修复必须是**显式动作**，且留下备份，事后能证明「截掉的确实只有半行」。
+ *
+ * 结尾有换行却解析不了 ⇒ 拒绝修：那不是中断的追加，是内容真的坏了（手改、磁盘错误），
+ * 自动化去截它只会把「数据坏了」变成「数据少了一行」。
+ */
+export function repairJournal(config: WorkspacePaths): JournalRepair {
+  const path = journalPath(config);
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return { truncated: false, backupPath: undefined, linesBefore: 0, linesAfter: 0 };
+  }
+  const linesBefore = text.split('\n').filter((l) => l.trim() !== '').length;
+  if (text.endsWith('\n') || text.trim() === '') {
+    return { truncated: false, backupPath: undefined, linesBefore, linesAfter: linesBefore };
+  }
+  const cut = text.lastIndexOf('\n');
+  if (cut < 0) {
+    throw new HarnessError(
+      'rsi.no_signal',
+      `${path} 只有半行、没有任何完整记录 —— 这不是「截断末行」能修的，请人工检查`,
+    );
+  }
+  const kept = text.slice(0, cut + 1);
+  // 截完仍要能读通：否则说明坏的不止末行，拒绝继续（把「数据坏了」做成「少一行」是最坏的自动化）
+  try {
+    parseJournal(kept, path);
+  } catch (e) {
+    throw new HarnessError(
+      'rsi.no_signal',
+      `${path} 截掉末行之后仍然读不通 —— 坏的不止最后半行，请人工检查（未做任何修改）`,
+      e,
+    );
+  }
+  const backupPath = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  writeFileSync(backupPath, text, 'utf8');
+  atomicWrite(path, kept);
+  return {
+    truncated: true,
+    backupPath,
+    linesBefore,
+    linesAfter: kept.split('\n').filter((l) => l.trim() !== '').length,
+  };
+}
+
+export function appendJournal(config: WorkspacePaths, entry: JournalEntry): void {
   const path = journalPath(config);
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf8');

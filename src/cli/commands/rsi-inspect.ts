@@ -1,6 +1,7 @@
 import type { ModelClient } from '@migor/agentia';
 import { describeError } from '../../errors.js';
-import { readJournal, revertLast } from '../../rsi/accept.js';
+import { revertLast } from '../../rsi/accept.js';
+import { readJournal, repairJournal } from '../../rsi/journal.js';
 import { readLedger, revertNote } from '../../rsi/ledger.js';
 import { checkRegression } from '../../rsi/regress.js';
 import { boolFlag } from '../args.js';
@@ -15,6 +16,49 @@ import { tuningOf } from './run.js';
  * 「看历史」和「改资产」混在一个模块里时，读路径迟早会顺手写点什么。唯一的例外是
  * `regress --revert`，但那也是显式开关，且仍然走 `revertLast` 的指纹校验。
  */
+
+/**
+ * `rsi journal [--repair]` —— 看账本，或者修掉「末行半截」。
+ *
+ * 存在的理由是一次真实故障形态：append-only 文件被杀在写系统调用中间，只会留下
+ * 一行不完整的尾部，而这行会让 `accept` / `regress` / `ledger` / `cycle` **全部**
+ * 读不出历史。修复必须是显式动作（带备份），不能是「读的时候悄悄跳过」——
+ * 那会让回滚基于一份少了一条记录的历史做决定。
+ */
+export function journal(ctx: CliContext): number {
+  const asJson = boolFlag(ctx.flags, 'json');
+  if (boolFlag(ctx.flags, 'repair')) {
+    const r = repairJournal(ctx.config);
+    if (asJson) {
+      json(r);
+      return 0;
+    }
+    say(
+      r.truncated
+        ? `已截掉半行：${r.linesBefore} → ${r.linesAfter} 条；备份在 ${r.backupPath}`
+        : `没有需要修的半行（${r.linesBefore} 条，末行完整）`,
+    );
+    return 0;
+  }
+  const entries = readJournal(ctx.config);
+  if (asJson) {
+    json(entries);
+    return 0;
+  }
+  if (entries.length === 0) {
+    say('journal 还是空的 —— 还没采纳过任何改动');
+    return 0;
+  }
+  say(`共 ${entries.length} 条（最近 5 条）：`);
+  for (const e of entries.slice(-5)) {
+    const kind = e.kind ?? 'asset';
+    const mark = e.reverted === true ? 'revert' : e.status;
+    say(
+      `  ${new Date(e.at).toISOString()}  ${mark.padEnd(8)}  ${kind}:${e.target}  ${e.proposalId}`,
+    );
+  }
+  return 0;
+}
 
 /**
  * `rsi regress [--revert]` —— 采纳之后，当初通过的那些用例现在还通过吗。

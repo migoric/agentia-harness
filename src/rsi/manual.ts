@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { HarnessConfig } from '../config.js';
+import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { type Fail, objectAt, onlyKeys, readJsonObject, requiredText } from '../util/shape.js';
 import { atomicWrite } from './journal.js';
@@ -26,7 +26,10 @@ export function readProposal(path: string): Proposal {
   return validate(readJsonObject(path, fail), path);
 }
 
-export function writeProposal(config: HarnessConfig, proposal: Proposal): string {
+export function writeProposal(
+  config: Pick<WorkspacePaths, 'workspaceDir'>,
+  proposal: Proposal,
+): string {
   // id 已经过 validate，这里再防一次（直接调本函数或用别的来源构造时）
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(proposal.id)) {
     throw new HarnessError('config.invalid', `提案 id "${proposal.id}" 不能当文件名`);

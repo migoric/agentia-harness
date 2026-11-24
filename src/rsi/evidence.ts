@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { HarnessConfig } from '../config.js';
+import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
 import type { EvalReport, EvalSplit } from '../evals/types.js';
 import { readTraceLines, type TraceLine } from '../run/trace-read.js';
@@ -59,7 +59,7 @@ export interface EvidenceOptions {
 }
 
 export function buildEvidenceCorpus(
-  config: HarnessConfig,
+  config: Pick<WorkspacePaths, 'workspaceDir' | 'tracesPath'>,
   report: EvalReport,
   opts: EvidenceOptions = {},
 ): EvidenceCorpus {

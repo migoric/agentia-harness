@@ -37,18 +37,35 @@ export interface ProposeContext {
    * 上一轮刚被门否掉的改法原样再提一遍，白烧一遍评测钱。
    */
   readonly history?: readonly LessonEntry[] | undefined;
+  /**
+   * 取消信号。**必须**透传到 `app.run`：提案是 RSI 里唯一调模型的一步，
+   * 而它可能连提三个模式（三次调用）。此前 signal 只贯通到评测与验证，
+   * 提案这一步断了 —— 于是 Ctrl-C 或预算超限之后，最坏还要再烧三次调用
+   * （「说停还在花钱」），恰好打在成本归因最在意的位置。
+   */
+  readonly signal?: AbortSignal | undefined;
+}
+
+/** 提案这一步的产出与它自己的花费（两个都要，缺一个就得靠「先调再读属性」的时序约定） */
+export interface ProposeResult {
+  readonly proposals: readonly Proposal[];
+  /**
+   * 这一步花掉的钱。`usd === undefined` = 没有读数（`known=false`），
+   * 不是「免费」—— 调用方据此把整次运行的成本标成不可信。
+   */
+  readonly cost: { readonly usd: number | undefined; readonly known: boolean };
 }
 
 export interface Proposer {
-  propose(ctx: ProposeContext): Promise<Proposal[]>;
   /**
-   * 本轮提案器自己花了多少钱（可选：手写的 / 外部提案器没有模型开销）。
+   * 一次提案调用。
    *
-   * RSI 的 `--max-cost` 必须把它算进去：这一步也调模型，此前只记基线与候选两遍
-   * 评测，预算是系统性偏低的。没读数时给 `undefined` 并把 `costKnown` 置 false。
+   * 返回 `{ proposals, cost }` 而不是「返回数组 + 事后读 `costUsd` 属性」：
+   * 后者是**时序契约**（必须 propose 之后读、且实现必须每次开头重置），只写在
+   * 注释里；`rounds.ts` 已经因此被迫每轮重造实例来避免两轮成本并成一条。
+   * 成本与产出同一次返回，契约就只剩类型。
    */
-  readonly costUsd?: number | undefined;
-  readonly costKnown?: boolean | undefined;
+  propose(ctx: ProposeContext): Promise<ProposeResult>;
 }
 
 const PROPOSER_SYSTEM = `你是一个 agent 提示词工程师。你的唯一工作：读失败证据，改写**一个** Markdown 资产的正文，让失败消失，同时不破坏它已经做对的事。
@@ -81,15 +98,7 @@ export class LlmProposer implements Proposer {
     applyEndpointEnv(config);
   }
 
-  get costUsd(): number | undefined {
-    return this.known ? this.spentUsd : undefined;
-  }
-
-  get costKnown(): boolean {
-    return this.known;
-  }
-
-  async propose(ctx: ProposeContext): Promise<Proposal[]> {
+  async propose(ctx: ProposeContext): Promise<ProposeResult> {
     const limit = this.opts.maxModes ?? ctx.maxModes ?? 3;
     const modes = ctx.modes.slice(0, limit);
     const out: Proposal[] = [];
@@ -99,6 +108,9 @@ export class LlmProposer implements Proposer {
     const lessons = ctx.history ?? [];
     let seq = 0;
     for (const mode of modes) {
+      // 已经取消就别再开下一次模型调用：每个模式一次调用，而「说停还在花钱」
+      // 正是这条链最容易漏掉的一处（signal 只在 app.run 里生效，它不能被当成 break）
+      if (ctx.signal?.aborted === true) break;
       // 单个模式提不出方案（模型输出 NONE 或输出不像正文）**不该让整轮崩掉**：
       // 后面还有别的失败模式等着被修，而一次崩溃会把已经花掉的评测成本一起浪费。
       try {
@@ -121,7 +133,10 @@ export class LlmProposer implements Proposer {
         this.opts.onSkip?.(mode.id, e instanceof Error ? e.message : String(e));
       }
     }
-    return out;
+    return {
+      proposals: out,
+      cost: { usd: this.known ? this.spentUsd : undefined, known: this.known },
+    };
   }
 
   /**
@@ -194,6 +209,7 @@ export class LlmProposer implements Proposer {
     const prompt = renderPrompt(mode, current, lessons);
     const { result } = await app.run([{ role: 'user', content: prompt }], {
       ...(ctx.client !== undefined ? { client: ctx.client } : {}),
+      ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
     });
     const c = costOf(result.trace);
     if (c === undefined) this.known = false;

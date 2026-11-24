@@ -1,11 +1,20 @@
-import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { ModelClient } from '@migor/agentia';
+import { discoverAssets } from '../assets/discover.js';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { createRunner, type Runner, type RunOutcome } from '../run/runner.js';
 import { combineAbort } from '../util/abort.js';
+import {
+  authorized,
+  json,
+  logInternal,
+  readJson,
+  resolveKey,
+  statusOf,
+  TIMED_OUT,
+} from './http.js';
 
 /**
  * 最小 HTTP 面。
@@ -98,6 +107,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   const server = createServer((req, res) => {
     void handle(req, res, {
       runner,
+      config: opts.config,
       assets: opts.assets,
       ...(opts.client !== undefined ? { client: opts.client } : {}),
       startedAt,
@@ -148,6 +158,8 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
 interface HandlerCtx {
   readonly runner: Runner;
+  /** 健康检查要现读磁盘指纹（见 `/health` 的 `assetDrift`） */
+  readonly config: HarnessConfig;
   readonly assets: AssetSet;
   readonly client?: ModelClient | undefined;
   readonly startedAt: number;
@@ -169,10 +181,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
       return json(res, 503, { error: '服务正在关闭，不再接受新请求' });
     }
     if (req.method === 'GET' && HEALTH_PATHS.has(url)) {
+      // 服务的 runner 用的是**启动时**的资产快照。RSI 采纳之后磁盘变了而进程没变，
+      // 探针若只报快照指纹，运维看到的是一台「资产是新的」的旧进程。现读一次磁盘，
+      // 把漂移说出来（`null` = 读不动，例如资产文件坏了 —— 那也要能看见）。
+      const onDisk = fingerprintOnDisk(c.config);
       return json(res, 200, {
         ok: true,
         agent: `${c.runner.agent.name}@${c.runner.agent.version}`,
         assets: c.assets.fingerprint,
+        assetsOnDisk: onDisk,
+        assetDrift: onDisk === null ? null : onDisk !== c.assets.fingerprint,
         uptimeMs: Date.now() - c.startedAt,
         queued: c.queued(),
         maxQueue: c.maxQueue,
@@ -209,24 +227,31 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
           code: 'run.queue_full',
         });
       }
-      const gate = combineAbort(undefined, c.timeoutMs);
-      try {
-        // 超时必须由这里兑现（race），不能只靠把 signal 传下去 —— 见 util/abort.ts
-        const work = c.queue(async () =>
-          c.runner.run(task, {
+      // 超时**从真正开始执行的那一 tick 起算**，不含排队时间。此前 gate 在入队前
+      // 创建：队列深度 8 × 单任务最长 10 分钟时，一个请求完全可能「还没开始跑就超时」，
+      // 而调用方看到的 504 会被读成「模型太慢」。
+      //
+      // 超时仍必须由这里兑现（race），不能只靠把 signal 传下去 —— 见 util/abort.ts。
+      const work = c.queue(async (): Promise<RunOutcome | typeof TIMED_OUT> => {
+        const gate = combineAbort(undefined, c.timeoutMs);
+        try {
+          const run = c.runner.run(task, {
             signal: gate.signal,
             ...(c.client !== undefined ? { client: c.client } : {}),
-          }),
-        );
-        work.catch(() => undefined); // 超时后它仍可能 reject，别让它变成 unhandled
-        let out: RunOutcome;
-        try {
-          out = await Promise.race([work, gate.expired]);
+          });
+          run.catch(() => undefined); // 超时后它仍可能 reject，别让它变成 unhandled
+          return await Promise.race([run, gate.expired]);
         } catch (e) {
-          if (gate.timedOut()) {
-            return json(res, 504, { error: `请求超时（${c.timeoutMs}ms）` });
-          }
+          if (gate.timedOut()) return TIMED_OUT;
           throw e;
+        } finally {
+          gate.dispose();
+        }
+      });
+      {
+        const out = await work;
+        if (out === TIMED_OUT) {
+          return json(res, 504, { error: `请求超时（${c.timeoutMs}ms）`, code: 'run.timeout' });
         }
         return json(res, 200, {
           text: out.text,
@@ -240,107 +265,37 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
           subagents: out.subagents,
           traceId: out.trace.traceId,
         });
-      } finally {
-        gate.dispose();
       }
     }
     return json(res, 404, { error: `没有这个端点: ${req.method} ${url}` });
   } catch (e) {
     const status = statusOf(e);
+    const known = e instanceof HarnessError;
+    // 未分类异常不回显 message：它可能带绝对路径、上游响应片段甚至凭据片段，
+    // 而「内部为什么坏」应该进服务端日志，不是进调用方的 JSON。已知错误码的
+    // 文案是**为调用方写的**，照旧透出。
+    if (!known) logInternal(url, req.method ?? '?', e);
     return json(res, status, {
-      error: e instanceof Error ? e.message : String(e),
-      ...(e instanceof HarnessError ? { code: e.code } : {}),
+      error: known ? e.message : 'internal error（详细原因见服务端日志）',
+      ...(known ? { code: e.code } : {}),
     });
   }
 }
 
-function statusOf(e: unknown): number {
-  if (e instanceof HarnessError) {
-    if (e.code === 'run.payload_too_large') return 413;
-    if (e.code === 'asset.missing' || e.code === 'asset.invalid') return 500;
-    return 422;
-  }
-  return 500;
-}
-
 /**
- * 从环境变量名解析出 key。
+ * 现读磁盘上的资产指纹（`/health` 的 `assetDrift` 用）。
  *
- * 三条都是刻意的：
- * - 没配 `apiKeyEnv` ⇒ `undefined`（只服务回环），这是本地开发的常态；
- * - 配了但变量不存在/是空白 ⇒ **抛错**，因为「配了闸却没有闸」比不配更危险；
- * - 值只进闭包，不进日志、不进 `ServerOptions` 的可打印字段。
- */
-function resolveKey(envName: string | undefined): string | undefined {
-  if (envName === undefined) return undefined;
-  const key = process.env[envName]?.trim() ?? '';
-  if (key === '') {
-    throw new HarnessError(
-      'config.invalid',
-      `配置了 server.apiKeyEnv="${envName}" 但该环境变量是空的 —— ` +
-        '空 key 会被当成「不用鉴权」，所以这里直接拒绝启动',
-    );
-  }
-  return key;
-}
-
-/**
- * 请求有没有资格进来。
+ * 服务的 runner 用的是**启动时**的快照，而 RSI 采纳会在进程活着的时候改盘。探针
+ * 只报快照指纹时，运维看到的是「资产是新的」——实际跑的是旧的。
  *
- * 两种模式互斥：配了 key 就只认 Bearer；没配就只认回环来源。**不存在**「两个条件
- * 任一满足」。混合判定会在「配了 key 却忘了转发头」时静默放行本机代理，而代理后面
- * 往往就是整个内网。
+ * `null` = 读不动（目录被删、frontmatter 坏了）。这里吞掉异常而不是让 `/health`
+ * 跟着 500：进程还活着、还能接请求，只是资产和启动时不一样了 —— 那正是要靠
+ * 探针说出来、然后重启的事，而不是把探针本身打挂。
  */
-function authorized(req: IncomingMessage, key: string | undefined): boolean {
-  if (key === undefined) return isLoopback(req.socket.remoteAddress);
-  const header = req.headers.authorization;
-  if (typeof header !== 'string') return false;
-  const match = /^Bearer[ \t]+(.+)$/i.exec(header.trim());
-  return match !== null && sameKey(match[1]?.trim() ?? '', key);
-}
-
-function isLoopback(address: string | undefined): boolean {
-  if (address === undefined) return false;
-  // IPv4-mapped IPv6（::ffff:127.0.0.1）是 Node 在双栈监听时的常见形态
-  const a = address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
-  return a === '::1' || /^127\./.test(a);
-}
-
-/** 定长比较：逐字节 `===` 会按「第一个不同字节」提前返回，把 key 的长度与前缀泄给计时 */
-function sameKey(given: string, expected: string): boolean {
-  const a = Buffer.from(given, 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  return a.length === b.length && timingSafeEqual(a, b);
-}
-
-async function readJson(req: IncomingMessage, limit: number): Promise<Record<string, unknown>> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const c of req) {
-    const buf = Buffer.from(c);
-    size += buf.length;
-    if (size > limit) {
-      // 413 而不是 422：这是「请求太大」，不是「请求内容不合法」——
-      // 客户端据此决定是截断重发还是改格式
-      throw new HarnessError('run.payload_too_large', `请求体超过 ${limit} 字节上限`);
-    }
-    chunks.push(buf);
-  }
-  const text = Buffer.concat(chunks).toString('utf8');
-  if (text.trim() === '') return {};
+function fingerprintOnDisk(config: HarnessConfig): string | null {
   try {
-    const parsed: unknown = JSON.parse(text);
-    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    return discoverAssets({ skills: config.skillsDir, agents: config.agentsDir }).fingerprint;
   } catch {
-    throw new HarnessError('run.failed', '请求体不是合法 JSON');
+    return null;
   }
-}
-
-function json(res: ServerResponse, status: number, body: unknown): void {
-  const text = JSON.stringify(body);
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(text),
-  });
-  res.end(text);
 }

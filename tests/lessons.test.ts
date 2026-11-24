@@ -293,7 +293,7 @@ describe('提案器真的看到了历史', () => {
     ]);
 
     const proposer = new LlmProposer(config);
-    const made = await proposer.propose({
+    const { proposals: made } = await proposer.propose({
       modes: [mode],
       assets,
       config,

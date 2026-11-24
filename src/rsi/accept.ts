@@ -4,7 +4,7 @@ import { discoverAssets } from '../assets/discover.js';
 import { buildLock, writeLock } from '../assets/lockfile.js';
 import type { AssetSet } from '../assets/types.js';
 import { findAsset } from '../assets/types.js';
-import type { HarnessConfig } from '../config.js';
+import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { loadEvalCases } from '../evals/load.js';
 import {
@@ -35,11 +35,24 @@ export { journalPath, readJournal };
  *   journal 才安全：如果记 journal 时崩了，文件已改但 journal 缺一条，`revert` 会
  *   说「没有可回滚的记录」而不是回滚到错误状态。这个方向选错，回滚会变成破坏。
  */
+/** 采纳的产物：审计记录 + **采纳之后的资产集**（调用方不必再自己 `discover` 一遍） */
+export interface AcceptResult {
+  readonly entry: JournalEntry;
+  /**
+   * 写盘后重新发现的资产集（不是内存推算）。
+   *
+   * 返回值带上它的理由：采纳是本仓唯一改资产的动作，改完之后的「资产是什么」
+   * 只有这一刻知道。此前调用方（如 `rounds`）只能重新扫一遍磁盘来避免下一轮用
+   * 旧快照 —— 那是对的，但它是**调用方替实现的缺口兜底**，而不是设计。
+   */
+  readonly assets: AssetSet;
+}
+
 export function acceptProposal(
-  config: HarnessConfig,
+  config: WorkspacePaths,
   assets: AssetSet,
   outcome: VerifyOutcome,
-): JournalEntry {
+): AcceptResult {
   if (!outcome.gate.ok) {
     throw new HarnessError('rsi.gate_blocked', `回归门未通过，拒绝采纳：${outcome.gate.reason}`);
   }
@@ -63,29 +76,29 @@ export function acceptProposal(
     );
   }
   const { proposal } = outcome;
-  const entry = writePatch(config, assets, proposal, outcome.gate.reason);
+  const { entry, assets: after } = writePatch(config, assets, proposal, outcome.gate.reason);
   appendJournal(config, entry);
-  return entry;
+  return { entry, assets: after };
 }
 
 /** 直接落一个提案（人工审批通过后调用，不经 gate 判定） */
 export function acceptManually(
-  config: HarnessConfig,
+  config: WorkspacePaths,
   assets: AssetSet,
   proposal: Proposal,
   reason: string,
-): JournalEntry {
-  const entry = writePatch(config, assets, proposal, reason);
+): AcceptResult {
+  const { entry, assets: after } = writePatch(config, assets, proposal, reason);
   appendJournal(config, entry);
-  return entry;
+  return { entry, assets: after };
 }
 
 function writePatch(
-  config: HarnessConfig,
+  config: WorkspacePaths,
   assets: AssetSet,
   proposal: Proposal,
   reason: string,
-): JournalEntry {
+): { entry: JournalEntry; assets: AssetSet } {
   const asset = findAsset(assets, proposal.patch.target);
   if (asset === undefined) {
     throw new HarnessError('asset.missing', `提案指向不存在的资产 "${proposal.patch.target}"`);
@@ -108,16 +121,19 @@ function writePatch(
   writeLock(join(config.root, 'harness.lock.json'), buildLock(after));
 
   return {
-    at: Date.now(),
-    proposalId: proposal.id,
-    status: 'accepted',
-    target: proposal.patch.target,
-    before: proposal.patch.before,
-    after: proposal.patch.after,
-    reason,
-    ...(proposal.manifest !== undefined ? { manifest: proposal.manifest } : {}),
-    assetsBefore: assets.fingerprint,
-    assetsAfter: after.fingerprint,
+    entry: {
+      at: Date.now(),
+      proposalId: proposal.id,
+      status: 'accepted',
+      target: proposal.patch.target,
+      before: proposal.patch.before,
+      after: proposal.patch.after,
+      reason,
+      ...(proposal.manifest !== undefined ? { manifest: proposal.manifest } : {}),
+      assetsBefore: assets.fingerprint,
+      assetsAfter: after.fingerprint,
+    },
+    assets: after,
   };
 }
 
@@ -136,7 +152,7 @@ export interface RevertResult {
  * 2. 当前资产指纹必须等于当初采纳后的指纹。不等说明之后又有手改，此时回滚会
  *    把中间那些改动一起抹掉 —— 拒绝，并让人自己决定。
  */
-export function revertLast(config: HarnessConfig, id?: string): RevertResult {
+export function revertLast(config: WorkspacePaths, id?: string): RevertResult {
   // 只认**仍生效**的文本采纳：代码补丁有自己的回滚入口（`revertLastCode`），
   // 混在一起会让一条资产回滚顺手把代码也退了；已回滚的采纳由 liveAccepted 排除 ——
   // 否则二次回滚会撞上指纹校验，把「已经回过了」报成「有人手改过资产」

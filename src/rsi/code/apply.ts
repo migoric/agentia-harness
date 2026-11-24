@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { HarnessConfig } from '../../config.js';
+import type { WorkspacePaths } from '../../config.js';
 import { HarnessError } from '../../errors.js';
 import { fingerprint } from '../../util/hash.js';
 import { appendJournal, liveAccepted, readJournal } from '../journal.js';
@@ -24,7 +24,7 @@ import type { CodeFileState, CodePatch, CodeVerify } from './types.js';
  *    index 做不到这一点（文件可能已 stage）。
  */
 export interface ApplyOptions {
-  readonly config: HarnessConfig;
+  readonly config: WorkspacePaths;
   readonly patch: CodePatch;
   readonly verify: CodeVerify;
   readonly sandbox: string;
@@ -96,7 +96,7 @@ export interface CodeRevertResult {
  * 只认 `kind === 'code'` 的采纳记录 —— 文本资产的回滚走 `revertLast`，两者互不越界：
  * 一条资产补丁的回滚若顺手把代码也退了，`--dry-run` 那条「零副作用」的承诺就破了。
  */
-export function revertLastCode(config: HarnessConfig): CodeRevertResult {
+export function revertLastCode(config: WorkspacePaths): CodeRevertResult {
   // 只认**仍生效**的 code 采纳：已回滚的由 liveAccepted 排除，否则二次回滚会撞
   // 指纹校验，把「已经回过了」报成「落盘后有人手改」
   const last = liveAccepted(readJournal(config), 'code').at(-1);

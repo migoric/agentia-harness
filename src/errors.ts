@@ -18,6 +18,8 @@ export type HarnessErrorCode =
   | 'run.failed'
   /** 请求体超上限（HTTP 面映射到 413） */
   | 'run.payload_too_large'
+  /** 请求本身不合法（不是 JSON / 缺字段）—— HTTP 面映射到 400，与「执行失败」分开 */
+  | 'run.bad_request'
   /** 补丁本身不合法（空、二进制、路径逃逸、删文件） */
   | 'code.invalid'
   /** 沙箱验证没通过（测试挂了 / 超时 / 补丁应用不上） */

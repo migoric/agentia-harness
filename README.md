@@ -333,6 +333,8 @@ harness rsi             跑一轮闭环
 harness rsi revert [id] 回滚最近一次采纳；给 id 可防期间插入了新采纳
 harness rsi status      采纳历史
 harness rsi ledger      决策账本：预测 vs 实际结果（--json 输出）
+harness rsi journal     采纳日志（--json 输出）；中途崩过留下的半截末行会指出
+  --repair              截掉半截末行（先备份；截完必须能读通，中间行坏了不修）
 harness rsi regress     采纳之后那些用例还通过吗（有回归退出码 1）
   --revert              检测到回归就自动回滚（仍过指纹校验）
 harness rsi propose --from <json>  登记手写 L1 提案（不调模型）
@@ -383,8 +385,14 @@ curl -s localhost:8787/v1/run -H 'content-type: application/json' \
 ```
 
 路径带 `/v1` 前缀；`/run` 是历史别名，行为完全一样。`GET /health` 不需要 key
-（探针要能打），返回 `{ ok, agent, assets, uptimeMs, queued, maxQueue, auth }`，
-其中 `auth` 告诉你这台机器当前是 `key` 还是 `loopback`。
+（探针要能打），返回 `{ ok, agent, assets, assetsOnDisk, assetDrift, uptimeMs, queued,
+maxQueue, auth }`。`auth` 告诉你这台机器当前是 `key` 还是 `loopback`；`assetDrift`
+告诉你**磁盘上的资产是否已经和进程里那份快照不一样了** —— RSI 采纳之后就是这种情况，
+此时进程跑的仍是旧资产，该重启。`assetDrift: null` 表示磁盘读不动（文件坏了/被删），
+这也得能看见：进程还活着，只是它手里的资产来源没了。
+
+`/v1/run` 的超时**从真正开始执行算起**，不含排队时间。否则队列里有 8 个请求时，
+排在最后那个可能「还没跑就超时」，而它拿到的 504 会被读成「模型太慢」。
 
 ## 设计不变量
 

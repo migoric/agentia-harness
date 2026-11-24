@@ -211,6 +211,13 @@ export interface CycleBudget {
 }
 
 export interface CycleReport {
+  /**
+   * 记录格式版本（写入侧打标，读取侧据此迁移）。
+   *
+   * 可选**只为兼容旧记录**：版本化（2026-11-24）之前写下的 JSON 没有这个字段，
+   * `cycles.ts` 按 0 处理。新增/改名字段时必须同时想「老记录怎么办」。
+   */
+  readonly schema?: number | undefined;
   /** 本轮 id（时间戳 + 序号），也是落盘文件名 |
    *  有它才能把「CLI 打印的这一轮」与「.workspace 里那份记录」对上 */
   readonly cycleId: string;

@@ -15,7 +15,7 @@ import { usd } from '../../util/usd.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
-import { ledger, regress, status } from './rsi-inspect.js';
+import { journal, ledger, regress, status } from './rsi-inspect.js';
 import { tuningOf } from './run.js';
 
 /** `harness rsi [revert|status|propose|accept]` —— 闭环的入口 */
@@ -28,12 +28,13 @@ export async function rsiCommand(
   if (sub === 'status') return status(ctx);
   if (sub === 'ledger') return ledger(ctx);
   if (sub === 'regress') return regress(ctx);
+  if (sub === 'journal') return journal(ctx);
   if (sub === 'propose') return proposeFrom(ctx);
   if (sub === 'accept') return acceptFrom(ctx);
   if (sub !== undefined) {
     throw new HarnessError(
       'config.invalid',
-      `rsi 没有子命令 "${sub}"（可用: revert, status, ledger, regress, propose, accept）`,
+      `rsi 没有子命令 "${sub}"（可用: revert, status, ledger, regress, journal, propose, accept）`,
     );
   }
   return cycle(ctx);
@@ -123,7 +124,7 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
   if (dryRun) {
     say(`dry-run：${proposal.id} 过了门，未落盘（${outcome.gate.reason}）`);
   } else {
-    const entry = acceptProposal(ctx.config, assets, outcome);
+    const { entry } = acceptProposal(ctx.config, assets, outcome);
     say(`已采纳 ${entry.proposalId} → ${entry.target}（${entry.reason}）`);
   }
   // 手工采纳也要落一份轮次记录：`rsi regress` 的基准取自 cycle JSON 的 candidate，

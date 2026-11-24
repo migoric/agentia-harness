@@ -1,14 +1,14 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
+import { type CycleRecord, readCycles } from './cycles.js';
 import { liveAccepted, readJournal } from './journal.js';
 import { cyclesDir } from './paths.js';
-import type { CycleReport, JournalEntry } from './types.js';
+import type { JournalEntry } from './types.js';
 
 /**
  * 采纳之后的回归监测。
@@ -136,7 +136,7 @@ export function lastAccepted(config: HarnessConfig): JournalEntry {
 function findCandidate(
   config: HarnessConfig,
   proposalId: string,
-): { cycle: CycleReport; candidate: EvalReport } {
+): { cycle: CycleRecord; candidate: EvalReport } {
   const dir = cyclesDir(config);
   if (!existsSync(dir)) {
     throw new HarnessError(
@@ -144,26 +144,15 @@ function findCandidate(
       `找不到 ${proposalId} 的验证记录（${dir} 不存在）—— 没有基准就无法判断回归`,
     );
   }
-  const hits: { cycle: CycleReport; candidate: EvalReport }[] = [];
-  for (const file of readdirSync(dir)
-    .filter((f) => f.endsWith('.json'))
-    .sort()) {
-    const path = join(dir, file);
-    let report: CycleReport;
-    try {
-      report = JSON.parse(readFileSync(path, 'utf8')) as CycleReport;
-    } catch (e) {
-      throw new HarnessError('rsi.no_signal', `坏掉的轮次记录 ${path} —— 拒绝跳过它`, e);
-    }
-    // 形状不对时给 HarnessError 而不是让 `report.verified.find` 抛原生 TypeError
-    if (!Array.isArray(report.verified)) {
-      throw new HarnessError('rsi.no_signal', `${path} 的 verified 不是数组 —— 账本拒绝读坏记录`);
-    }
-    const hit = report.verified.find((v) => v.proposal.id === proposalId);
+  // 解析与形状校验都归 cycles.ts：同一份目录此前有两份读实现，且两份对坏记录的
+  // 表现不一样（这里 HarnessError、账本里原生 TypeError）
+  const hits: { cycle: CycleRecord; candidate: EvalReport }[] = [];
+  for (const cycle of readCycles(config)) {
+    const hit = cycle.verified.find((v) => v.proposal.id === proposalId);
     if (hit === undefined) continue;
     // train 与 holdout 的候选结果分开存（验证是两个口径），基准要合起来才是完整集合
     const cases = [...hit.candidate.cases, ...(hit.holdout?.candidate.cases ?? [])];
-    hits.push({ cycle: report, candidate: { ...hit.candidate, cases } });
+    hits.push({ cycle, candidate: { ...hit.candidate, cases } });
   }
   if (hits.length === 0) {
     throw new HarnessError(

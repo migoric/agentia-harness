@@ -66,6 +66,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   rsi status              看采纳历史
   rsi ledger              决策账本：当初的预测 vs 实际验证结果（--json 机器可读）
   rsi regress             采纳之后那些用例还通过吗；有回归退出码 1
+  rsi journal [--repair]  看账本；--repair 截掉「追加写到一半」的末行（会先备份）
     --revert              检测到回归就自动回滚（仍过指纹校验）
   rsi propose --from <json>  登记手写 L1 提案（不调模型）
   rsi accept --from <json>   手写提案也要过完整验证门才能采纳
@@ -107,6 +108,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'timeout',
     'concurrency',
     'retries',
+    'repair',
   ],
   patch: ['yes', 'verify', 'timeout', 'revert'],
   serve: ['port', 'host', 'timeout'],

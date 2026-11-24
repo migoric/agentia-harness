@@ -1,5 +1,4 @@
 import type { ModelClient } from '@migor/agentia';
-import { discoverAssets } from '../assets/discover.js';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
@@ -35,7 +34,13 @@ export interface RunRoundsOptions {
   readonly signal?: AbortSignal | undefined;
   /** 最多跑几轮（≥ 1） */
   readonly rounds: number;
-  /** 每轮一个新的提案器 —— 提案器带累计花费状态，复用会把两轮的账并成一条 */
+  /**
+   * 每轮一个提案器。
+   *
+   * 现在**复用同一个实例也是安全的**（`propose()` 把成本随产出一起返回，不再靠
+   * 「先调再读属性」的累计字段）。保留成工厂是为了让「每轮可以换模型/换策略」
+   * 这件事在签名上说得出口。
+   */
   readonly makeProposer: (round: number) => Proposer;
   readonly maxVerify?: number | undefined;
   readonly maxCostUsd?: number | undefined;
@@ -81,18 +86,19 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
   let priorSpent = 0;
   let stopReason: RoundStopReason = 'rounds';
 
+  // 资产快照跟着「上一轮的采纳结果」走：复用旧快照会让第 2 轮的基线仍用改前的
+  // system（刚修好的失败又出现），且提案的 `patch.before` 是旧正文 —— accept 的
+  // 乐观锁必然抛 asset.invalid。采纳之后的新快照由 `runCycle` 回调交回，
+  // 不再需要每轮重新扫磁盘（扫描本身没问题，但那是让调用方替实现兜底）。
+  let current = opts.assets;
   for (let i = 0; i < opts.rounds; i++) {
-    // 每轮**重新发现资产**：采纳只写磁盘，不更新内存里的 `AssetSet`。复用同一份
-    // 快照会让第 2 轮的基线仍用改前的 system（刚修好的失败又出现），并且提案的
-    // `patch.before` 是旧正文 —— accept 的乐观锁必然抛 asset.invalid。
-    const assets =
-      i === 0
-        ? opts.assets
-        : discoverAssets({ skills: opts.config.skillsDir, agents: opts.config.agentsDir });
     const report = await runCycle({
       config: opts.config,
-      assets,
+      assets: current,
       proposer: opts.makeProposer(i),
+      onAcceptedAssets: (next) => {
+        current = next;
+      },
       ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
       ...(opts.client !== undefined ? { client: opts.client } : {}),
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),

@@ -261,7 +261,7 @@ describe('闭环：验证 → 采纳 → 回滚', () => {
     assert.equal(outcome.gate.ok, true, `门应放行，实际：${outcome.gate.reason}`);
     assert.deepEqual(outcome.gate.fixedCases, ['e1']);
 
-    const entry = acceptProposal(config, assets, outcome);
+    const { entry } = acceptProposal(config, assets, outcome);
     assert.equal(entry.status, 'accepted');
 
     // 文件真的改了，frontmatter 还在
@@ -457,7 +457,7 @@ describe('runCycle —— 五步编排', () => {
       assets,
       client: scriptedClient([endTurn('结论：合格')]),
       maxCostUsd: 0,
-      proposer: { propose: async () => [] },
+      proposer: { propose: async () => ({ proposals: [], cost: { usd: undefined, known: true } }) },
     });
 
     assert.equal(report.costKnown, false);
@@ -489,7 +489,7 @@ describe('runCycle —— 五步编排', () => {
         propose: async (ctx) => {
           call++;
           assert.ok(ctx.modes.length > 0);
-          return [
+          const proposals: Proposal[] = [
             {
               id: 'p-dry',
               modeId: ctx.modes[0]?.id ?? 'm',
@@ -499,6 +499,7 @@ describe('runCycle —— 五步编排', () => {
               patch: { target: 'agent:main', before: agent.body, after: '必须以「结论：」开头。' },
             },
           ];
+          return { proposals, cost: { usd: undefined, known: true } };
         },
       },
     });
@@ -578,7 +579,7 @@ describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () 
     const config = loadConfig(root);
     const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
     const proposer = new LlmProposer(config);
-    const proposals = await proposer.propose({
+    const { proposals } = await proposer.propose({
       modes: [modeWith('skill:review')],
       assets,
       config,
@@ -598,7 +599,7 @@ describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () 
     const noisy: FailureMode = { ...modeWith('agent:main'), id: 'm-noisy' };
     const good: FailureMode = { ...modeWith('skill:review'), id: 'm-good' };
 
-    const proposals = await proposer.propose({
+    const { proposals } = await proposer.propose({
       modes: [noisy, good],
       assets,
       config,
@@ -618,7 +619,7 @@ describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () 
     const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
     const skips: string[] = [];
     const proposer = new LlmProposer(config, { onSkip: (id) => skips.push(id) });
-    const proposals = await proposer.propose({
+    const { proposals } = await proposer.propose({
       modes: [modeWith('skill:review')],
       assets,
       config,
@@ -626,6 +627,57 @@ describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () 
     });
     assert.deepEqual(proposals, []);
     assert.deepEqual(skips, [], 'NONE 是合法结论，不是错误');
+  });
+
+  it('已经取消 ⇒ 一次模型调用都不发', async () => {
+    const root = skillProject();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const abort = new AbortController();
+    abort.abort();
+    let calls = 0;
+
+    const { proposals } = await new LlmProposer(config).propose({
+      modes: [modeWith('skill:review')],
+      assets,
+      config,
+      signal: abort.signal,
+      client: scriptedClient([
+        () => {
+          calls++;
+          return endTurn('你审稿。输出必须以「结论：」开头。');
+        },
+      ]),
+    });
+
+    assert.equal(calls, 0, '取消之后不该再开模型调用（每个模式一次，等于继续烧钱）');
+    assert.deepEqual(proposals, []);
+  });
+
+  it('第一个模式跑到一半被取消 ⇒ 第二个模式不再发请求', async () => {
+    const root = skillProject();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const abort = new AbortController();
+    const first: FailureMode = { ...modeWith('skill:review'), id: 'm-1' };
+    const second: FailureMode = { ...modeWith('agent:main'), id: 'm-2' };
+    let calls = 0;
+
+    await new LlmProposer(config).propose({
+      modes: [first, second],
+      assets,
+      config,
+      signal: abort.signal,
+      client: scriptedClient([
+        () => {
+          calls++;
+          abort.abort(); // 模拟用户在第一次调用期间按了 Ctrl-C
+          return endTurn('你审稿。输出必须以「结论：」开头。');
+        },
+      ]),
+    });
+
+    assert.equal(calls, 1, `取消后不该继续提第二个模式，实际调用 ${calls} 次`);
   });
 });
 
@@ -672,7 +724,7 @@ describe('提案器的模型与成本口径', () => {
     const { config, assets } = projectWithModel();
     const seen: string[] = [];
     const proposer = new LlmProposer(config);
-    const proposals = await proposer.propose({
+    const { proposals, cost } = await proposer.propose({
       modes: [MODE],
       assets,
       config,
@@ -686,22 +738,22 @@ describe('提案器的模型与成本口径', () => {
 
     assert.equal(proposals.length, 1);
     assert.deepEqual(seen, ['deepseek-flash'], '提案器此前偷偷用 claude-opus-5');
-    assert.ok((proposer.costUsd ?? 0) > 0, '提案本身的花费要能读到');
-    assert.equal(proposer.costKnown, true);
+    assert.ok((cost.usd ?? 0) > 0, '提案本身的花费要跟产出一起返回');
+    assert.equal(cost.known, true);
   });
 
   it('模型没定价 ⇒ 提案花费标成「未知」而不是 0', async () => {
     const { config, assets } = projectWithModel();
     const unpriced = { ...config, pricing: {}, model: 'mystery-model' } as typeof config;
     const proposer = new LlmProposer(unpriced);
-    await proposer.propose({
+    const { cost } = await proposer.propose({
       modes: [MODE],
       assets,
       config: unpriced,
       client: scriptedClient([endTurn('你审稿。输出必须以「结论：」开头。')]),
     });
-    assert.equal(proposer.costUsd, undefined);
-    assert.equal(proposer.costKnown, false);
+    assert.equal(cost.usd, undefined, '没读数就该是 undefined，不是 0');
+    assert.equal(cost.known, false);
   });
 
   it('RSI 预算把提案花费算进去（此前只记基线与候选）', async () => {
@@ -722,18 +774,19 @@ describe('提案器的模型与成本口径', () => {
       client: scriptedClient([endTurn('不合格')]),
       maxCostUsd: 0.1,
       proposer: {
-        costUsd: 0.5,
-        costKnown: true,
-        propose: async (ctx) => [
-          {
-            id: 'p-cost',
-            modeId: ctx.modes[0]?.id ?? 'm',
-            kind: 'wrong_answer',
-            rationale: 't',
-            layer: 'L1',
-            patch: { target: 'agent:main', before: agent.body, after: '必须以「结论：」开头。' },
-          },
-        ],
+        propose: async (ctx) => ({
+          proposals: [
+            {
+              id: 'p-cost',
+              modeId: ctx.modes[0]?.id ?? 'm',
+              kind: 'wrong_answer',
+              rationale: 't',
+              layer: 'L1',
+              patch: { target: 'agent:main', before: agent.body, after: '必须以「结论：」开头。' },
+            },
+          ],
+          cost: { usd: 0.5, known: true },
+        }),
       },
     });
 
@@ -752,7 +805,7 @@ describe('轮次记录落盘', () => {
       config,
       assets,
       client: scriptedClient([endTurn('结论：合格')]),
-      proposer: { propose: async () => [] },
+      proposer: { propose: async () => ({ proposals: [], cost: { usd: undefined, known: true } }) },
     });
 
     const parsed = JSON.parse(readFileSync(report.path, 'utf8')) as { cycleId: string };

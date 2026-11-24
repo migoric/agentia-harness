@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { scriptedClient } from '@migor/agentia';
+import { type ModelClient, scriptedClient } from '@migor/agentia';
 import { discoverAssets } from '../src/assets/discover.ts';
 import { loadConfig } from '../src/config.ts';
 import { type ServerOptions, startServer } from '../src/server/serve.ts';
@@ -119,6 +119,58 @@ describe('HTTP 面', () => {
     });
   });
 
+  it('坏 JSON ⇒ 400 + run.bad_request（客户端错误，不是执行失败）', async () => {
+    await withServer({}, async (base) => {
+      const r = await fetch(`${base}/v1/run`, { method: 'POST', body: '{"task":' });
+      assert.equal(r.status, 400);
+      const body = (await r.json()) as { code?: string };
+      assert.equal(body.code, 'run.bad_request');
+    });
+  });
+
+  it('JSON 合法但不是对象 ⇒ 400（不再静默收成 {}）', async () => {
+    // 此前 `JSON.parse` 成功就往下走，字符串/数组/null 一律被收成 `{}`，调用方只
+    // 看到「body 需要非空的 task」—— 而真正的原因是他发的根本不是对象。
+    await withServer({}, async (base) => {
+      for (const body of ['"a string"', '[1,2]', 'null', '42']) {
+        const r = await fetch(`${base}/v1/run`, { method: 'POST', body });
+        assert.equal(r.status, 400, `${body} 应 400（收到 ${r.status}）`);
+        const parsed = (await r.json()) as { code?: string };
+        assert.equal(parsed.code, 'run.bad_request', `${body} 应报 run.bad_request`);
+      }
+    });
+  });
+
+  it('超时从真正开始执行起算（排队时间不算）', async () => {
+    // 串行闸 + 超时 150ms：A 跑 300ms（自己超时，504），B 排在它后面。
+    // B 真正开始执行是在 A 让出串行链之后，自己只需 5ms —— 旧实现（gate 在入队前
+    // 创建）会让 B 在 150ms 时就以 504 收场，而它根本没开始跑。
+    //
+    // 这里不能用 `scriptedClient`：它的游标只在 `finalMessage` 成功返回后前进，
+    // A 的调用还挂着时 B 会重放第一步（本测试就变成「B 也睡 300ms」）。手写一个
+    // 按调用序号决定耗时的客户端，两次调用的行为才是独立的。
+    let n = 0;
+    const client: ModelClient = {
+      messages: {
+        stream: () => ({
+          on: () => undefined,
+          finalMessage: async () => {
+            n++;
+            await new Promise((r) => setTimeout(r, n === 1 ? 300 : 5));
+            return endTurn('完成');
+          },
+        }),
+      },
+    } as unknown as ModelClient;
+    await withServer({ client, timeoutMs: 150, maxQueue: 4 }, async (base) => {
+      const post = (task: string) =>
+        fetch(`${base}/v1/run`, { method: 'POST', body: JSON.stringify({ task }) });
+      const [a, b] = await Promise.all([post('慢'), post('快')]);
+      assert.equal(a.status, 504, 'A 自己跑超了，应 504');
+      assert.equal(b.status, 200, `排队中的请求不该被判超时（收到 ${b.status}）`);
+    });
+  });
+
   it('请求体超上限 ⇒ 413（不是 422：这是「太大」，不是「不合法」）', async () => {
     await withServer({ maxBodyBytes: 32 }, async (base) => {
       const r = await fetch(`${base}/v1/run`, {
@@ -163,6 +215,59 @@ describe('HTTP 面', () => {
       },
       'not-a-priced-model',
     );
+  });
+
+  it('客户端层异常 ⇒ 200 + ok:false（HTTP 200 只表示「请求被处理了」）', async () => {
+    // 这一条钉的是**协议语义**：模型/客户端层的失败在 agentia 里被收成
+    // `stopReason: 'error'`，不是 HTTP 错误 —— 调用方要看 `ok`，不能只看状态码。
+    // （500 分支只留给未分类异常，且不回显内部 message，见 `logInternal`。）
+    const client = {
+      messages: {
+        stream: () => ({
+          on: () => undefined,
+          finalMessage: async () => {
+            throw new Error('内部路径 /Users/secret/key.txt 读不到');
+          },
+        }),
+      },
+    } as unknown as ModelClient;
+    await withServer({ client }, async (base) => {
+      const r = await fetch(`${base}/v1/run`, {
+        method: 'POST',
+        body: JSON.stringify({ task: '做事' }),
+      });
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as { ok?: boolean; stopReason?: string; error?: unknown };
+      assert.equal(body.ok, false);
+      assert.equal(body.stopReason, 'error');
+      assert.doesNotMatch(JSON.stringify(body), /secret|\/Users/, '响应里不该出现内部路径');
+    });
+  });
+
+  it('/health 报出资产漂移（RSI 采纳后进程仍在用旧快照）', async () => {
+    const root = project();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const server = await startServer({ config, assets, port: 0 });
+    try {
+      const base = `http://127.0.0.1:${server.port}`;
+      const before = (await (await fetch(`${base}/health`)).json()) as Record<string, unknown>;
+      assert.equal(before.assetDrift, false);
+
+      // 磁盘上新增一个资产（等价于 RSI 采纳后进程没重启）
+      writeFileSync(
+        join(root, 'agents', 'extra.md'),
+        '---\nname: extra\nversion: 1\ndescription: 新加的\n---\n你是补充。\n',
+        'utf8',
+      );
+
+      const after = (await (await fetch(`${base}/health`)).json()) as Record<string, unknown>;
+      assert.equal(after.assets, before.assets, '服务仍用启动时的快照');
+      assert.notEqual(after.assetsOnDisk, before.assets);
+      assert.equal(after.assetDrift, true, '漂移必须能看见，否则运维以为进程已是新资产');
+    } finally {
+      await server.close();
+    }
   });
 
   it('串行闸：两个并发请求不会同时进模型（成本归因的前提）', async () => {

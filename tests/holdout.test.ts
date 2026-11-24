@@ -81,7 +81,7 @@ function cycle(root: string, regress: boolean) {
       proposer: {
         propose: async (ctx) => {
           seenCases = ctx.modes.flatMap((m) => m.cases);
-          return [
+          const proposals: Proposal[] = [
             {
               id: 'p-holdout',
               modeId: ctx.modes[0]?.id ?? 'm',
@@ -101,6 +101,7 @@ function cycle(root: string, regress: boolean) {
               },
             } satisfies Proposal,
           ];
+          return { proposals, cost: { usd: undefined, known: true } };
         },
       },
     }),
