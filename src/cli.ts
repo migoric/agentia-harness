@@ -5,7 +5,7 @@ import { assertKnownFlags, parseArgs, strFlag } from './cli/args.js';
 import { lockCommand } from './cli/commands/assets.js';
 import { evidenceCommand } from './cli/commands/evidence.js';
 import { harvestCommand } from './cli/commands/harvest.js';
-import { reportCommand, traceCommand } from './cli/commands/observe.js';
+import { diffCommand, reportCommand, traceCommand } from './cli/commands/observe.js';
 import { patchCommand } from './cli/commands/patch.js';
 import { rsiCommand } from './cli/commands/rsi.js';
 import { evalCommand, runCommand } from './cli/commands/run.js';
@@ -47,6 +47,9 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   trace <traceId>         打印那次运行的 span 树（可用前缀）
     --tail <n>            只看 traces.jsonl 最后 n 行（大文件用）
     --json                输出原始 trace
+  diff <traceA> <traceB>  两份 trace 差在哪（结构配对：谁多了一步、哪个字段变了）
+    --tail <n>            只看 traces.jsonl 最后 n 行
+    --json                输出结构化差异（TraceDiff）
   harvest <traceId>       把一条 trace 回流成 eval/<name>.md 回归用例
     --task <文本>         任务原文（trace 里没存，必须外来）
     --from-report <文件>  或从 eval --save 的报告按 traceId 反查任务原文
@@ -94,6 +97,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   eval: ['save', 'only', 'keep-traces', 'timeout', 'concurrency', 'retries'],
   report: ['max-token-growth', 'max-cost-growth', 'allow-case-set-change'],
   trace: ['tail'],
+  diff: ['tail'],
   harvest: ['task', 'from-report'],
   evidence: ['from-report', 'id'],
   lock: ['check'],
@@ -157,6 +161,8 @@ async function main(): Promise<number> {
       return reportCommand(ctx, args._[0], args._[1]);
     case 'trace':
       return traceCommand(ctx, args._[0]);
+    case 'diff':
+      return diffCommand(ctx, args._[0], args._[1]);
     case 'harvest':
       return harvestCommand(ctx, args._[0]);
     case 'evidence':

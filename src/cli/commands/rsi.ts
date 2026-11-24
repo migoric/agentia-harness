@@ -10,7 +10,7 @@ import { writeCycle } from '../../rsi/loop.js';
 import { readProposal, writeProposal } from '../../rsi/manual.js';
 import { LlmProposer } from '../../rsi/propose.js';
 import { type RoundStopReason, runRounds } from '../../rsi/rounds.js';
-import type { CycleReport, HoldoutResult } from '../../rsi/types.js';
+import type { CycleReport, HoldoutResult, VerifyOutcome } from '../../rsi/types.js';
 import { isWorthAccepting, verifyProposal } from '../../rsi/verify.js';
 import { usd } from '../../util/usd.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
@@ -266,6 +266,8 @@ function renderCycle(report: CycleReport): void {
     say(
       `  ${v.gate.ok ? 'PASS ' : 'BLOCK'}  ${v.proposal.id} → ${v.proposal.patch.target}：${v.gate.reason}`,
     );
+    const hint = diffHint(v);
+    if (hint !== undefined) say(`        ${hint}`);
   }
   if (report.accepted.length > 0) {
     const suffix = report.dryRun ? '（dry-run，未落盘）' : '';
@@ -274,6 +276,26 @@ function renderCycle(report: CycleReport): void {
     );
   }
   for (const r of report.rejected) say(`  拒绝 ${r.proposal.id}：${r.reason}`);
+}
+
+/**
+ * 「差在哪」的下一步 —— 门只说得出哪条用例退步，说不出行为上差了什么。
+ *
+ * 刻意**只给命令、不自动 diff**：评测默认不落 trace（`runSuite` 的 `keepTraces: false`
+ * 是刻意的，否则 `traces.jsonl` 会被几十上百条跑分撑成垃圾场）。默认配置下自动 diff
+ * 拿不到任何一条 trace，会静默变成空操作 —— 而一个大多数时候什么都不做的自动化，
+ * 比一条说清前提的命令有害。
+ */
+function diffHint(v: VerifyOutcome): string | undefined {
+  const baselineIds = new Map(v.baseline.cases.map((c) => [c.name, c.traceId]));
+  for (const name of v.gate.regressedCases) {
+    const a = baselineIds.get(name);
+    const b = v.candidate.cases.find((c) => c.name === name)?.traceId;
+    if (a !== undefined && b !== undefined) {
+      return `想看「${name}」差在哪：harness diff ${a} ${b}（需那两次跑都开了 --keep-traces）`;
+    }
+  }
+  return undefined;
 }
 
 function revert(ctx: CliContext, id: string | undefined): number {

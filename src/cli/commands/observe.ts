@@ -1,13 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { diffTraces } from '@migor/agentia';
 import { HarnessError } from '../../errors.js';
 import { gate } from '../../evals/gate.js';
 import type { EvalReport } from '../../evals/types.js';
 import { boolFlag, numFlag } from '../args.js';
 import type { CliContext } from '../context.js';
 import { json, say } from '../output.js';
-import { renderComparison, renderTrace } from '../render.js';
-import { readTraces } from '../traces.js';
+import { renderComparison, renderDiff, renderTrace } from '../render.js';
+import { findTrace, readTraces } from '../traces.js';
 
 /**
  * `harness trace <id>` —— 把一次运行的 span 树打出来。
@@ -30,6 +31,37 @@ export function traceCommand(ctx: CliContext, id: string | undefined): number {
   }
   if (boolFlag(ctx.flags, 'json')) json(hit);
   else say(renderTrace(hit));
+  return 0;
+}
+
+/**
+ * `harness diff <A> <B>` —— 两份 trace 差在哪。
+ *
+ * 为什么值得一条命令：`harness trace` 回答「这次发生了什么」，`harness report` 回答
+ * 「整体有没有变好」，而人在修问题时问的是第三个问题 —— **「这两次差在哪一步」**。
+ * `gate` 说得出「case 3 从通过变失败」，说不出「第 2 回合少了 search」；后者才是能改的东西。
+ *
+ * 上游 `diffTraces` 的配对是结构性的（`llm.turn` 只按 kind 配对、模型名降格成字段差），
+ * 正好就是「换模型 / 换提示词重跑」这个主用例 —— 所以这里不做任何二次配对。
+ */
+export function diffCommand(
+  ctx: CliContext,
+  aId: string | undefined,
+  bId: string | undefined,
+): number {
+  if (aId === undefined || bId === undefined) {
+    throw new HarnessError(
+      'config.invalid',
+      'diff 需要两条 traceId：harness diff <A> <B>（都可用前缀；id 见 eval 报告或 run 的输出）',
+    );
+  }
+  const tail = numFlag(ctx.flags, 'tail');
+  const pick = { ...(tail !== undefined ? { tail } : {}) };
+  const a = findTrace(ctx.config, aId, pick);
+  const b = findTrace(ctx.config, bId, pick);
+  const diff = diffTraces(a, b);
+  if (boolFlag(ctx.flags, 'json')) json(diff);
+  else say(renderDiff(a, b, diff));
   return 0;
 }
 
