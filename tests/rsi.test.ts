@@ -15,10 +15,11 @@ import { discoverAssets } from '../src/assets/discover.ts';
 import { readLock } from '../src/assets/lockfile.ts';
 import { loadConfig } from '../src/config.ts';
 import { runSuite } from '../src/evals/run.ts';
-import { acceptProposal, readJournal, revertLast } from '../src/rsi/accept.ts';
+import { acceptManually, acceptProposal, readJournal, revertLast } from '../src/rsi/accept.ts';
 import { attribute, classify } from '../src/rsi/attribute.ts';
 import { runCycle } from '../src/rsi/loop.ts';
 import { LlmProposer } from '../src/rsi/propose.ts';
+import { lastAccepted } from '../src/rsi/regress.ts';
 import type { FailureMode, FailureSample, Proposal } from '../src/rsi/types.ts';
 import { applyPatch, renderFile, verifyProposal } from '../src/rsi/verify.ts';
 
@@ -318,6 +319,75 @@ describe('闭环：验证 → 采纳 → 回滚', () => {
     writeFileSync(agent.path, `${readFileSync(agent.path, 'utf8')}\n手改的一行\n`, 'utf8');
 
     assert.throws(() => revertLast(config), /采纳之后资产又被改过/);
+  });
+});
+
+describe('已回滚的采纳不算数 —— append-only journal 的读法', () => {
+  /**
+   * journal 不回改原 accepted 行，只追加回滚记录。「最近一条采纳」必须读成
+   * 「最近一条**仍生效**的采纳」（liveAccepted），否则二次回滚会撞上指纹校验，
+   * 把「已经回过了」报成「有人手改过资产」—— 这两个病的修法完全不同。
+   */
+  function manualProposal(id: string, before: string, after: string): Proposal {
+    return {
+      id,
+      modeId: 'm',
+      kind: 'wrong_answer',
+      rationale: 't',
+      layer: 'L1',
+      patch: { target: 'agent:main', before, after },
+    };
+  }
+
+  it('二次回滚退的是上上条；全退完后报错区分「没有了」与「已经回过」', () => {
+    const root = project();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const agent = assets.agents[0];
+    assert.ok(agent !== undefined);
+    const original = readFileSync(agent.path, 'utf8');
+
+    acceptManually(config, assets, manualProposal('p-1', agent.body, '第一版改动。'), '理由一');
+    const afterFirst = readFileSync(agent.path, 'utf8');
+    // p-2 的 before 必须是 p-1 落盘后的正文 —— 重新发现一遍拿真值
+    const assets2 = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const body2 = assets2.agents[0]?.body;
+    assert.ok(body2 !== undefined);
+    acceptManually(config, assets2, manualProposal('p-2', body2, '第二版改动。'), '理由二');
+
+    assert.equal(lastAccepted(config).proposalId, 'p-2');
+
+    // 第一次回滚退 p-2；此后基准必须落到仍生效的 p-1，而不是已作废的 p-2
+    revertLast(config);
+    assert.equal(readFileSync(agent.path, 'utf8'), afterFirst);
+    assert.equal(lastAccepted(config).proposalId, 'p-1');
+
+    // 第二次回滚退 p-1（修复前这里会撞指纹校验，报「采纳之后资产又被改过」）
+    revertLast(config);
+    assert.equal(readFileSync(agent.path, 'utf8'), original);
+
+    // 全退完：不带 id 与带已退过的 id 是两种报错，后者得说真话
+    assert.throws(() => revertLast(config), /没有可回滚的采纳记录/);
+    assert.throws(() => revertLast(config, 'p-1'), /已经被回滚过/);
+    assert.throws(() => lastAccepted(config), /没有任何采纳记录/);
+  });
+
+  it('指定已回滚的 id 时，即使还有别的生效采纳也报「已经回过」', () => {
+    const root = project();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const agent = assets.agents[0];
+    assert.ok(agent !== undefined);
+
+    acceptManually(config, assets, manualProposal('p-1', agent.body, '第一版改动。'), '理由一');
+    const assets2 = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const body2 = assets2.agents[0]?.body;
+    assert.ok(body2 !== undefined);
+    acceptManually(config, assets2, manualProposal('p-2', body2, '第二版改动。'), '理由二');
+
+    revertLast(config, 'p-2');
+    // p-1 仍生效，但指定 p-2 不能说成「最近一条是 p-1」—— 它是已经回过了
+    assert.throws(() => revertLast(config, 'p-2'), /p-2 已经被回滚过/);
   });
 });
 

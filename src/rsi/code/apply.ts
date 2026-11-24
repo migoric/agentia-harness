@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import type { HarnessConfig } from '../../config.js';
 import { HarnessError } from '../../errors.js';
 import { fingerprint } from '../../util/hash.js';
-import { appendJournal, readJournal } from '../journal.js';
+import { appendJournal, liveAccepted, readJournal } from '../journal.js';
 import { revertNoteOf } from '../revert-note.js';
 import type { JournalEntry } from '../types.js';
 import type { CodeFileState, CodePatch, CodeVerify } from './types.js';
@@ -97,9 +97,9 @@ export interface CodeRevertResult {
  * 一条资产补丁的回滚若顺手把代码也退了，`--dry-run` 那条「零副作用」的承诺就破了。
  */
 export function revertLastCode(config: HarnessConfig): CodeRevertResult {
-  const last = readJournal(config)
-    .filter((e) => e.status === 'accepted' && e.kind === 'code')
-    .at(-1);
+  // 只认**仍生效**的 code 采纳：已回滚的由 liveAccepted 排除，否则二次回滚会撞
+  // 指纹校验，把「已经回过了」报成「落盘后有人手改」
+  const last = liveAccepted(readJournal(config), 'code').at(-1);
   if (last?.code === undefined) {
     throw new HarnessError('rsi.no_signal', 'journal 里没有可回滚的代码补丁');
   }
@@ -135,6 +135,9 @@ export function revertLastCode(config: HarnessConfig): CodeRevertResult {
     ...last,
     at: Date.now(),
     status: 'rejected',
+    // 与文本资产同款的作废标记 —— 缺了它，这条回滚只能靠 reason 前缀识别，
+    // 而前缀不在任何接口里（见 revert-note.ts）
+    reverted: true,
     reason: revertNoteOf(last.proposalId, last.reason),
   };
   appendJournal(config, reverted);

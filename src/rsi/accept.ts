@@ -7,7 +7,14 @@ import { findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { loadEvalCases } from '../evals/load.js';
-import { appendJournal, atomicWrite, journalPath, readJournal } from './journal.js';
+import {
+  appendJournal,
+  atomicWrite,
+  journalPath,
+  liveAccepted,
+  readJournal,
+  wasReverted,
+} from './journal.js';
 import { revertNoteOf } from './revert-note.js';
 import type { JournalEntry, Proposal, VerifyOutcome } from './types.js';
 import { renderFile } from './verify.js';
@@ -130,14 +137,25 @@ export interface RevertResult {
  *    把中间那些改动一起抹掉 —— 拒绝，并让人自己决定。
  */
 export function revertLast(config: HarnessConfig, id?: string): RevertResult {
-  // 只认文本资产：代码补丁有自己的回滚入口（`revertLastCode`），
-  // 混在一起会让一条资产回滚顺手把代码也退了
-  const entries = readJournal(config).filter((e) => e.status === 'accepted' && e.kind !== 'code');
+  // 只认**仍生效**的文本采纳：代码补丁有自己的回滚入口（`revertLastCode`），
+  // 混在一起会让一条资产回滚顺手把代码也退了；已回滚的采纳由 liveAccepted 排除 ——
+  // 否则二次回滚会撞上指纹校验，把「已经回过了」报成「有人手改过资产」
+  const journal = readJournal(config);
+  const entries = liveAccepted(journal, 'asset');
   const last = entries[entries.length - 1];
   if (last === undefined) {
+    if (id !== undefined && wasReverted(journal, 'asset', id)) {
+      throw new HarnessError('rsi.no_signal', `${id} 已经被回滚过 —— 没有可重复回滚的采纳`);
+    }
     throw new HarnessError('rsi.no_signal', 'journal 里没有可回滚的采纳记录');
   }
   if (id !== undefined && last.proposalId !== id) {
+    if (wasReverted(journal, 'asset', id)) {
+      throw new HarnessError(
+        'rsi.no_signal',
+        `${id} 已经被回滚过（最近一条仍生效的采纳是 ${last.proposalId}）—— 没有可重复回滚的采纳`,
+      );
+    }
     throw new HarnessError(
       'rsi.no_signal',
       `指定回滚 ${id}，但最近一条可回滚的采纳是 ${last.proposalId} —— 拒绝（期间若有新采纳，先退最近那条）`,

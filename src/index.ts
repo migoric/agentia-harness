@@ -90,7 +90,7 @@ export {
   type EvidenceOptions,
 } from './rsi/evidence.js';
 export { type HoldoutOptions, validateHoldout } from './rsi/holdout.js';
-export { appendJournal, atomicWrite } from './rsi/journal.js';
+export { appendJournal, atomicWrite, liveAccepted } from './rsi/journal.js';
 export { type LedgerEntry, lessonsOf, readLedger } from './rsi/ledger.js';
 export { type CycleOptions, cyclesDir, runCycle, writeCycle } from './rsi/loop.js';
 export { type ChangeManifest, manifestFor, validateManifest } from './rsi/manifest.js';

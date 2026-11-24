@@ -4,7 +4,7 @@ import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { readJournal } from './journal.js';
 import { cyclesDir } from './paths.js';
-import { revertNote } from './revert-note.js';
+import { isRevertEntry, revertNote } from './revert-note.js';
 import type {
   ChangeManifest,
   CycleReport,
@@ -111,8 +111,8 @@ function entryOf(
     hit !== undefined &&
     (hit.gate.fixedCases.length > 0 || hit.gate.passRateDelta > 0) &&
     (hit.holdout === undefined || hit.holdout.gate.ok);
-  // 老回滚记录没有 reverted 字段，reason 前缀是唯一的兼容线索
-  const isRevert = entry.reverted === true || entry.reason.startsWith('回滚了');
+  // 回滚识别只有 isRevertEntry 一个判法（reverted 标记 + 兼容老记录的 reason 前缀）
+  const isRevert = isRevertEntry(entry);
   const outcome: LedgerEntry['outcome'] =
     hit === undefined
       ? 'unverified'

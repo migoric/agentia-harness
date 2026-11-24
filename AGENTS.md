@@ -166,6 +166,12 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
 - **报告必须能回溯任务**：`CaseResult.task` 由 `runOne` 透传，`harvest --from-report` 靠它反查。
   测试夹具要来自真实 `runSuite`——手写生产代码根本不写入的字段会让功能在测试里绿、真实报告上
   100% 失败（这条真的发生过）。同理，公共出口里的运行时常量不能放进 `export type`。
+- **已回滚的采纳不算「还生效」**：journal 是 append-only，回滚只追加记录、不改原
+  accepted 行，所以只看 `status === 'accepted'` 会把已作废的采纳当成还有效 ——
+  `rsi regress` 盯错基准、二次回滚把「已经回过了」报成「资产被手改过」。「仍生效的
+  采纳」唯一判法是 `journal.ts` 的 `liveAccepted()`；「这条是不是回滚」唯一判法是
+  `revert-note.ts` 的 `isRevertEntry()`（`reverted` 字段优先，老记录靠 reason 前缀兜底）。
+  新增「找最近采纳 / 识别回滚」的读取点别自己写过滤条件。
 
 ## 七、AHE 三层可观测（经验 / 决策 / 留出）
 

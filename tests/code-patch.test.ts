@@ -277,6 +277,28 @@ describe('落盘与回滚', () => {
     );
   });
 
+  it('回滚条目带作废标记；二次回滚报「没有可回滚」而不是撞指纹', async () => {
+    const dir = repo();
+    const config = loadConfig(dir);
+    const patch = parsePatch(diffOf('export const sum = (a: number, b: number) => a + b + 1;'));
+    const r = await verifyInSandbox({ repoRoot: dir, patch, command: OK, timeoutMs: 20_000 });
+    applyCodePatch({ config, patch, verify: r.verify, sandbox: r.sandbox, approved: true });
+
+    const back = revertLastCode(config);
+    assert.equal(
+      back.entry.reverted,
+      true,
+      '回滚条目必须带作废标记 —— 它是 liveAccepted 的判据之一',
+    );
+
+    assert.throws(
+      () => revertLastCode(config),
+      (e) => isHarnessError(e) && e.code === 'rsi.no_signal' && /没有可回滚/.test(e.message),
+      '已回滚的补丁不能再退 —— 修复前这里会撞指纹校验报「落盘后被改动过」',
+    );
+    assert.equal(readFileSync(join(dir, FILE), 'utf8'), ORIGINAL, '拒绝二次回滚时文件必须原样不动');
+  });
+
   it('新增文件的补丁：落盘后文件在，回滚后文件消失（before = null 的路径）', async () => {
     const dir = repo();
     const config = loadConfig(dir);

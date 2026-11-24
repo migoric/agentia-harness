@@ -6,7 +6,7 @@ import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
-import { readJournal } from './journal.js';
+import { liveAccepted, readJournal } from './journal.js';
 import { cyclesDir } from './paths.js';
 import type { CycleReport, JournalEntry } from './types.js';
 
@@ -112,11 +112,11 @@ export async function checkRegression(opts: RegressOptions): Promise<RegressRepo
   };
 }
 
-/** journal 里最近一条可回滚的文本采纳（代码补丁有自己的回滚入口，不混） */
+/** journal 里最近一条**仍生效**的文本采纳（代码补丁有自己的回滚入口，不混） */
 export function lastAccepted(config: HarnessConfig): JournalEntry {
-  const accepted = readJournal(config).filter(
-    (e) => e.status === 'accepted' && e.kind !== 'code' && e.reverted !== true,
-  );
+  // 必须排除已回滚的采纳：回滚是 append-only，原 accepted 行不动 —— 不排除的话，
+  // 回滚之后本函数仍盯着已作废的提案，把「回滚的预期结果」报成回归
+  const accepted = liveAccepted(readJournal(config), 'asset');
   const last = accepted[accepted.length - 1];
   if (last === undefined) {
     throw new HarnessError(

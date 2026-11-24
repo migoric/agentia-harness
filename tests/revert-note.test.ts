@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { revertNote, revertNoteOf } from '../src/rsi/revert-note.ts';
+import { isRevertEntry, revertNote, revertNoteOf } from '../src/rsi/revert-note.ts';
 
 /**
  * 回滚理由的「写」与「读」是一对**字符串格式契约**：生成在 `accept` / `code/apply`，
@@ -22,5 +22,19 @@ describe('回滚理由的写与读必须成对', () => {
     assert.equal(revertNote('回滚了 p-9'), '回滚了 p-9');
     assert.equal(revertNote('回滚了 p-9（原因：x）'), '回滚了 p-9（原因：x）');
     assert.equal(revertNote(undefined), undefined);
+  });
+
+  it('isRevertEntry 是「这条是不是回滚」的唯一判法：新字段优先，前缀兜底', () => {
+    assert.equal(isRevertEntry({ reverted: true, reason: '回滚了 p-1（原采纳理由：x）' }), true);
+    assert.equal(
+      isRevertEntry({ reason: '回滚了 p-1' }),
+      true,
+      '老 code 回滚记录没有 reverted 字段，只能靠前缀认',
+    );
+    assert.equal(
+      isRevertEntry({ reason: '回归门未通过，拒绝采纳' }),
+      false,
+      '被门拒的提案同样记 rejected，不能误认成回滚',
+    );
   });
 });
