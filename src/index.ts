@@ -54,10 +54,12 @@ export { HOLDOUT_GATE_OPTIONS, type SplitViews, splitReport } from './evals/spli
 export {
   type AssetHit,
   type CaseResult,
+  caseSetFingerprint,
   type EvalCase,
   type EvalExpect,
   type EvalReport,
   type EvalSplit,
+  type ReportEnv,
   summarize,
   type ToolArgExpect,
 } from './evals/types.js';

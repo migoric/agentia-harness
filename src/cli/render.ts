@@ -128,11 +128,36 @@ export function renderComparison(
   const lines = [
     `基线  ${baseline.passed}/${baseline.total}（${(baseline.passRate * 100).toFixed(1)}%）· ${baseline.tokens} token${baseline.costKnown ? fmtCost(baseline.costUsd) : ''} · ${baseline.assetFingerprint}`,
     `候选  ${candidate.passed}/${candidate.total}（${(candidate.passRate * 100).toFixed(1)}%）· ${candidate.tokens} token${candidate.costKnown ? fmtCost(candidate.costUsd) : ''} · ${candidate.assetFingerprint}`,
+    `环境  模型 ${baseline.model ?? '未记录'} → ${candidate.model ?? '未记录'} · ` +
+      `agent ${baseline.agent} → ${candidate.agent} · ` +
+      `harness ${baseline.harnessVersion ?? '未记录'} → ${candidate.harnessVersion ?? '未记录'}`,
     '',
     `门：${g.ok ? 'PASS' : 'BLOCK'} (${g.code}) —— ${g.reason}`,
   ];
-  if (g.sameAssets) {
+  if (g.sameAssets && g.sameCaseSet !== false) {
+    // 用例集不同时差异有明确来源（新/删用例），再喊「只是采样随机性」就是误导
     lines.push('注意：两次跑分的资产指纹相同 —— 差异只反映采样随机性，不能当结论。');
+  }
+  if (g.sameModel === false) {
+    // 跨模型对比是合法实验，但阈值是按「同一个模型」的噪声水平定的
+    lines.push('注意：两次跑分用的不是同一个模型 —— 通过率与成本的增减不能直接读成改动效果。');
+  }
+  if (!g.sameAgent) {
+    lines.push('注意：两次跑分的 agent 不同（name@version 不一致）—— 比的可能不是同一个东西。');
+  }
+  if (g.sameCaseSet === false) {
+    if (g.onlyInBaseline.length === 0 && g.onlyInCandidate.length === 0) {
+      lines.push(
+        '注意：用例名相同但任务/断言被改过 —— 通过率变化反映的是判定标准变了，不是 agent 变了。',
+      );
+    } else {
+      lines.push(
+        `注意：用例集不同（仅基线有 ${g.onlyInBaseline.length} 条，仅候选有 ${g.onlyInCandidate.length} 条）—— ` +
+          '通过率的分母不一样，只有同名用例可比。',
+      );
+    }
+  } else if (g.sameCaseSet === undefined && g.onlyInBaseline.length === 0) {
+    lines.push('注意：报告没记用例集指纹（老报告）—— 只能确认用例名相同，断言是否一致无从判断。');
   }
   const before = new Map(baseline.cases.map((c) => [c.name, c]));
   const after = new Map(candidate.cases.map((c) => [c.name, c]));

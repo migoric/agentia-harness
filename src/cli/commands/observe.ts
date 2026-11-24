@@ -56,6 +56,9 @@ export function reportCommand(
   const g = gate(baseline, candidate, {
     ...(tokenGrowth !== undefined ? { maxTokenGrowth: tokenGrowth } : {}),
     ...(costGrowth !== undefined ? { maxCostGrowth: costGrowth } : {}),
+    // 用例集变了默认拒绝（分母不同，「变好还是变差」没有依据）；显式开这个口子
+    // 等于声明「我知道评测集改过，只看同名用例」
+    ...(boolFlag(ctx.flags, 'allow-case-set-change') ? { allowCaseSetChange: true } : {}),
   });
   if (boolFlag(ctx.flags, 'json')) json(g);
   else say(renderComparison(baseline, candidate, g));

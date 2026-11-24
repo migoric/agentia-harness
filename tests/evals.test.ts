@@ -9,7 +9,14 @@ import { loadConfig } from '../src/config.ts';
 import { gate } from '../src/evals/gate.ts';
 import { loadEvalCases } from '../src/evals/load.ts';
 import { check, runSuite, toolSequence } from '../src/evals/run.ts';
-import { type CaseResult, type EvalCase, type EvalReport, summarize } from '../src/evals/types.ts';
+import {
+  type CaseResult,
+  caseSetFingerprint,
+  type EvalCase,
+  type EvalReport,
+  type ReportEnv,
+  summarize,
+} from '../src/evals/types.ts';
 import { createRunner, type RunOutcome } from '../src/run/runner.ts';
 
 const USAGE = {
@@ -314,7 +321,12 @@ describe('toolSequence —— 从真实 trace 还原工具调用', () => {
   });
 });
 
-function report(results: { n: string; passed: boolean }[], tokens: number, fp = 'A'): EvalReport {
+function report(
+  results: { n: string; passed: boolean }[],
+  tokens: number,
+  fp = 'A',
+  env: ReportEnv = {},
+): EvalReport {
   const cases: CaseResult[] = results.map((r, i) => ({
     name: r.n,
     task: '任务原文',
@@ -330,7 +342,7 @@ function report(results: { n: string; passed: boolean }[], tokens: number, fp = 
     skills: [],
     subagents: [],
   }));
-  return summarize(cases, fp, `main@1`);
+  return summarize(cases, fp, `main@1`, env);
 }
 
 /** 与 report 同形，但买单记在第一条上；`costUsd` 传 undefined = 没有读数 */
@@ -366,6 +378,33 @@ function caseWith(
   };
 }
 
+describe('用例集指纹', () => {
+  const c = (name: string, contains: string, path = `evals/${name}.md`): EvalCase => ({
+    name,
+    task: '任务原文',
+    expect: { contains: [contains] },
+    path,
+  });
+
+  it('名字相同、断言不同 ⇒ 指纹不同（资产指纹看不出来这个）', () => {
+    assert.notEqual(caseSetFingerprint([c('a', '三条')]), caseSetFingerprint([c('a', '三条要点')]));
+  });
+
+  it('只改文件名 ⇒ 指纹不变（判定标准没动，只是文件换了位置）', () => {
+    assert.equal(
+      caseSetFingerprint([c('a', 'x', 'evals/a.md')]),
+      caseSetFingerprint([c('a', 'x', 'evals/01-a.md')]),
+    );
+  });
+
+  it('与磁盘顺序无关（按名字排序后再算）', () => {
+    assert.equal(
+      caseSetFingerprint([c('a', 'x'), c('b', 'y')]),
+      caseSetFingerprint([c('b', 'y'), c('a', 'x')]),
+    );
+  });
+});
+
 describe('gate —— 回归门', () => {
   it('有用例由过变挂 ⇒ 否决（哪怕整体通过率没降）', () => {
     const b = report(
@@ -389,8 +428,8 @@ describe('gate —— 回归门', () => {
     assert.deepEqual(g.fixedCases, ['b']);
   });
 
-  it('通过率下降（新增用例没做）⇒ 否决', () => {
-    // 造 pass_rate_dropped 的独特场景：没有「原本过、现在挂」的用例，
+  it('用例集变了 ⇒ 拒绝，但理由必须是「分母变了」而不是「整体退步」', () => {
+    // 造 case_set_changed 的独特场景：没有「原本过、现在挂」的用例，
     // 而是评测集里多了一条候选不通过的 —— 此时 case_regression 判不出来
     const b = report(
       [
@@ -409,7 +448,94 @@ describe('gate —— 回归门', () => {
     );
     const g = gate(b, c);
     assert.equal(g.ok, false);
-    assert.equal(g.code, 'pass_rate_dropped');
+    assert.equal(
+      g.code,
+      'case_set_changed',
+      '结论对（拒绝）但归因要对：这是基线过期，不是提案让整体退步',
+    );
+    assert.deepEqual(g.onlyInCandidate, ['new']);
+    assert.deepEqual(g.onlyInBaseline, []);
+    // 交集内没有任何用例退步，通过率也没变 —— 这两个数必须如实反映
+    assert.deepEqual(g.regressedCases, []);
+    assert.equal(g.passRateDelta, 0);
+    assert.match(g.reason, /用例集不一致/);
+    assert.match(g.reason, /重跑基线/);
+  });
+
+  it('显式允许只比交集 ⇒ 不拒绝，结论里写明只算了同名用例', () => {
+    const b = report(
+      [
+        { n: 'a', passed: true },
+        { n: 'b', passed: true },
+      ],
+      100,
+    );
+    const c = report(
+      [
+        { n: 'a', passed: true },
+        { n: 'b', passed: true },
+        { n: 'new', passed: false },
+      ],
+      100,
+    );
+    const g = gate(b, c, { allowCaseSetChange: true });
+    assert.equal(g.ok, true);
+    assert.equal(g.code, 'pass');
+    assert.equal(g.sameCaseSet, false);
+    assert.match(g.reason, /只比对 2 条同名用例/);
+    assert.match(g.reason, /仅候选有：new/);
+  });
+
+  it('只比交集时 token 也只在交集上算（新用例的开销不能算成「变贵」）', () => {
+    // 基线：a(100) b(100)；候选：a(100) b(100) new(1000)
+    // 拿总和比会得出 +500%，而同名用例一分钱没多花
+    const baseCases: CaseResult[] = [
+      caseWith(undefined, true, 'a', 100),
+      caseWith(undefined, true, 'b', 100),
+    ];
+    const candCases: CaseResult[] = [
+      caseWith(undefined, true, 'a', 100),
+      caseWith(undefined, true, 'b', 100),
+      caseWith(undefined, false, 'new', 1000),
+    ];
+    const b = summarize(baseCases, 'A', 'main@1');
+    const c = summarize(candCases, 'A', 'main@1');
+    const g = gate(b, c, { allowCaseSetChange: true });
+    assert.equal(g.tokenDelta, 0, `交集 token 没变，实际算出 ${g.tokenDelta}`);
+    assert.equal(c.tokens, 1200, '候选报告自己的总和仍是 1200（只是不比这一项）');
+  });
+
+  it('两份报告没有同名用例 ⇒ not_comparable（无从比较，不是「通过」）', () => {
+    const b = report([{ n: 'a', passed: true }], 100);
+    const c = report([{ n: 'z', passed: true }], 100);
+    const g = gate(b, c, { allowCaseSetChange: true });
+    assert.equal(g.ok, false);
+    assert.equal(g.code, 'not_comparable');
+  });
+
+  it('用例名相同但断言被改过 ⇒ 算作用例集变了（资产指纹看不出来这个）', () => {
+    const b = report([{ n: 'a', passed: true }], 100, 'A', { caseFingerprint: 'fp-old' });
+    const c = report([{ n: 'a', passed: true }], 100, 'A', { caseFingerprint: 'fp-new' });
+    const g = gate(b, c);
+    assert.equal(g.sameCaseSet, false);
+    assert.equal(g.code, 'case_set_changed');
+    assert.match(g.reason, /任务或断言被改过/, '名字全同时必须说清是哪一种不一致');
+    // 老报告没有指纹时只能说「不知道」，不能假装确认过
+    const legacy = gate(
+      report([{ n: 'a', passed: true }], 100),
+      report([{ n: 'a', passed: true }], 100),
+    );
+    assert.equal(legacy.sameCaseSet, undefined);
+    assert.equal(legacy.ok, true);
+  });
+
+  it('换模型不否决（跨模型是合法实验），但要如实标出 sameModel=false', () => {
+    const b = report([{ n: 'a', passed: true }], 100, 'A', { model: 'model-x' });
+    const c = report([{ n: 'a', passed: true }], 100, 'A', { model: 'model-y' });
+    const g = gate(b, c);
+    assert.equal(g.sameModel, false);
+    assert.equal(g.ok, true, '跨模型对比本身不该被门拒绝');
+    assert.equal(gate(b, c).sameAgent, true);
   });
 
   it('有用例由过变挂时，优先报 case_regression（比通过率更具体）', () => {

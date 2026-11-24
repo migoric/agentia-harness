@@ -141,6 +141,11 @@ describe('采纳判据', () => {
     costDelta: 0,
     costBasis: 'cost',
     sameAssets: false,
+    sameCaseSet: true,
+    onlyInBaseline: [],
+    onlyInCandidate: [],
+    sameModel: undefined,
+    sameAgent: true,
   };
   const proposal = {
     id: 'p1',

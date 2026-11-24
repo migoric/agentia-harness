@@ -2,13 +2,21 @@ import { type ModelClient, mapWithConcurrency } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { effectiveModel } from '../run/app.js';
 import { costOf } from '../run/cost.js';
 import { createRunner, type RunOutcome } from '../run/runner.js';
 import { mergeTraces } from '../run/trace-merge.js';
 import { combineAbort } from '../util/abort.js';
+import { harnessVersion } from '../version.js';
 import { loadEvalCases } from './load.js';
 import { toolInvocations } from './tool-events.js';
-import { type CaseResult, type EvalCase, type EvalReport, summarize } from './types.js';
+import {
+  type CaseResult,
+  caseSetFingerprint,
+  type EvalCase,
+  type EvalReport,
+  summarize,
+} from './types.js';
 
 // 工具事件提取的唯一实现搬到了 tool-events.ts（序列 / 次数 / 参数共用一份扫描）。
 // 保留从本模块再导出：index.ts 与既有测试一直从这里取 toolSequence。
@@ -88,6 +96,14 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
     results,
     opts.assets.fingerprint,
     `${runner.agent.name}@${runner.agent.version}`,
+    {
+      // 可比性靠这几个事实判断，缺一条就会把「换了模型 / 改了断言 / 升级了 harness」
+      // 读成 agent 的进退步（见 gate.ts 的 case_set_changed 与 model 提示）
+      model: effectiveModel(opts.config, runner.agent),
+      harnessVersion: harnessVersion(),
+      finishedAt: new Date().toISOString(),
+      caseFingerprint: caseSetFingerprint(cases),
+    },
   );
 }
 

@@ -43,6 +43,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
                           两份报告比一次并过回归门；门不过退出码 1
     --max-token-growth <r>  通过率不变时允许的 token 增幅（0.1 = 10%）
     --max-cost-growth <r>   成本可比时允许的成本增幅（缺省跟随 token 阈值）
+    --allow-case-set-change 用例集不同时不拒绝，只比对同名用例（缺省拒绝：分母变了）
   trace <traceId>         打印那次运行的 span 树（可用前缀）
     --tail <n>            只看 traces.jsonl 最后 n 行（大文件用）
     --json                输出原始 trace
@@ -90,7 +91,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   init: [],
   run: [],
   eval: ['save', 'only', 'keep-traces', 'timeout', 'concurrency', 'retries'],
-  report: ['max-token-growth', 'max-cost-growth'],
+  report: ['max-token-growth', 'max-cost-growth', 'allow-case-set-change'],
   trace: ['tail'],
   harvest: ['task', 'from-report'],
   evidence: ['from-report', 'id'],

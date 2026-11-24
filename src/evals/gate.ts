@@ -25,22 +25,38 @@ import type { EvalReport } from './types.js';
  *   会让所有「更努力」的改动一律被拒，那 RSI 就只能学会偷懒。
  * - 同名用例集合不同时（新用例/删用例），只比较**交集**的回归，别拿新用例的失败
  *   去否决一个提议 —— 那是评测集自己的问题，不是提案的。
+ *
+ * 但「只比交集」不等于「静默地比一部分」：用例集变了本身要作为**独立结论**报出来
+ * （`case_set_changed`），因为此时两份报告的通过率分母不同，`passRate` 的高低根本不是
+ * 同一件事。此前这一步缺失，表现为「加了一条用例 ⇒ 通过率下降 ⇒ 否决」，理由写着
+ * 「整体退步」，而真相是基线过期了 —— 结论对、归因错，人照着修会去改提示词。
+ * 想比还是能比（`allowCaseSetChange`），只是结论里必须带着这个前提。
  */
 export interface GateOptions {
   /** 通过率不变时，允许的 token 增幅（0.1 = 10%） */
   readonly maxTokenGrowth?: number;
   /** 通过率不变时，允许的成本增幅（缺省与 token 同值） */
   readonly maxCostGrowth?: number;
+  /**
+   * 允许用例集不同（只比交集，不否决）。
+   *
+   * 缺省 false：默认拒绝 —— 拿过期的基线比出来的「变好/变差」没有依据。
+   * CI 里比对两份历史报告时若确实改过评测集，显式开这个口子，等于声明
+   * 「我知道分子分母变了，只看交集」。
+   */
+  readonly allowCaseSetChange?: boolean;
 }
 
 export interface GateResult {
   readonly ok: boolean;
   readonly code:
     | 'pass'
+    | 'case_set_changed'
     | 'case_regression'
     | 'pass_rate_dropped'
     | 'cost_regression'
-    | 'token_regression';
+    | 'token_regression'
+    | 'not_comparable';
   readonly reason: string;
   /** 由过变挂的用例名 */
   readonly regressedCases: readonly string[];
@@ -63,6 +79,27 @@ export interface GateResult {
    * 模型采样的随机性。调用方见到 true 应该重跑而不是下结论。
    */
   readonly sameAssets: boolean;
+  /**
+   * 两边跑的是同一份用例集（名字、任务、断言、分组全同）。
+   *
+   * 判据优先用 `caseFingerprint`（能抓到「名字没变、断言改了」），两边都没这个字段
+   * 的老报告退化成「名字集合相同」。**退化的判据会漏掉断言改动**，所以 `undefined`
+   * 表示「无法确认」，它与 `true` 不是一回事。
+   */
+  readonly sameCaseSet: boolean | undefined;
+  /** 只在基线里有的用例名（基线过期，或候选用了 `--only`） */
+  readonly onlyInBaseline: readonly string[];
+  /** 只在候选里有的用例名（新加的用例；它进不了交集的通过率） */
+  readonly onlyInCandidate: readonly string[];
+  /**
+   * 两边模型相同。`undefined` = 至少一边没记（老报告）。
+   *
+   * 不据此否决：跨模型对比是合法实验（「换个便宜模型还过不过」）。但**成本/通过率
+   * 的增减必须带着它读** —— 换模型后 token 与单价的基准都变了。
+   */
+  readonly sameModel: boolean | undefined;
+  /** 两边 agent 相同（`name@version`）。不同则比的根本不是同一个 agent */
+  readonly sameAgent: boolean;
 }
 
 export function gate(
@@ -83,23 +120,52 @@ export function gate(
     .map((b) => b.name)
     .sort();
 
-  const passRateDelta = candidate.passRate - baseline.passRate;
-  const tokenDelta =
-    baseline.tokens === 0
-      ? candidate.tokens === 0
+  // 用例集差异：这三种情况都让「通过率」不再是同一个比值（分母变了）
+  const onlyInBaseline = [...base.keys()].filter((n) => !cand.has(n)).sort();
+  const onlyInCandidate = [...cand.keys()].filter((n) => !base.has(n)).sort();
+  const namesEqual = onlyInBaseline.length === 0 && onlyInCandidate.length === 0;
+  const fpB = baseline.caseFingerprint;
+  const fpC = candidate.caseFingerprint;
+  const sameCaseSet: boolean | undefined = !namesEqual
+    ? false
+    : fpB !== undefined && fpC !== undefined
+      ? // 名字相同但指纹不同 = 断言/任务被改过，判定标准已经不是同一个
+        fpB === fpC
+      : undefined; // 老报告没有指纹：只能确认名字相同，断言是否一致「不知道」
+
+  // 集合不同时只统计交集 —— 否则「新加的用例候选没做」会被算成通过率下降
+  const shared = namesEqual ? null : [...base.keys()].filter((n) => cand.has(n)).sort();
+  const compared = shared ?? [...base.keys()].sort();
+
+  const passRateDelta =
+    shared === null
+      ? candidate.passRate - baseline.passRate
+      : shared.length === 0
         ? 0
-        : 1
-      : candidate.tokens / baseline.tokens - 1;
-  const costUsable = baseline.costKnown && candidate.costKnown;
+        : shared.filter((n) => cand.get(n)?.passed === true).length / shared.length -
+          shared.filter((n) => base.get(n)?.passed === true).length / shared.length;
+
+  // token/成本也要在**同一批用例**上比：集合变了还比总和，等于拿「多了几条用例的开销」
+  // 当成「这条用例变贵了」。成本还要求两边每个被比对的用例都有读数。
+  const baseTokens = compared.reduce((sum, n) => sum + (base.get(n)?.tokens ?? 0), 0);
+  const candTokens = compared.reduce((sum, n) => sum + (cand.get(n)?.tokens ?? 0), 0);
+  const tokenDelta = ratioDelta(baseTokens, candTokens);
+  const costUsable =
+    compared.length > 0 &&
+    compared.every((n) => base.get(n)?.costUsd !== undefined) &&
+    compared.every((n) => cand.get(n)?.costUsd !== undefined);
   const costDelta = costUsable
-    ? baseline.costUsd === 0
-      ? candidate.costUsd === 0
-        ? 0
-        : 1
-      : candidate.costUsd / baseline.costUsd - 1
+    ? ratioDelta(
+        compared.reduce((sum, n) => sum + (base.get(n)?.costUsd ?? 0), 0),
+        compared.reduce((sum, n) => sum + (cand.get(n)?.costUsd ?? 0), 0),
+      )
     : undefined;
   const costBasis: 'cost' | 'tokens' = costDelta === undefined ? 'tokens' : 'cost';
   const sameAssets = baseline.assetFingerprint === candidate.assetFingerprint;
+  const sameModel =
+    baseline.model !== undefined && candidate.model !== undefined
+      ? baseline.model === candidate.model
+      : undefined;
 
   const common = {
     regressedCases,
@@ -109,8 +175,47 @@ export function gate(
     costDelta,
     costBasis,
     sameAssets,
+    sameCaseSet,
+    onlyInBaseline,
+    onlyInCandidate,
+    sameModel,
+    sameAgent: baseline.agent === candidate.agent,
   } as const;
 
+  const setDiff = caseSetDiff(onlyInBaseline, onlyInCandidate);
+  // 名字全同却判定「集合变了」只可能是指纹不同（任务或断言被改过）—— 此时说
+  // 「仅基线有 0 条，仅候选有 0 条」等于什么都没说
+  const setIssue =
+    onlyInBaseline.length === 0 && onlyInCandidate.length === 0
+      ? '用例名相同，但任务或断言被改过'
+      : setDiff;
+  // 结论里的分子分母要跟着「实际比了哪些用例」走，否则读起来像整份评测集都过了
+  const baseRate =
+    shared === null ? `${baseline.passed}/${baseline.total}` : sharedPassed(base, compared);
+  const candRate =
+    shared === null ? `${candidate.passed}/${candidate.total}` : sharedPassed(cand, compared);
+  const scopeNote = shared === null ? '' : '，只算同名用例';
+  const baseCost = compared.reduce((sum, n) => sum + (base.get(n)?.costUsd ?? 0), 0);
+  const candCost = compared.reduce((sum, n) => sum + (cand.get(n)?.costUsd ?? 0), 0);
+
+  if (sameCaseSet === false && opts.allowCaseSetChange !== true) {
+    return {
+      ...common,
+      ok: false,
+      code: 'case_set_changed',
+      reason:
+        `两次跑分的用例集不一致：${setIssue} —— 通过率的分母与判定标准可能都不是同一个，` +
+        '「变好还是变差」无从谈起。重跑基线，或显式只比交集',
+    };
+  }
+  if (compared.length === 0) {
+    return {
+      ...common,
+      ok: false,
+      code: 'not_comparable',
+      reason: `两份报告没有同名用例（${setIssue}）—— 无从比较`,
+    };
+  }
   if (regressedCases.length > 0) {
     return {
       ...common,
@@ -124,7 +229,7 @@ export function gate(
       ...common,
       ok: false,
       code: 'pass_rate_dropped',
-      reason: `通过率下降 ${(passRateDelta * 100).toFixed(1)}pt（${baseline.passed}/${baseline.total} → ${candidate.passed}/${candidate.total}）`,
+      reason: `通过率下降 ${(passRateDelta * 100).toFixed(1)}pt（${baseRate} → ${candRate}${scopeNote}）`,
     };
   }
   if (passRateDelta === 0) {
@@ -136,7 +241,7 @@ export function gate(
         code: 'cost_regression',
         reason:
           `通过率没变（${(candidate.passRate * 100).toFixed(1)}%）但成本涨了 ${(costDelta * 100).toFixed(1)}%` +
-          `（${usd(baseline.costUsd)} → ${usd(candidate.costUsd)}，阈值 ${(maxCostGrowth * 100).toFixed(0)}%）`,
+          `（${usd(baseCost)} → ${usd(candCost)}，阈值 ${(maxCostGrowth * 100).toFixed(0)}%${scopeNote}）`,
       };
     }
     if (costDelta === undefined && tokenDelta > maxTokenGrowth) {
@@ -159,10 +264,33 @@ export function gate(
   } else if (costDelta === undefined && tokenDelta !== 0) {
     parts.push(`token ${tokenDelta > 0 ? '+' : ''}${(tokenDelta * 100).toFixed(1)}%`);
   }
+  // 比了交集就必须说出来，否则「通过」会被读成「整份评测集都过了」
+  if (shared !== null) parts.push(`只比对 ${shared.length} 条同名用例（${setDiff}）`);
   return {
     ...common,
     ok: true,
     code: 'pass',
     reason: parts.length > 0 ? parts.join('，') : '无变化',
   };
+}
+
+/** 增幅；基线为 0 时只能区分「还是 0」与「不是 0」 */
+function ratioDelta(baseValue: number, candValue: number): number {
+  if (baseValue === 0) return candValue === 0 ? 0 : 1;
+  return candValue / baseValue - 1;
+}
+
+function caseSetDiff(baselineOnly: readonly string[], candidateOnly: readonly string[]): string {
+  const parts: string[] = [];
+  if (baselineOnly.length > 0) parts.push(`仅基线有：${baselineOnly.join(', ')}`);
+  if (candidateOnly.length > 0) parts.push(`仅候选有：${candidateOnly.join(', ')}`);
+  return parts.join('；');
+}
+
+function sharedPassed(
+  cases: ReadonlyMap<string, { readonly passed: boolean }>,
+  names: readonly string[],
+): string {
+  const passed = names.filter((n) => cases.get(n)?.passed === true).length;
+  return `${passed}/${names.length}`;
 }

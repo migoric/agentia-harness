@@ -8,6 +8,18 @@
 
 ### 新增
 
+- **报告自带环境事实**：`EvalReport` 增 `model` / `harnessVersion` / `finishedAt` /
+  `caseFingerprint`（全部可选，老报告照样能读）。`harness report` 会打印「模型 A → B ·
+  agent · harness 版本」，发现不一致时给出警告。没有这四个字段时，「两份报告能不能比」
+  只能靠假设 —— 换模型、改断言、升级 harness 都会让通过率变化被读成 agent 的进退步。
+  `caseFingerprint` 覆盖名字 + 任务 + 后续轮次 + 断言 + 分组，但**不含文件路径**：
+  把 `evals/a.md` 改名不该让两份报告失去可比性。
+  `harnessVersion()` 从 `package.json` 读（不写常量 —— 常量要在每次发版时手工同步，
+  漏一次就会让两个版本互相声称「同一个 harness」）。
+
+- **`harness report --allow-case-set-change`**：用例集不同时显式只比交集。缺省拒绝
+  （见下方修复），显式开这个口子等于声明「我知道分子分母变了」。
+
 - **多轮评测**：eval 用例正文用一行 `<!-- turn -->` 分隔轮次，首段仍是 `task`、后续段进
   `followUps`。跑法走 agentia 的会话存储（`session: { store, id }`），历史由上游拼接，
   不是 harness 自己拼 messages —— 拼一套就等于评测的不是线上那条路。
@@ -117,6 +129,16 @@
 
 ### 修复
 
+- **用例集变了不再被说成「整体退步」**：加一条候选没做的用例，会让通过率的分母变大、
+  通过率下降，此前门报 `pass_rate_dropped`「通过率下降 Xpt（整体退步）」—— 结论对
+  （该拒绝），但**归因错**：这不是提案让 agent 变差，是基线过期了。照着这条理由去改
+  提示词，会改一个不存在的问题。现在独立成 `case_set_changed`，指出哪些用例只在基线 /
+  只在候选，并给出两条出路（重跑基线，或 `--allow-case-set-change` 只比交集）。
+  只比交集时 token 与成本也只在**同一批用例**上算 —— 否则「多了几条用例的开销」会被
+  读成「这条用例变贵了」。两条报告完全没有同名用例时是 `not_comparable`，不是 `pass`。
+- **`sameCaseSet` 有两种「看不出来」**：两边都有 `caseFingerprint` 时按指纹判（能抓到
+  「名字没变、断言改了」）；老报告没有指纹时只能确认名字相同 —— 这时返回 `undefined`
+  表示「断言是否一致不知道」，与 `true`（确认一致）严格区分。
 - **库用法下 `endpoint` 配置静默不生效**：`applyEndpointEnv` 此前只在 CLI 入口调用，
   直接调 `createRunner` / `runCycle` / `LlmProposer` 的库用户会踩「主 agent 走得通、
   技能子循环 401」的分裂故障（子循环各自现造默认 client，只读环境变量）。现在

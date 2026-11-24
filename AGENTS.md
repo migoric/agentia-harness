@@ -169,6 +169,12 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
 - **报告必须能回溯任务**：`CaseResult.task` 由 `runOne` 透传，`harvest --from-report` 靠它反查。
   测试夹具要来自真实 `runSuite`——手写生产代码根本不写入的字段会让功能在测试里绿、真实报告上
   100% 失败（这条真的发生过）。同理，公共出口里的运行时常量不能放进 `export type`。
+- **「两份报告可比」要由字段证明**：`EvalReport` 必须带 `model` / `harnessVersion` /
+  `finishedAt` / `caseFingerprint`，否则换模型、改断言、升级 harness 都会被读成 agent 的
+  进退步（归因错的结论比没有结论更贵）。用例集不同（含「名字没变、断言改了」）一律
+  `case_set_changed` 拒绝：分母变了，通过率的高低不是同一件事。只比交集时 token 与成本
+  也必须只在同一批用例上算 —— 否则「多了几条用例的开销」会伪装成「这条用例变贵了」。
+  判不出来的情况（老报告没有指纹）返回 `undefined`，不许拿 `true` 冒充「确认过」。
 - **已回滚的采纳不算「还生效」**：journal 是 append-only，回滚只追加记录、不改原
   accepted 行，所以只看 `status === 'accepted'` 会把已作废的采纳当成还有效 ——
   `rsi regress` 盯错基准、二次回滚把「已经回过了」报成「资产被手改过」。「仍生效的

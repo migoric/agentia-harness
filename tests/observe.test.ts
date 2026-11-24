@@ -89,6 +89,26 @@ describe('runSuite —— 并发、超时、重试', () => {
     assert.equal(report.passed, 1);
   });
 
+  it('报告自带环境事实：模型、harness 版本、完成时刻、用例集指纹', async () => {
+    // 没有这四项，「两份报告可比」只是个假设：换了模型 / 改了断言 / 升级了 harness
+    // 都会被读成 agent 的进退步（gate 的 case_set_changed 与 sameModel 都依赖它们）
+    const root = project({ 'evals/a.md': '---\nname: a\nexpect_contains: 结论\n---\n任务A\n' });
+    const { config, assets } = assetsOf(root);
+    const report = await runSuite({
+      config,
+      assets,
+      client: scriptedClient([endTurn('结论：好')]),
+    });
+    assert.equal(typeof report.model, 'string');
+    assert.ok((report.model ?? '').length > 0, '模型名不能是空串');
+    assert.equal(report.harnessVersion, '0.2.0', '版本号来自 package.json，不是手写常量');
+    assert.ok(
+      Number.isFinite(Date.parse(report.finishedAt ?? '')),
+      'finishedAt 必须是可解析的时刻',
+    );
+    assert.match(report.caseFingerprint ?? '', /^[0-9a-f]{12}$/, '用例集指纹沿用 12 位前缀');
+  });
+
   it('单条用例超时 ⇒ 记为该用例失败，整轮不崩', async () => {
     // 用例按名字排序执行：a-slow 先跑（拿第一步＝延迟的那步），b-fast 后跑
     const root = project({

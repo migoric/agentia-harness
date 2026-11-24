@@ -11,6 +11,8 @@
  *
  * 全部是规则式判定，没有一条依赖模型 —— 裁判不确定，RSI 就会把随机波动当进步。
  */
+import { fingerprint } from '../util/hash.js';
+
 export interface ToolArgExpect {
   readonly tool: string;
   /** 入参文本里必须出现的子串 */
@@ -127,6 +129,28 @@ export interface AssetHit {
   readonly cases: readonly string[];
 }
 
+/**
+ * 跑分的环境事实 —— 两份报告「能不能比」全靠这几个字段。
+ *
+ * 为什么必须有：报告的用途是「改完再跑一次，看有没有变好」，而**可比**是个需要
+ * 证据的判断，不是默认成立。此前报告只记 `assetFingerprint` 与 `agent`，于是
+ * 「换了模型」「加了一条用例」「升级了 harness」三种情况下，通过率的变化会被
+ * 一律读成 agent 的进退步 —— 归因错的那一类结论，比没有结论更贵。
+ *
+ * 全部可选：老报告（本字段引入前生成的）照样能加载，判不出可比性时门会如实说
+ * 「不知道」，而不是假装知道。
+ */
+export interface ReportEnv {
+  /** 实际生效的模型名（`effectiveModel` 的结果，不是配置原文） */
+  readonly model?: string | undefined;
+  /** 生成报告的 harness 版本 */
+  readonly harnessVersion?: string | undefined;
+  /** 完成时刻（ISO 8601） */
+  readonly finishedAt?: string | undefined;
+  /** 用例集指纹（见 `caseSetFingerprint`） */
+  readonly caseFingerprint?: string | undefined;
+}
+
 export interface EvalReport {
   readonly total: number;
   readonly passed: number;
@@ -146,14 +170,48 @@ export interface EvalReport {
   /** 跑分时的全体资产指纹 —— 两个报告只有在指纹相同的语义下才可比 */
   readonly assetFingerprint: string;
   readonly agent: string;
+  /**
+   * 用例集指纹 —— **名字相同但断言被改过**是资产指纹看不出来的。
+   *
+   * 场景很具体：有人把 `expect_contains: 三条` 收紧成 `三条要点`，通过率掉了 20pt，
+   * 而资产（技能/agent 正文）一个字节没动。只看 `assetFingerprint` 会把这读成
+   * 「同样的资产，结果变差了 ⇒ 模型抖动」，真相是**判定标准变了**。
+   */
+  readonly caseFingerprint?: string | undefined;
+  /** 生成报告的 harness 版本；缺席 = 老报告 */
+  readonly harnessVersion?: string | undefined;
+  /** 完成时刻（ISO 8601）；缺席 = 老报告 */
+  readonly finishedAt?: string | undefined;
+  /** 实际生效的模型名；缺席 = 老报告 */
+  readonly model?: string | undefined;
   /** 本轮被用到的资产（按用例数降序）—— 提案选目标的数据来源 */
   readonly skillHits: readonly AssetHit[];
+}
+
+/**
+ * 用例集指纹：名字 + 任务原文 + 后续轮次 + 断言 + 分组，按名字排序后取哈希。
+ *
+ * **不含 `path`**：把 `evals/a.md` 改名成 `evals/01-a.md` 不该让两份报告失去可比性 ——
+ * 指纹要覆盖「判定标准」，不覆盖「文件放哪」。
+ */
+export function caseSetFingerprint(cases: readonly EvalCase[]): string {
+  const rows = cases
+    .map((c) => ({
+      name: c.name,
+      task: c.task,
+      followUps: c.followUps ?? [],
+      expect: c.expect,
+      split: c.split ?? 'train',
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return fingerprint(JSON.stringify(rows));
 }
 
 export function summarize(
   cases: readonly CaseResult[],
   assetFingerprint: string,
   agent: string,
+  env: ReportEnv = {},
 ): EvalReport {
   const passed = cases.filter((c) => c.passed).length;
   const priced = cases.filter((c) => c.costUsd !== undefined);
@@ -168,6 +226,12 @@ export function summarize(
     cases,
     assetFingerprint,
     agent,
+    // 条件展开而不是写 `model: env.model`：`exactOptionalPropertyTypes` 下
+    // 「键存在但值为 undefined」与「键缺席」是两件事，而老报告里这两者要能区分
+    ...(env.caseFingerprint !== undefined ? { caseFingerprint: env.caseFingerprint } : {}),
+    ...(env.harnessVersion !== undefined ? { harnessVersion: env.harnessVersion } : {}),
+    ...(env.finishedAt !== undefined ? { finishedAt: env.finishedAt } : {}),
+    ...(env.model !== undefined ? { model: env.model } : {}),
     skillHits: aggregateHits(cases),
   };
 }

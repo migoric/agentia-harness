@@ -59,6 +59,11 @@ function gate(fixed: string[], ok: boolean): GateResult {
     costDelta: undefined,
     costBasis: 'tokens',
     sameAssets: true,
+    sameCaseSet: true,
+    onlyInBaseline: [],
+    onlyInCandidate: [],
+    sameModel: undefined,
+    sameAgent: true,
   };
 }
 
