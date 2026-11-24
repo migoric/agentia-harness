@@ -117,6 +117,11 @@
 
 ### 修复
 
+- **库用法下 `endpoint` 配置静默不生效**：`applyEndpointEnv` 此前只在 CLI 入口调用，
+  直接调 `createRunner` / `runCycle` / `LlmProposer` 的库用户会踩「主 agent 走得通、
+  技能子循环 401」的分裂故障（子循环各自现造默认 client，只读环境变量）。现在
+  `createRunner` 与 `LlmProposer` 构造时都幂等落地一次 —— 不覆盖已有环境变量，
+  CLI 已落过时是无操作。
 - **已回滚的采纳不再被当成「还生效」**：journal 是 append-only（回滚只追加记录、不改原
   accepted 行），而「最近一条采纳」的三个读取点此前只看 `status === 'accepted'`。症状：
   回滚后 `rsi regress` 仍拿已作废的提案当基准，把「回滚的预期结果」报成回归；二次

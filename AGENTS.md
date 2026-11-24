@@ -122,9 +122,12 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
   理由写在 `evals/run.ts` 的注释里。
 - **端点走环境变量是唯一能覆盖所有调用点的方式**。agentia 的默认客户端是**每次 run 现造**
   的（技能子循环、RSI 提案器各造各的），显式注入 client 传不进子循环 —— 那会让
-  「主 agent 走 DeepSeek、技能偷偷走官方端点」静默发生。所以 `endpoint` 段在 CLI 入口
-  一次性落到 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`（`run/endpoint.ts`），
-  **不覆盖**已存在的真实环境变量（与 `loadEnvFile` 同款语义）。
+  「主 agent 走 DeepSeek、技能偷偷走官方端点」静默发生。所以 `endpoint` 段落到
+  `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`（`run/endpoint.ts`），**不覆盖**已存在的
+  真实环境变量（与 `loadEnvFile` 同款语义）。落点有**两处**：CLI 入口与库入口
+  （`createRunner` 与 `LlmProposer` 构造时，幂等）—— 只在 CLI 落的话，库用法下
+  endpoint 段静默不生效，症状是「主 agent 走得通、子循环 401」的分裂故障。
+  新增「会现造默认 client」的库入口时，记得同样落一次。
 - **子循环继承 client，但不继承 model**。上游 `runCapabilityLoop` 的设计如此
   （见 `toolkit/capability-loop.ts` 的边界段）：端点不会分裂，**模型名会** —— 不给
   `model` 就落到 `claude-opus-5`。harness 在 `buildApp` 把生效模型传给 `buildTools`，

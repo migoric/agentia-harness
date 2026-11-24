@@ -10,6 +10,7 @@ import type { AgentAsset, AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { buildApp } from './app.js';
 import { costOf, usageReported } from './cost.js';
+import { applyEndpointEnv } from './endpoint.js';
 import { mergeTraces } from './trace-merge.js';
 import { capabilityHits } from './trace-read.js';
 
@@ -240,5 +241,10 @@ export function createRunner(
   agentName?: string,
   persistTraces = true,
 ): Runner {
+  // 库入口也要落地 endpoint 段：直接调 createRunner / runCycle 的库用户不走 CLI，
+  // 配置里的 baseURL / apiKeyEnv 此前**静默不生效** —— 症状是「主 agent 走得通、
+  // 子循环 401」的分裂故障（子循环各自现造默认 client，只读环境变量）。
+  // 这里幂等（不覆盖已有环境变量），CLI 已经落过时这次调用什么都不做。
+  applyEndpointEnv(config);
   return new Runner(config, assets, agentName, persistTraces);
 }

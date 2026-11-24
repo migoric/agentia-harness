@@ -5,6 +5,7 @@ import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { effectiveModel } from '../run/app.js';
 import { costOf } from '../run/cost.js';
+import { applyEndpointEnv } from '../run/endpoint.js';
 import { manifestFor } from './manifest.js';
 import type { FailureMode, LessonEntry, Proposal } from './types.js';
 
@@ -74,7 +75,11 @@ export class LlmProposer implements Proposer {
       /** 单条模式提不出方案时的回执（CLI 用它打印，而不是静默吞掉） */
       onSkip?: (modeId: string, reason: string) => void;
     } = {},
-  ) {}
+  ) {
+    // 与 createRunner 同款：提案器在没注入 client 时自建 AgentApp（默认 client 只读
+    // 环境变量），库用户直接构造它时 endpoint 段必须先生效 —— 幂等，不覆盖已有 env
+    applyEndpointEnv(config);
+  }
 
   get costUsd(): number | undefined {
     return this.known ? this.spentUsd : undefined;
