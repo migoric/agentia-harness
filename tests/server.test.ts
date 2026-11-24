@@ -64,7 +64,7 @@ async function withServer<T>(
 }
 
 describe('HTTP 面', () => {
-  it('/health 报 agent、资产指纹与排队数', async () => {
+  it('/health 报 agent、资产指纹、排队数与鉴权模式', async () => {
     await withServer({}, async (base) => {
       const r = await fetch(`${base}/health`);
       assert.equal(r.status, 200);
@@ -73,21 +73,45 @@ describe('HTTP 面', () => {
       assert.equal(body.agent, 'main@1');
       assert.equal(typeof body.assets, 'string');
       assert.equal(body.queued, 0);
+      assert.equal(body.maxQueue, 8);
+      assert.equal(body.auth, 'loopback');
     });
   });
 
-  it('GET /run ⇒ 405 且带 allow: POST', async () => {
+  it('/v1/health 与 /health 是同一个端点（版本前缀不影响探针）', async () => {
     await withServer({}, async (base) => {
-      const r = await fetch(`${base}/run`);
+      const r = await fetch(`${base}/v1/health`);
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as Record<string, unknown>;
+      assert.equal(body.ok, true);
+    });
+  });
+
+  it('GET /v1/run ⇒ 405 且带 allow: POST', async () => {
+    await withServer({}, async (base) => {
+      const r = await fetch(`${base}/v1/run`);
       assert.equal(r.status, 405);
       assert.equal(r.headers.get('allow'), 'POST');
+    });
+  });
+
+  it('旧路径 /run 仍可用（历史别名，行为与 /v1/run 完全一样）', async () => {
+    const client = scriptedClient([endTurn('结论：别名可用')]);
+    await withServer({ client }, async (base) => {
+      const r = await fetch(`${base}/run`, {
+        method: 'POST',
+        body: JSON.stringify({ task: '做点事' }),
+      });
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as Record<string, unknown>;
+      assert.equal(body.text, '结论：别名可用');
     });
   });
 
   it('未知端点 ⇒ 404；空 task ⇒ 400', async () => {
     await withServer({}, async (base) => {
       assert.equal((await fetch(`${base}/nope`)).status, 404);
-      const r = await fetch(`${base}/run`, {
+      const r = await fetch(`${base}/v1/run`, {
         method: 'POST',
         body: JSON.stringify({ task: '   ' }),
       });
@@ -97,7 +121,7 @@ describe('HTTP 面', () => {
 
   it('请求体超上限 ⇒ 413（不是 422：这是「太大」，不是「不合法」）', async () => {
     await withServer({ maxBodyBytes: 32 }, async (base) => {
-      const r = await fetch(`${base}/run`, {
+      const r = await fetch(`${base}/v1/run`, {
         method: 'POST',
         body: JSON.stringify({ task: 'x'.repeat(200) }),
       });
@@ -107,10 +131,10 @@ describe('HTTP 面', () => {
     });
   });
 
-  it('POST /run 正常路径：文本、token、成本（定价模型 ⇒ 有读数）', async () => {
+  it('POST /v1/run 正常路径：文本、token、成本（定价模型 ⇒ 有读数）', async () => {
     const client = scriptedClient([endTurn('结论：已完成')]);
     await withServer({ client }, async (base) => {
-      const r = await fetch(`${base}/run`, {
+      const r = await fetch(`${base}/v1/run`, {
         method: 'POST',
         body: JSON.stringify({ task: '做点事' }),
       });
@@ -130,7 +154,7 @@ describe('HTTP 面', () => {
     await withServer(
       { client },
       async (base) => {
-        const r = await fetch(`${base}/run`, {
+        const r = await fetch(`${base}/v1/run`, {
           method: 'POST',
           body: JSON.stringify({ task: '做点事' }),
         });
@@ -155,7 +179,7 @@ describe('HTTP 面', () => {
 
     await withServer({ client }, async (base) => {
       const post = (task: string) =>
-        fetch(`${base}/run`, { method: 'POST', body: JSON.stringify({ task }) });
+        fetch(`${base}/v1/run`, { method: 'POST', body: JSON.stringify({ task }) });
       const [a, b] = await Promise.all([post('一'), post('二')]);
       assert.equal(a.status, 200);
       assert.equal(b.status, 200);
@@ -176,7 +200,7 @@ describe('HTTP 面', () => {
     const server = await startServer({ config, assets, port: 0, client });
     const base = `http://127.0.0.1:${server.port}`;
 
-    const inFlight = fetch(`${base}/run`, {
+    const inFlight = fetch(`${base}/v1/run`, {
       method: 'POST',
       body: JSON.stringify({ task: '慢任务' }),
     });
@@ -188,5 +212,127 @@ describe('HTTP 面', () => {
     assert.equal(r.status, 200, 'close 必须等在飞的请求跑完再返回');
     const body = (await r.json()) as Record<string, unknown>;
     assert.equal(body.text, '结论：慢但完整');
+  });
+});
+
+describe('HTTP 面的闸', () => {
+  const KEY_ENV = 'HARNESS_TEST_API_KEY';
+
+  /** 在 withServer 期间设置一个环境变量，结束后恢复原值（不污染同进程的其它测试） */
+  async function withEnv<T>(name: string, value: string | undefined, fn: () => Promise<T>) {
+    const prev = process.env[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+    try {
+      return await fn();
+    } finally {
+      if (prev === undefined) delete process.env[name];
+      else process.env[name] = prev;
+    }
+  }
+
+  it('配了 key ⇒ 不带凭据 401，带对的 200，带错的 401', async () => {
+    await withEnv(KEY_ENV, 's3cret', async () => {
+      const client = scriptedClient([endTurn('结论：过了闸')]);
+      await withServer({ client, apiKeyEnv: KEY_ENV }, async (base) => {
+        const post = (headers: Record<string, string>) =>
+          fetch(`${base}/v1/run`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...headers },
+            body: JSON.stringify({ task: '做点事' }),
+          });
+
+        const none = await post({});
+        assert.equal(none.status, 401);
+        assert.equal(none.headers.get('www-authenticate'), 'Bearer');
+        const nbody = (await none.json()) as { code?: string };
+        assert.equal(nbody.code, 'run.unauthorized');
+
+        const wrong = await post({ authorization: 'Bearer nope' });
+        assert.equal(wrong.status, 401);
+
+        // 方案名大小写不敏感（RFC 7235），别让客户端因为 `bearer` 被拒
+        const ok = await post({ authorization: 'bearer s3cret' });
+        assert.equal(ok.status, 200);
+        const body = (await ok.json()) as Record<string, unknown>;
+        assert.equal(body.text, '结论：过了闸');
+      });
+    });
+  });
+
+  it('配了 key 但环境变量是空的 ⇒ 拒绝启动（空 key 不能退化成「不用鉴权」）', async () => {
+    await withEnv(KEY_ENV, '', async () => {
+      const root = project();
+      const config = loadConfig(root);
+      const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+      await assert.rejects(
+        () => startServer({ config, assets, port: 0, apiKeyEnv: KEY_ENV }),
+        (e: unknown) => e instanceof Error && /空 key/.test(e.message),
+      );
+    });
+  });
+
+  it('/health 不需要 key（探针要能打），但会报出当前是 key 模式', async () => {
+    await withEnv(KEY_ENV, 's3cret', async () => {
+      await withServer({ apiKeyEnv: KEY_ENV }, async (base) => {
+        const r = await fetch(`${base}/health`);
+        assert.equal(r.status, 200);
+        const body = (await r.json()) as Record<string, unknown>;
+        assert.equal(body.auth, 'key');
+      });
+    });
+  });
+
+  it('队列满 ⇒ 429 + retry-after（不排无限长的队），跑完就恢复', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const client = scriptedClient([
+      async () => {
+        await gate;
+        return endTurn('结论：慢一点');
+      },
+    ]);
+
+    await withServer({ client, maxQueue: 1 }, async (base) => {
+      const post = () =>
+        fetch(`${base}/v1/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: '占住队列' }),
+        });
+
+      const first = post();
+      // 等到它真的进了 run（/health 的 queued 是本进程唯一的观测点）
+      for (let i = 0; i < 50; i++) {
+        const h = (await (await fetch(`${base}/health`)).json()) as { queued?: number };
+        if (h.queued === 1) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const h = (await (await fetch(`${base}/health`)).json()) as { queued?: number };
+      assert.equal(h.queued, 1, '第一个请求应已在队列里');
+
+      const rejected = await post();
+      assert.equal(rejected.status, 429);
+      assert.equal(rejected.headers.get('retry-after'), '1');
+      const rbody = (await rejected.json()) as { code?: string };
+      assert.equal(rbody.code, 'run.queue_full');
+
+      release();
+      const ok = await first;
+      assert.equal(ok.status, 200, '释放后第一个请求应正常完成');
+    });
+  });
+
+  it('鉴权先于读请求体：超大 body 也得先过闸（否则 401 变成内存放大器）', async () => {
+    await withEnv(KEY_ENV, 's3cret', async () => {
+      await withServer({ apiKeyEnv: KEY_ENV, maxBodyBytes: 16 }, async (base) => {
+        const r = await fetch(`${base}/v1/run`, {
+          method: 'POST',
+          body: JSON.stringify({ task: 'x'.repeat(200) }),
+        });
+        assert.equal(r.status, 401, '没凭据时不该因为 body 大小先拿到 413');
+      });
+    });
   });
 });

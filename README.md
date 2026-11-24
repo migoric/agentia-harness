@@ -333,7 +333,7 @@ harness rsi regress     采纳之后那些用例还通过吗（有回归退出�
   --revert              检测到回归就自动回滚（仍过指纹校验）
 harness rsi propose --from <json>  登记手写 L1 提案（不调模型）
 harness rsi accept --from <json>   手写提案也过完整验证门才采纳
-harness serve           起 HTTP 服务（POST /run、GET /health）
+harness serve           起 HTTP 服务（POST /v1/run、GET /health）
 harness patch <diff>    验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
   --yes                 验证通过后落盘（代码补丁必须人工确认）
   --verify "npm test"   覆盖配置里的验证命令（`code.verify`）
@@ -355,6 +355,32 @@ frontmatter 里的未知 `expect_*`、CLI 的未知 flag、非数字的 `--timeo
 或用 `--from-report` 从那份报告按 traceId 反查（报告里带每条用例的 `task`）；前缀匹配到多条时拒绝，写文件不接受歧义。生成的断言只有 `expect_ok: true`，注释里列出观察到的工具、技能与
 收尾状态 —— trace 记的是**实际行为**，不是**正确行为**；把当时调过的工具固化成断言，等于把
 错误一起固化。结果类断言（`expect_contains` / `expect_matches`）要人补。已有的用例文件不会被覆盖。
+
+## HTTP 面
+
+`harness serve` 起一个最小服务，给**别的进程**调这个 agent。它不是产品：要会话、
+审批、SSE，用 agentia 的 `transport/`。
+
+```bash
+curl -s localhost:8787/v1/run -H 'content-type: application/json' \
+  -d '{"task":"看下这个 issue 该给谁"}' | jq .text
+```
+
+三道闸，缺省都是安全的那一侧：
+
+| 配置               | 缺省    | 行为                                                                                        |
+| ------------------ | ------- | ------------------------------------------------------------------------------------------- |
+| `server.apiKeyEnv` | 不设    | 只接受**回环地址**。设了就必须带 `authorization: Bearer <该环境变量的值>`；变量为空拒绝启动 |
+| `server.maxQueue`  | `8`     | 排队数（含在跑的那个）到上限返回 `429` + `retry-after: 1`                                   |
+| `--timeout <ms>`   | 10 分钟 | 超时返回 `504`，但 trace 仍完整落盘                                                         |
+
+```json
+{ "server": { "apiKeyEnv": "HARNESS_API_KEY", "maxQueue": 8 } }
+```
+
+路径带 `/v1` 前缀；`/run` 是历史别名，行为完全一样。`GET /health` 不需要 key
+（探针要能打），返回 `{ ok, agent, assets, uptimeMs, queued, maxQueue, auth }`，
+其中 `auth` 告诉你这台机器当前是 `key` 还是 `loopback`。
 
 ## 设计不变量
 
@@ -412,8 +438,9 @@ L1 改的是提示词，能修的是「模型理解错了」。有些失败改�
 - **不做并行分支编排**：并行留给工具层（`maxToolConcurrency`）。两套并行的闸比没有闸更危险。
 - **`suspended` 不在本层**：等审批 / 等时刻交给外层 run 的 `approvals`。图的检查点与 HITL 挂起是两种中断，混在一起会让「续跑」有两个互相不知道的状态源。
 - **没有自己的预算账本**：累计成本靠外层 run 或宿主推进。
-- **server 是缝不是产品**：只有 `/run` 与 `/health`。要会话、审批、SSE，用 agentia 的 `transport/`。
-- **依赖走本地路径**：`@migor/agentia` 用 `file:../agentia`（上游尚未发 npm）。发版前需改成版本号。
+- **server 是缝不是产品**：只有 `/v1/run` 与 `/health`。要会话、审批、SSE，用 agentia 的 `transport/`。
+- **超时与配额只管单进程**：请求串行、队列有上限、单请求有超时；没有跨进程调度与
+  分布式限流。多副本请在前面加一层网关，或按副本数自行分摊。
 - **真模型验证只跑了 `run` / `eval`，没跑完整 `rsi` 采纳**：DeepSeek 官方端点上的实测数字
   见 `examples/starter/README.md`。提示词质量、工具选择这类问题只有真模型答得了，本仓的
   脚本测试答不了；离线 e2e 覆盖的是 fetch / SSE / 重试 / 成本换算那一层。
@@ -455,7 +482,7 @@ HTTP 面（含并发峰值必须为 1）。另有 `tests/architecture.test.ts` �
 ## 参与
 
 约定只有一份： [`AGENTS.md`](./AGENTS.md)（它同时是 AI 编码助手的权威入口）。人的流程——
-本地并排检出的原因、提交前必须跑什么、几条会红的硬约定——见 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
+本地怎么装依赖、提交前必须跑什么、几条会红的硬约定——见 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。
 
 发现安全问题请走 [私有通道](https://github.com/migoric/agentia-harness/security/advisories/new)，
 不要开公开 issue（见 [`SECURITY.md`](./SECURITY.md)）。

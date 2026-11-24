@@ -74,8 +74,8 @@ function costSuffix(usd: number | undefined): string {
 /**
  * `harness eval` —— 跑评测集。
  *
- * `--save <path>` 存报告，`--compare <path>` 与旧报告比并过门：这两条命令合起来
- * 就是「改之前跑一次、改之后跑一次」的完整用法，不需要人工比对数字。
+ * `--save <path>` 存报告，之后用 `harness report <基线> <候选>` 过回归门：
+ * 两条命令合起来就是「改之前跑一次、改之后跑一次」的完整用法，不需要人工比对数字。
  */
 export async function evalCommand(ctx: CliContext): Promise<number> {
   const tuning = tuningOf(ctx);

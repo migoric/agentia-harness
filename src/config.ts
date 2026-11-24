@@ -64,6 +64,21 @@ export interface HarnessConfig {
   readonly codeVerify: readonly string[];
   /** 验证命令的超时（毫秒），缺省 10 分钟 */
   readonly codeVerifyTimeoutMs: number;
+  /**
+   * 装 HTTP 服务鉴权 key 的**环境变量名**（`server.apiKeyEnv`）。
+   *
+   * 缺席 = 只在回环地址上接受请求（本地开发、单机脚本的常态）。一旦对外监听，
+   * 必须配它 —— 「没配 key 但绑了 0.0.0.0」是唯一会让一个评测基座变成公开
+   * 烧钱接口的组合，所以 `serve` 在这种情况下拒绝启动，而不是警告一句继续跑。
+   */
+  readonly serverApiKeyEnv: string | undefined;
+  /**
+   * HTTP 服务的队列上限（含正在跑的那一个），超了返回 429。
+   *
+   * 没有上限的队列等于没有反压：请求照收、内存照涨、调用方拿到的是越来越长的
+   * 等待而不是「现在别来」。缺省 8 —— 串行执行下的排队深度，超过它延迟已经不可用。
+   */
+  readonly serverMaxQueue: number;
 }
 
 export const CONFIG_FILENAME = 'harness.config.json';
@@ -106,6 +121,7 @@ interface RawConfig {
   code?: unknown;
   endpoint?: unknown;
   pricing?: unknown;
+  server?: unknown;
 }
 
 /** 顶层键白名单：拼错一个键（如 `modle`）静默吃缺省是最难查的一类错 */
@@ -121,6 +137,7 @@ const CONFIG_KEYS: readonly string[] = [
   'code',
   'endpoint',
   'pricing',
+  'server',
 ];
 
 export function loadConfig(root: string): HarnessConfig {
@@ -149,6 +166,7 @@ export function loadConfig(root: string): HarnessConfig {
     pricing: readPricing(raw.pricing),
     ...readEndpoint(raw.endpoint),
     ...readCode(raw.code),
+    ...readServer(raw.server),
   };
 }
 
@@ -178,14 +196,54 @@ function readEndpoint(v: unknown): { baseURL: string | undefined; apiKeyEnv: str
   }
   const envName = readString(o.apiKeyEnv, 'endpoint.apiKeyEnv');
   if (envName === undefined) return { baseURL: url, apiKeyEnv: DEFAULTS.apiKeyEnv };
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envName)) {
+  return { baseURL: url, apiKeyEnv: envNameOf(envName, 'endpoint.apiKeyEnv') };
+}
+
+/**
+ * 「值应该是环境变量名」这一条只有一个实现。
+ *
+ * 两个地方要它（模型端点的 key、HTTP 服务的 key），而**把 key 本身填进配置文件**
+ * 是同一个错，配错后的症状也一样（配置会被提交，密钥进 git）。分开写会漂移成
+ * 「一边拦一边放」，所以共用这一处。
+ */
+function envNameOf(value: string, where: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
     throw new HarnessError(
       'config.invalid',
-      `配置字段 "endpoint.apiKeyEnv" 应填**环境变量名**（如 DEEPSEEK_API_KEY），` +
-        `key 本身放 .env（收到 "${envName}"）`,
+      `配置字段 "${where}" 应填**环境变量名**（如 DEEPSEEK_API_KEY），` +
+        `key 本身放 .env（收到 "${value}"）`,
     );
   }
-  return { baseURL: url, apiKeyEnv: envName };
+  return value;
+}
+
+const SERVER_DEFAULTS = { maxQueue: 8 } as const;
+
+/**
+ * `server` 段：HTTP 面的两道闸。
+ *
+ * 都是**上线前才需要**的东西（本地回环跑不需要），所以缺席必须落到安全的缺省：
+ * 不给 `apiKeyEnv` 就只服务回环地址；不给 `maxQueue` 就是 8。反过来（默认放行、
+ * 默认无限排队）是那种平时看不出来、被扫到才发现的设计。
+ */
+function readServer(v: unknown): { serverApiKeyEnv: string | undefined; serverMaxQueue: number } {
+  if (v === undefined) {
+    return { serverApiKeyEnv: undefined, serverMaxQueue: SERVER_DEFAULTS.maxQueue };
+  }
+  const o = objectAt(v, '配置字段 "server"', fail);
+  onlyKeys(o, '配置字段 "server"', ['apiKeyEnv', 'maxQueue'], fail);
+
+  const raw = readString(o.apiKeyEnv, 'server.apiKeyEnv');
+  const envName = raw === undefined ? undefined : envNameOf(raw, 'server.apiKeyEnv');
+
+  const maxQueue = readNumber(o.maxQueue, 'server.maxQueue') ?? SERVER_DEFAULTS.maxQueue;
+  if (!Number.isInteger(maxQueue) || maxQueue <= 0) {
+    throw new HarnessError(
+      'config.invalid',
+      `配置字段 "server.maxQueue" 必须为正整数（收到 ${String(o.maxQueue)}）—— 0 会让所有请求都被拒`,
+    );
+  }
+  return { serverApiKeyEnv: envName, serverMaxQueue: maxQueue };
 }
 
 /** `pricing` 段：每条都要有 `in` / `out` 两个非负有限数，键名只认那四个 */

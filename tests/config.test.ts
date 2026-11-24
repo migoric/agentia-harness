@@ -190,6 +190,34 @@ describe('端点桥接 —— 配置 → 进程环境变量', () => {
   });
 });
 
+describe('配置 —— server 段', () => {
+  it('缺省：不设 key（只服务回环）、队列上限 8', () => {
+    const c = cfg(undefined);
+    assert.equal(c.serverApiKeyEnv, undefined);
+    assert.equal(c.serverMaxQueue, 8);
+  });
+
+  it('解析 apiKeyEnv 与 maxQueue', () => {
+    const c = cfg({ server: { apiKeyEnv: 'HARNESS_API_KEY', maxQueue: 2 } });
+    assert.equal(c.serverApiKeyEnv, 'HARNESS_API_KEY');
+    assert.equal(c.serverMaxQueue, 2);
+  });
+
+  it('apiKeyEnv 写成 key 本身也炸（同一套判据，与 endpoint 共用）', () => {
+    assertConfigError(() => cfg({ server: { apiKeyEnv: 'sk-abc123' } }), /环境变量名/);
+  });
+
+  it('maxQueue 必须是正整数 —— 0 会让所有请求都被拒，负数同理', () => {
+    assertConfigError(() => cfg({ server: { maxQueue: 0 } }), /正整数/);
+    assertConfigError(() => cfg({ server: { maxQueue: -1 } }), /正整数/);
+    assertConfigError(() => cfg({ server: { maxQueue: 1.5 } }), /正整数/);
+  });
+
+  it('server 里的未知字段不静默忽略（拼错＝闸没开）', () => {
+    assertConfigError(() => cfg({ server: { maxqueue: 4 } }), /不认识的字段 "maxqueue"/);
+  });
+});
+
 describe('未定价提示', () => {
   it('内置价格表里的模型不提示', () => {
     assert.equal(unpricedHint(cfg({ model: 'claude-opus-5' }), 'claude-opus-5'), undefined);

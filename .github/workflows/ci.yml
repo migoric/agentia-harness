@@ -19,44 +19,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # 依赖是 `file:../agentia` —— 两个仓必须并排 checkout，否则 npm 解析不到。
-      # 这也是本仓「暂不发 npm」的直接后果：等上游发布后换成版本号即可删掉第二个 checkout。
+      # 依赖是 registry 上的版本区间（^0.10.12），不再需要并排 checkout 上游仓。
+      # 这同时就是「发布的包能不能被外人装」的日常验证：CI 装的是别人装的那一份。
       - uses: actions/checkout@v7
-        with:
-          path: harness
-      - uses: actions/checkout@v7
-        with:
-          repository: migoric/agentia
-          path: agentia
 
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
-          # 两份 lockfile 各自缓存：只写 harness 那份会让上游每次都从头装
           cache: npm
-          cache-dependency-path: |
-            agentia/package-lock.json
-            harness/package-lock.json
-
-      # 上游要先构建：file: 依赖指向它的 dist（.d.ts 在那），而 dist 不进 git
-      - run: npm ci && npm run build
-        working-directory: agentia
 
       - run: npm ci
-        working-directory: harness
 
       - run: npm run check
-        working-directory: harness
 
       # 真实客户端路径（fetch / SSE / 重试 / usage→成本）只有这一条能覆盖：
       # 单元测试里的 client 全是注入的，那一层代码本来只能靠读代码相信
       - name: 离线 e2e —— 用本地 wire 协议端点跑真实 HTTP 客户端
-        working-directory: harness
         run: npm run e2e:offline
 
       # 资产锁是新工程的绿线：示例工程能 init 出来且一开始就一致
       - name: 冒烟 —— init 出来的工程 lock --check 必须是绿的
-        working-directory: harness
         run: |
           tmp=$(mktemp -d)
           node dist/cli.js init "$tmp"

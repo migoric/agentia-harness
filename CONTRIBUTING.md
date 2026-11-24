@@ -5,20 +5,15 @@
 
 ## 准备本地环境
 
-本仓依赖 `@migor/agentia`，声明写的是 `file:../agentia` —— 两个仓必须**并排**放：
+依赖 `@migor/agentia@^0.10.12`，直接从 registry 装，不需要并排检出上游：
 
 ```bash
-mkdir -p ~/src && cd ~/src
-git clone https://github.com/migoric/agentia.git
 git clone https://github.com/migoric/agentia-harness.git
-
-cd agentia && npm ci && npm run build   # 上游必须先构建
-cd ../agentia-harness && npm install
+cd agentia-harness && npm ci
 ```
 
-为什么先构建上游：`file:` 依赖指向的是它的 `dist/`（类型声明在那），而 `dist` 不进 git。
-为什么不用 registry 上的版本号：本仓还没有发布，且这里要验的恰恰是**未发布的上游**——
-把版本号钉死会让「上游改了语义」变成一件安静的事。
+只有要**同时改上游**时才需要本地链接 —— 用 `npm link` 临时覆盖，别把 `file:` 写回
+`package.json`：那会让发布出去的包在别人机器上装不上，而 CI 装不到的依赖等于没验过。
 
 Node ≥ 20（`engines` 声明），CI 跑 22（`.nvmrc` 同值）。
 

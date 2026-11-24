@@ -22,8 +22,17 @@ export async function serveCommand(ctx: CliContext): Promise<number> {
     host,
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    apiKeyEnv: ctx.config.serverApiKeyEnv,
+    maxQueue: ctx.config.serverMaxQueue,
   });
-  say(`harness 在 http://${host}:${running.port} 上（POST /run，GET /health）`);
+  const auth =
+    ctx.config.serverApiKeyEnv === undefined
+      ? '无鉴权（只接受回环地址）'
+      : `Bearer（key 来自 ${ctx.config.serverApiKeyEnv}）`;
+  say(
+    `harness 在 http://${host}:${running.port} 上（POST /v1/run，GET /health）\n` +
+      `  鉴权：${auth} · 队列上限：${ctx.config.serverMaxQueue}`,
+  );
 
   await new Promise<void>((done) => {
     const stop = (): void => done();

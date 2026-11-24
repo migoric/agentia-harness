@@ -33,7 +33,7 @@
     "harness": "node --import tsx src/cli.ts"
   },
   "dependencies": {
-    "@migor/agentia": "file:../agentia"
+    "@migor/agentia": "^0.10.12"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.2.0",

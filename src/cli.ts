@@ -73,10 +73,10 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --verify "npm test"   覆盖配置里的验证命令
     --timeout <ms>        验证命令超时（缺省 10 分钟）
     --revert              回滚最近一次代码补丁
-  serve                   起 HTTP 服务（POST /run、GET /health）
+  serve                   起 HTTP 服务（POST /v1/run、GET /health）
     --port <n>            端口（缺省 8787）
-    --host <ip>           监听地址（缺省 127.0.0.1）
-    --timeout <ms>        单次 /run 的超时（超时按 504 返回）
+    --host <ip>           监听地址（缺省 127.0.0.1；对外监听需配 server.apiKeyEnv）
+    --timeout <ms>        单次 /v1/run 的超时（超时按 504 返回）
 
 通用参数：
   --root <目录>           工程根（缺省 cwd）
