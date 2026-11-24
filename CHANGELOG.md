@@ -8,6 +8,34 @@
 
 ### 新增
 
+- **报告能表达「实际用过哪些模型」**：`EvalReport` / `CaseResult` 增 `models` 与
+  `fallbackUsed`。`model` 是单值，而配了 fallback 链之后**一次 run 内部**就可能换模型 ——
+  单值会把「A 降级到 B 才跑完」记成「用了 A」，于是 `sameModel` 判据静默失效：基线降级过、
+  候选没降级，通过率差异被读成 agent 的进退步。
+  三处证据全部现成（`llm.turn` 的 span 名就是模型 id、换环写 `llm.fallback { from, to,
+  errorType }`、根属性 `config.fallbacks` 是**声明**链），所以不需要上游加接口，也不用改
+  装配 —— 这一版**没有**接 fallbacks，只是让报告不再说谎。
+  报告层**任一条用例没记就整体缺席**（与 `costKnown` 同一条纪律）：并集少一个模型得出的
+  「两边一样」比「不知道」贵得多。
+  `gate` 的 `sameModel` 改判**集合**（老报告退回单值），并新增 `modelNote` 并入 `reason`：
+  集合不同、发生过降级，两条都会让通过率不再可读成改动效果。降级本身**不否决** ——
+  否决权只给回归与成本。
+
+- **`harness diff <A> <B>`**：两份 trace 差在哪。`harness trace` 回答「这次发生了什么」，
+  `harness report` 回答「整体有没有变好」，人在修问题时问的是第三个问题。此前这个位置是
+  空的：门说得出「case 3 从通过变失败」，说不出「第 2 回合少了 search」。
+  用上游 `diffTraces`（配对是结构性的：`llm.turn` 只按 kind 配对、模型名降格成字段差，
+  正是「换模型重跑」这个主用例）。缺侧写「仅 A 有」「仅 B 有」，不写成 `（无） → （无）`。
+  `rsi` 在门否决且两边都有 traceId 时打印一行带前提的命令（需那两次跑都开了 `--keep-traces`）——
+  刻意**不自动 diff**：评测默认不落 trace，自动版在默认配置下拿不到任何一条，会静默变成空操作。
+
+- **用例可以声明走不走记忆**：frontmatter `memory_keys: [notes, profile]`。记忆一旦参与，
+  「同一条用例两次跑结果不同」就是**设计如此**而不是抖动；用例不声明，评测与线上测的是不是
+  同一个东西就无从判断。缝开在 run 级（`RunOptions.memory`，agentia 的语义就是 run 边界
+  水合/回写），不是装配级。每次尝试各造一个空 store —— 上次尝试写进黑板的键若留下，重试
+  就不是「同样条件再来一次」。种子只支持「空 store + 这些键」：格式等业务框架定下来再定。
+  `RunOutcome` 同时增 `models` / `fallbacks`（可选，外部构造的 outcome 不必填）。
+
 - **报告自带环境事实**：`EvalReport` 增 `model` / `harnessVersion` / `finishedAt` /
   `caseFingerprint`（全部可选，老报告照样能读）。`harness report` 会打印「模型 A → B ·
   agent · harness 版本」，发现不一致时给出警告。没有这四个字段时，「两份报告能不能比」
@@ -152,6 +180,10 @@
 
 ### 不兼容（库调用方）
 
+- **`gate().sameModel` 的判据从「单值相等」变成「集合相等」**。单模型场景结果不变；
+  跨模型的合法实验（「换个便宜模型还过不过」）在预置了 fallback 链时说法会变：以前
+  两边主模型同名就判 `true`，现在按**实际尝试过的模型集合**判。想回到「只看主模型」的
+  语义，就传没有 `models` 的旧报告（那条路仍在）。
 - **`Proposer.propose()` 返回 `{ proposals, cost: { usd, known } }`**，不再是裸数组 +
   `costUsd` / `costKnown` 两个属性。实现自定义提案器的地方要改：`cost.known === false`
   表示这次花费**不可知**（不是 0）—— 预算闸只在这时为真时生效。
@@ -175,6 +207,11 @@
 - 手写提案 JSON 的未知字段、非法 `kind` / `target` / `id`（id 会当文件名用）、空 `after`。
 
 ### 修复
+
+- **train / holdout 视图不再丢掉模型事实**：`splitReport()` 重建视图时没传环境，
+  于是门在视图上比对时 `sameModel` 恒为「不知道」，而那本来是可确认的。
+  **`caseFingerprint` 刻意不带**：它是整批用例的哈希，带进子集视图会让基线（全量指纹）
+  与候选（只跑 train 得到的子集指纹）永不相等，每轮验证都被误判成 `case_set_changed`。
 
 - **`/v1/run` 的超时从真正开始执行起算**。此前超时闸在**入队前**创建：队列深度 8 ×
   单任务最长 10 分钟时，排在最后的那个请求完全可能「还没开始跑就已经超时」，而它拿到

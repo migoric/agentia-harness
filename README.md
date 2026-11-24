@@ -171,6 +171,7 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 | `expect_skills`                               | 必须命中的技能                                             |
 | `expect_ok`                                   | 是否正常收尾（缺省 true）                                  |
 | `expect_max_tokens` / `expect_max_iterations` | token / 轮数上限                                           |
+| `memory_keys: [notes, profile]`               | 这条用例走记忆（水合这些键）。缺席 = 裸 agent，不接记忆    |
 
 跑评测的三个旋钮，各自的语义都是刻意的：
 
@@ -181,6 +182,12 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 | `--retries <n>`     | `0`    | **只对「跑崩了」重试**（`stopReason=error`）。断言失败重试等于用采样次数掩盖问题            |
 
 报告里带 `skillHits`（每个资产被多少条用例走过），这是提案「该改哪个文件」的数据来源。
+
+**记忆要显式声明。** `memory_keys` 不写就是不接记忆。这不是省略而是刻意的缺省：线上若接了
+记忆，同一条用例两次跑结果本就该不同，评测会把这读成「抖动」，回归门永远在抖；反过来，
+线上有记忆而评测没有，通过率再高也证明不了线上。每次尝试用的是**全新空 store**（重试若带着
+上次的残留，就不是「同样条件再来一次」）。预置记忆内容暂不支持 —— 那个格式要等业务框架的
+记忆形态定下来再定。
 
 **留出集不是附加题。** 提案和验收用同一批评测，闭环必然过拟合：模型照着验收用例改，
 门当然放行。给一部分用例写 `split: holdout` 后，归因与候选排序只看 train；留出集在
@@ -249,7 +256,7 @@ expect_tool_counts: [read_file:2]
 
 为什么不用加权总分：权重随手一调就能让任何结论成立。字典序的每一条都能用一句人话解释，而 RSI 最贵的成本不是算力，是**人重新信任一套自己看不懂的提示词**。
 
-**「可比」是需要证据的判断，不是默认成立。** 报告会带上 `model` / `harnessVersion` / `finishedAt` / `caseFingerprint`；`harness report` 把它们打出来，不一致时告警。用例集变了默认拒绝（加一条候选没做的用例会让分母变大、通过率下降，那不是「整体退步」，是基线过期）；确实只想比同名用例时加 `--allow-case-set-change`，此时 token 与成本也只在同一批用例上算，结论里写明「只比对 N 条」。
+**「可比」是需要证据的判断，不是默认成立。** 报告会带上 `model` + `models`（实际用过哪些）/ `harnessVersion` / `finishedAt` / `caseFingerprint`；`harness report` 把它们打出来，不一致时告警。`model` 是生效值（单值），`models` 是**实际尝试过的集合** —— 配了 fallback 链之后两者在降级发生时就分叉，而「能不能比」要读的是后者：基线降级过、候选没降级，通过率差异会被读成 agent 的进退步。用例集变了默认拒绝（加一条候选没做的用例会让分母变大、通过率下降，那不是「整体退步」，是基线过期）；确实只想比同名用例时加 `--allow-case-set-change`，此时 token 与成本也只在同一批用例上算，结论里写明「只比对 N 条」。
 
 判「更贵」优先用**美元成本**（`trace.totalUsage.costEstimate` 逐条累加），两边都有读数时不再看 token ——token 只对同一模型可比，而「换模型」是合法提案。任一条用例没有成本读数（模型不在价格表内）就退回 token，并把 `costBasis` 一并记录：结论用的是哪个指标，必须可复核。「不知道花了多少」与「花了 0」是两件事，混成一个数会让成本门静默失效。
 
@@ -317,6 +324,8 @@ harness report <基线.json> <候选.json>   两份报告比一次并过门；�
   --max-token-growth <r> / --max-cost-growth <r>   两种门阈值
   --allow-case-set-change  用例集不同时不拒绝，只比对同名用例（缺省拒绝）
 harness trace <traceId> 打印那次运行的 span 树（可用前缀；--tail n 只看最后 n 条）
+harness diff <A> <B>    两份 trace 差在哪（run 级 + span 级；id 可用前缀）
+  --json                输出结构化差异（TraceDiff）
 harness harvest <traceId>  把一条 trace 回流成 evals/harvest-*.md 回归用例
   --task <文本>         任务原文（trace 里没存，必须外来）
   --from-report <文件>  或从 eval --save 的报告按 traceId 反查
@@ -355,6 +364,8 @@ frontmatter 里的未知 `expect_*`、CLI 的未知 flag、非数字的 `--timeo
 没人会往拼写上想。预算与迭代上限还必须是正数：`0` 在 agentia 里是「不设上限」。
 
 `harness trace` 的存在理由：RSI 归因读的是**汇总**（失败模式、命中统计），人查问题读的是**链路**（谁调了谁、在哪一步炸的）。没有它，`.workspace/traces.jsonl` 只是一堆没人会去 grep 的日志。
+
+`harness diff` 接着回答第三个问题：**这两次差在哪一步**。门只说得出「case 3 从通过变失败」，说不出「第 2 回合少了 search」——后者才是能改的东西。两条 trace 都从 `traces.jsonl` 按 id 前缀取（所以要 `--keep-traces` 才有），差异分 run 级（status、用量、根属性如 `model`）与 span 级（谁多了一步、哪个字段变了、谁只剩一侧）。`rsi` 在门否决时会顺手打印该跑哪条 `diff` —— 只给命令不自动执行：默认不落 trace 时自动版拿不到任何一条，会静默变成空操作。
 
 `harness harvest` 把链路变成回归用例。先跑 `harness eval --keep-traces --save report.json`
 把 trace 留下。trace 里**没有任务原文**（root span 只记模型与配置），所以必须给 `--task`，
