@@ -2,8 +2,8 @@
 
 [![npm](https://img.shields.io/npm/v/@migor/agentia-harness.svg)](https://www.npmjs.com/package/@migor/agentia-harness)
 [![ci](https://github.com/migoric/agentia-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/migoric/agentia-harness/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](./package.json)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)][repo-license]
+[![node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)][repo-pkg]
 
 把「一个能跑的 agent」变成「一套能被评测、被改进、被回滚的 agent 工程」。
 
@@ -53,7 +53,7 @@ npm i -g @migor/agentia-harness            # 或全局装
 
 CLI 只有一个 bin，名叫 `harness`。**装进项目时**用 `npx harness <命令>`（bin 在 `node_modules/.bin/`）；**全局装**之后才是裸 `harness <命令>`。下文示例都写成裸 `harness`，按你的装法换算。
 
-要改本仓本身，见 [`CONTRIBUTING.md`](./CONTRIBUTING.md)。注意 `npm run harness -- init` **必须带目标目录**，否则模板会写进仓库根。
+要改本仓本身，见 [`CONTRIBUTING.md`][repo-contrib]。注意 `npm run harness -- init` **必须带目标目录**，否则模板会写进仓库根。
 
 ## 跑起来
 
@@ -162,7 +162,7 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 
 ## 换模型 / 换端点
 
-`harness.config.json` 写三段就够，完整可跑的工程见 [`examples/starter/`](./examples/starter/)：
+`harness.config.json` 写三段就够，完整可跑的工程见 [`examples/starter/`][repo-starter]：
 
 ```json
 {
@@ -220,20 +220,30 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 - [命令与退出码][doc-cli] —— 全量参数、退出码、未知字段纪律
 - [运维面][doc-ops] —— 端点、HTTP 服务、L2 代码补丁、已知边界、测试
 - [设计不变量][doc-inv] —— 九条不能妥协的约束
-- [`AGENTS.md`](./AGENTS.md) —— 编码约定，同时是 AI 助手的权威入口
-- [`CONTRIBUTING.md`](./CONTRIBUTING.md) —— 人的流程：装依赖、提交前跑什么、几条会红的硬约定
+- [`AGENTS.md`][repo-agents] —— 编码约定，同时是 AI 助手的权威入口
+- [`CONTRIBUTING.md`][repo-contrib] —— 人的流程：装依赖、提交前跑什么、几条会红的硬约定
 
 ## 参与
 
-安全问题请走 [私有通道](https://github.com/migoric/agentia-harness/security/advisories/new)，不要开公开 issue（见 [`SECURITY.md`](./SECURITY.md)）。
+安全问题请走 [私有通道](https://github.com/migoric/agentia-harness/security/advisories/new)，不要开公开 issue（见 [`SECURITY.md`][repo-security]）。
 
 ## 许可
 
-[MIT](./LICENSE) © 2026 migor
+[MIT][repo-license] © 2026 migor
 
+<!--
+链接定义一律用绝对 GitHub URL：npm 只把 README 快照进页面，docs/ 与根目录的其它文件
+都不进 tarball（`files` 只有 dist），相对链接在 npm 上会 404。
+-->
 [doc-assets]: https://github.com/migoric/agentia-harness/blob/main/docs/assets.md
 [doc-evals]: https://github.com/migoric/agentia-harness/blob/main/docs/evals.md
 [doc-rsi]: https://github.com/migoric/agentia-harness/blob/main/docs/rsi.md
 [doc-cli]: https://github.com/migoric/agentia-harness/blob/main/docs/cli.md
 [doc-ops]: https://github.com/migoric/agentia-harness/blob/main/docs/operations.md
 [doc-inv]: https://github.com/migoric/agentia-harness/blob/main/docs/invariants.md
+[repo-agents]: https://github.com/migoric/agentia-harness/blob/main/AGENTS.md
+[repo-contrib]: https://github.com/migoric/agentia-harness/blob/main/CONTRIBUTING.md
+[repo-license]: https://github.com/migoric/agentia-harness/blob/main/LICENSE
+[repo-pkg]: https://github.com/migoric/agentia-harness/blob/main/package.json
+[repo-security]: https://github.com/migoric/agentia-harness/blob/main/SECURITY.md
+[repo-starter]: https://github.com/migoric/agentia-harness/tree/main/examples/starter
