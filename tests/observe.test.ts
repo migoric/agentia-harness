@@ -101,7 +101,10 @@ describe('runSuite —— 并发、超时、重试', () => {
     });
     assert.equal(typeof report.model, 'string');
     assert.ok((report.model ?? '').length > 0, '模型名不能是空串');
-    assert.equal(report.harnessVersion, '0.2.0', '版本号来自 package.json，不是手写常量');
+    // 这个字面量**故意**和 package.json 独立：被测代码若哪天改成硬编码常量、或从别处读
+    // 版本，只有这里会红。代价是每次发版要一起改 —— 别为了省这一步改成读 package.json，
+    // 那会让断言退化成「两处都从同一处读」的空断言。
+    assert.equal(report.harnessVersion, '0.3.0', '版本号来自 package.json，不是手写常量');
     assert.ok(
       Number.isFinite(Date.parse(report.finishedAt ?? '')),
       'finishedAt 必须是可解析的时刻',
