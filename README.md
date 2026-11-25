@@ -1,5 +1,6 @@
 # agentia-harness
 
+[![npm](https://img.shields.io/npm/v/@migor/agentia-harness.svg)](https://www.npmjs.com/package/@migor/agentia-harness)
 [![ci](https://github.com/migoric/agentia-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/migoric/agentia-harness/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%E2%89%A520-brightgreen.svg)](./package.json)
@@ -40,11 +41,35 @@ harness rsi                         # 采集→归因→提案→验证→采纳
 
 ## 快速开始
 
+**不安装，先看它能生成什么：**
+
+```bash
+npx @migor/agentia-harness init my-agent    # 写出一个可跑的最小工程
+cd my-agent
+npx @migor/agentia-harness eval             # 会失败 —— 还没有模型凭据，这是预期的
+```
+
+**装进项目（长期用）：**
+
+```bash
+npm i -D @migor/agentia-harness
+npx harness init                            # 一并生成 harness.lock.json
+```
+
+CLI 只有一个 bin，名叫 `harness`。**装进项目时**用 `npx harness <命令>`（bin 在
+`node_modules/.bin/`）；**全局装**（`npm i -g @migor/agentia-harness`）之后才是裸
+`harness <命令>`。下文所有示例都写成裸 `harness`，按你的安装方式换算即可。
+
+**从源码开发本仓：**
+
 ```bash
 npm install
-npx @migor/agentia-harness init     # 或 harness init；会一并生成 harness.lock.json
-harness eval                         # 会失败 —— 因为没有模型凭据
+npm run harness -- init ../my-agent         # 直接跑 src（tsx），不必先 build
 ```
+
+`npm run` 的 cwd 是仓库根，所以这条 `init` **必须带目标目录** —— 不带参数会把模板写进
+仓库自己，`agents/` `evals/` `skills/` 立刻变成未跟踪文件。这一条只对本仓开发者有意义，
+使用者用上面的 `npx` 那两条。
 
 配好 `.env`（如 `ANTHROPIC_API_KEY=...`）后：
 
