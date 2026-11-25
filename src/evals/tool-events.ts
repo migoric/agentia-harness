@@ -1,12 +1,11 @@
-import type { Trace } from '@migor/agentia';
-import { TOOL_INPUT_EVENT } from '../run/trace-events.js';
+import { TOOL_INPUT_EVENT, type Trace } from '@migor/agentia';
 
 /**
  * 从 trace 还原工具调用。
  *
- * 事件名从 `run/trace-events.ts` 取：agentia 的公共导出面里没有它（它属于「core 词汇表」，
- * 只对内部三层可见），所以那边集中了全部字面量副本。上游改名时只改一处，而不是
- * 在每个读取点各找一次。
+ * 事件名从 `@migor/agentia` 取（0.10.14 起与 `llm.fallback` / `config.fallbacks` 等 7 个
+ * trace 词汇一起进了公共导出面）。此前是本地字面量副本，注释里写着「上游没外发」——
+ * 那份副本已经删掉了：抄字面量的失败方式不是报错，是上游改名后**静默读到 0 条**。
  */
 
 export interface ToolInvocation {

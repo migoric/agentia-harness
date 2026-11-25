@@ -1,5 +1,4 @@
-import type { Span, Trace } from '@migor/agentia';
-import { CONFIG_FALLBACKS_ATTR, LLM_FALLBACK_EVENT } from './trace-events.js';
+import { CONFIG_FALLBACKS_ATTR, LLM_FALLBACK_EVENT, type Span, type Trace } from '@migor/agentia';
 
 /**
  * 从 trace 读「这次跑到底用了哪个模型」—— **报告里模型集合的唯一来源**。

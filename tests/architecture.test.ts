@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { describe, it } from 'node:test';
+import {
+  CONFIG_FALLBACKS_ATTR,
+  CONTEXT_BUDGET_EVENT,
+  LLM_FALLBACK_EVENT,
+  TOOL_INPUT_EVENT,
+  TOOL_OUTPUT_EVENT,
+  USAGE_MISSING_EVENT,
+  USAGE_PARTIAL_EVENT,
+} from '@migor/agentia';
 
 /**
  * 架构守卫 —— 用测试守住「分层」这件事。
@@ -42,6 +51,91 @@ function importsOf(file: string): { spec: string; resolved: string | null }[] {
 
 function label(file: string): string {
   return relative(SRC, file);
+}
+
+/**
+ * 上游 trace 词汇表 —— 0.10.14 起全部在 `@migor/agentia` 的公共导出面上。
+ *
+ * 本仓此前复制过一份字面量（`run/trace-events.ts`，已随 0.10.14 删除）。下面两条守卫
+ * 保证它不会再长回来。理由不是整洁：抄字面量的失败方式**不是报错**，而是上游改名之后
+ * 静默读到 0 条 —— 工具序列变成空、`usage.missing` 判据恒真。那种错不会有人发现，
+ * 直到两份跑分被拿来比较并得出「没有退步」。
+ */
+const TRACE_VOCAB = [
+  'tool.input',
+  'tool.output',
+  'usage.missing',
+  'usage.partial',
+  'context.budget',
+  'llm.fallback',
+  'config.fallbacks',
+] as const;
+
+/**
+ * 取**代码区**的字符串字面量，跳过注释。
+ *
+ * 为什么不用 TS 的 AST：本仓装的是 typescript 7（native port），它的 JS 入口只剩
+ * `version` / `versionMajorMinor`，`createSourceFile` 已经没有了（`node -e` 探过）。
+ * 为一个 7 元素的黑名单再引一个解析器不划算，所以这里做一次够用的扫描。
+ *
+ * 为什么不能用裸正则：`src/run/model-read.ts` 的注释里就写着「上游会记 `usage.partial`」。
+ * 正则会把这种**注释里的举例**算成违规，于是下一个人只好把守卫删掉 —— 那等于没有守卫。
+ */
+function codeLiterals(file: string): { text: string; line: number }[] {
+  const text = readFileSync(file, 'utf8');
+  const out: { text: string; line: number }[] = [];
+  let line = 1;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\n') {
+      line++;
+      i++;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) {
+        if (text[i] === '\n') line++;
+        i++;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      const startLine = line;
+      let value = '';
+      let interpolated = false;
+      i++;
+      while (i < text.length) {
+        const c = text[i];
+        if (c === '\\') {
+          // 转义原样保留（不解释 \n / \u）：本仓词汇表里没有转义，保留反而不会误判
+          value += c + (text[i + 1] ?? '');
+          i += 2;
+          continue;
+        }
+        if (c === quote) {
+          i++;
+          break;
+        }
+        // 带插值的模板串不是一个静态字面量，不参与比对
+        if (quote === '`' && c === '$' && text[i + 1] === '{') interpolated = true;
+        if (c === '\n') line++;
+        value += c;
+        i++;
+      }
+      if (!interpolated) out.push({ text: value, line: startLine });
+      continue;
+    }
+    i++;
+  }
+  return out;
 }
 
 describe('架构守卫', () => {
@@ -107,5 +201,39 @@ describe('架构守卫', () => {
       const lines = readFileSync(file, 'utf8').split('\n').length;
       assert.ok(lines <= MAX, `${label(file)} 有 ${lines} 行（上限 ${MAX}）—— 拆成两个模块`);
     }
+  });
+
+  it('trace 词汇只从 @migor/agentia 取，src/ 里不许自己写一份', () => {
+    const offenders: string[] = [];
+    for (const file of walk(SRC)) {
+      for (const lit of codeLiterals(file)) {
+        if ((TRACE_VOCAB as readonly string[]).includes(lit.text)) {
+          offenders.push(`${label(file)}:${lit.line}  '${lit.text}'`);
+        }
+      }
+    }
+    assert.equal(
+      offenders.length,
+      0,
+      `src/ 里出现了 trace 词汇的字面量 —— 从 @migor/agentia import 同名常量：\n  ${offenders.join('\n  ')}`,
+    );
+  });
+
+  it('trace 词汇的取值与上游约定逐字一致（改一个字符就是改协议）', () => {
+    const actual: Record<(typeof TRACE_VOCAB)[number], string> = {
+      'tool.input': TOOL_INPUT_EVENT,
+      'tool.output': TOOL_OUTPUT_EVENT,
+      'usage.missing': USAGE_MISSING_EVENT,
+      'usage.partial': USAGE_PARTIAL_EVENT,
+      'context.budget': CONTEXT_BUDGET_EVENT,
+      'llm.fallback': LLM_FALLBACK_EVENT,
+      'config.fallbacks': CONFIG_FALLBACKS_ATTR,
+    };
+    assert.deepEqual(
+      actual,
+      Object.fromEntries(TRACE_VOCAB.map((v) => [v, v])),
+      '上游改了某个 trace 词汇的值 —— 这是协议变更，不是重构：本仓的 trace 读取口径、' +
+        '以及「两份跑分可比」的判据都建立在这些名字上，改完要同步这条表和 CHANGELOG',
+    );
   });
 });

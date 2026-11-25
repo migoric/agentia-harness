@@ -306,6 +306,25 @@
   新增两条用例走**配置 + `.env`** 而不是环境变量 —— 只有这条路能证明配置里的
   `baseURL` / `apiKeyEnv` 真的接到了客户端上（对照：缺 key 时退出码 2）。
 
+### 内部（依赖下限 0.10.14；trace 词汇改由上游供）
+
+- **`@migor/agentia` 下限 `^0.10.13` → `^0.10.14`**：`^0.10.x` 的实际区间是
+  `>=0.10.13 <0.11.0`，0.10.14 一发，CI 就会装新版而本地 lockfile 钉旧版 —— 那种
+  「本地绿、CI 红」不值得赌一次。
+- **删掉 `src/run/trace-events.ts`**（本地字面量副本），三处引用改为从 `@migor/agentia`
+  import 同名常量：`run/cost.ts`（`USAGE_MISSING_EVENT`）、`run/model-read.ts`
+  （`LLM_FALLBACK_EVENT` / `CONFIG_FALLBACKS_ATTR`）、`evals/tool-events.ts`
+  （`TOOL_INPUT_EVENT`）。常量名与上游逐字相同，所以这次是纯机械替换。
+  副本里另外三个（`TOOL_OUTPUT_EVENT` / `USAGE_PARTIAL_EVENT` / `CONTEXT_BUDGET_EVENT`）
+  本仓从未读过，随之一起删除。
+- **加两条架构守卫**（`tests/architecture.test.ts`）：`src/` 里出现这 7 个字面量就红
+  （按代码区扫描，注释里的举例不算）；以及这 7 个常量在上游的**取值**必须与约定逐字一致。
+  后一条的意义是：上游若改值，这是协议变更，得红在我们自己这里，而不是等两份跑分
+  被拿来比较时才暴露。
+- **测试夹具继续写字面量，这是刻意的**。夹具若也 import 常量，上游改名时夹具跟着变，
+  「工具序列非空」「降级事件被读到」这些行为断言就永远绿 —— 夹具必须是独立证人。
+  所以守卫只扫 `src/`。
+
 ## [0.2.0] - 2026-11-20
 
 ### 新增

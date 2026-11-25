@@ -1,11 +1,10 @@
-import type { Trace } from '@migor/agentia';
-import { USAGE_MISSING_EVENT } from './trace-events.js';
+import { type Trace, USAGE_MISSING_EVENT } from '@migor/agentia';
 
 /**
  * 从 trace 读成本的**唯一口径**，run / eval / RSI 提案器共用。
  *
- * 事件名从 `trace-events.ts` 取（上游没进公共导出面，那里集中了全部字面量副本）——
- * 上游改名时只需改一个文件，而不是在每个读取点各找一次。
+ * 事件名从 `@migor/agentia` 取（0.10.14 起进公共导出面）。不再有本地副本 ——
+ * 那种副本在改名时不会报错，只会让「这一轮没报计量」判成「报了」。
  */
 
 /** 这一轮有没有回合「根本没报计量」 */
