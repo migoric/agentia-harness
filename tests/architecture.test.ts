@@ -6,6 +6,9 @@ import {
   CONFIG_FALLBACKS_ATTR,
   CONTEXT_BUDGET_EVENT,
   LLM_FALLBACK_EVENT,
+  MENU_HASH_ATTR,
+  MENU_NAMES_ATTR,
+  PROMPTS_VERSIONS_ATTR,
   TOOL_INPUT_EVENT,
   TOOL_OUTPUT_EVENT,
   USAGE_MISSING_EVENT,
@@ -69,6 +72,11 @@ const TRACE_VOCAB = [
   'context.budget',
   'llm.fallback',
   'config.fallbacks',
+  // 2026-11-27：菜单签名与 @Prompt 资产版本表 —— 与上面几个同性质（包外读者出现 ⇒
+  // 必须从上游取）。它们此前是 agentia `engine/loop.ts` 里的裸字面量，0.10.16 起外发。
+  'tools.menuHash',
+  'tools.names',
+  'prompts.versions',
 ] as const;
 
 /**
@@ -228,6 +236,9 @@ describe('架构守卫', () => {
       'context.budget': CONTEXT_BUDGET_EVENT,
       'llm.fallback': LLM_FALLBACK_EVENT,
       'config.fallbacks': CONFIG_FALLBACKS_ATTR,
+      'tools.menuHash': MENU_HASH_ATTR,
+      'tools.names': MENU_NAMES_ATTR,
+      'prompts.versions': PROMPTS_VERSIONS_ATTR,
     };
     assert.deepEqual(
       actual,

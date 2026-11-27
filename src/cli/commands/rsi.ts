@@ -6,7 +6,8 @@ import { splitReport } from '../../evals/split.js';
 import { acceptProposal, revertLast } from '../../rsi/accept.js';
 import { Budget } from '../../rsi/budget.js';
 import { validateHoldout } from '../../rsi/holdout.js';
-import { writeCycle } from '../../rsi/loop.js';
+import { appendHoldoutUse, holdoutProgress, pickHoldoutBatch } from '../../rsi/holdout-batch.js';
+import { makeCycleId, writeCycle } from '../../rsi/loop.js';
 import { readProposal, writeProposal } from '../../rsi/manual.js';
 import { LlmProposer } from '../../rsi/propose.js';
 import { type RoundStopReason, runRounds } from '../../rsi/rounds.js';
@@ -66,6 +67,9 @@ function proposeFrom(ctx: CliContext): number {
  */
 export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise<number> {
   const proposal = readProposal(fromFlag(ctx, 'accept'));
+  // 轮次 id 先生成：留出集消耗账要用它，而记账发生在 `writeCycle` **之前** ——
+  // 反过来的话，写记录失败会让这一批在账上"看起来没用过"，下一轮白送一次复用
+  const cycleId = makeCycleId();
   const assets = assetsOf(ctx);
   const shared = {
     config: ctx.config,
@@ -91,14 +95,23 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
     warn(`提案 ${proposal.id} 没有任何用例变好（仅"没变差"），拒绝采纳`);
     return 1;
   }
+  let holdoutBatch: CycleReport['holdoutBatch'];
   if (views.holdout !== undefined) {
+    // 与自动 RSI **同一条**分批规则：手写提案不是绕开消耗账的后门。
+    // 否则「自动路径的留出集用完了」只对自动路径成立，人对同一条门就免费了
+    const progress = holdoutProgress(ctx.config, views.holdout.cases);
+    const pick = pickHoldoutBatch(progress);
+    if (!pick.ok) {
+      warn(`留出集不可用，拒绝采纳 ${proposal.id}：${pick.reason}`);
+      return 1;
+    }
     let holdout: HoldoutResult | undefined;
     try {
       holdout = await validateHoldout({
         ...shared,
         proposal,
         baseline: views.holdout,
-        cases: views.holdoutCases,
+        cases: pick.batch.cases,
       });
     } catch (e) {
       // 与 runCycle 同口径：验证本身出问题记为「拒绝」，不让命令以异常退出
@@ -112,6 +125,22 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
       warn(`留出集未通过，拒绝采纳 ${proposal.id}：${holdout.gate.reason}`);
       return 1;
     }
+    // 消耗与结果无关：这一次观测已经发生，即使结论是"不通过"
+    appendHoldoutUse(ctx.config, {
+      at: Date.now(),
+      cycleId,
+      proposalId: proposal.id,
+      phase: pick.batch.phase,
+      cases: pick.batch.cases,
+      passed: holdout.gate.ok,
+      reason: holdout.gate.reason,
+    });
+    holdoutBatch = {
+      phase: pick.batch.phase,
+      cases: pick.batch.cases,
+      priorUses: pick.batch.used,
+      enforced: progress.enforced,
+    };
     say(`留出集验证通过：${holdout.gate.reason}`);
   }
   const dryRun = boolFlag(ctx.flags, 'dry-run');
@@ -132,18 +161,23 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
   // 手工采纳也要落一份轮次记录：`rsi regress` 的基准取自 cycle JSON 的 candidate，
   // 没有记录就只能报「找不到基准」—— 而那意味着手工采纳的改动永远监测不到
   try {
-    writeCycle(ctx.config, {
-      modes: [],
-      proposals: [proposal],
-      verified: [outcome],
-      accepted: [proposal],
-      rejected: [],
-      baseline: fullBaseline,
-      dryRun,
-      costUsd: budget.spentUsd,
-      costKnown: budget.costKnown,
-      budget: undefined,
-    });
+    writeCycle(
+      ctx.config,
+      {
+        modes: [],
+        proposals: [proposal],
+        verified: [outcome],
+        accepted: [proposal],
+        rejected: [],
+        baseline: fullBaseline,
+        dryRun,
+        costUsd: budget.spentUsd,
+        costKnown: budget.costKnown,
+        budget: undefined,
+        ...(holdoutBatch === undefined ? {} : { holdoutBatch }),
+      },
+      cycleId,
+    );
   } catch (e) {
     // 采纳已经落盘了，记录写失败不能反过来把这条命令判死 —— 但要喊出来：
     // 缺这条记录等于这条改动以后没法做回归监测
@@ -156,6 +190,9 @@ async function cycle(ctx: CliContext): Promise<number> {
   const rounds = roundsFlag(ctx);
   const maxModes = numFlag(ctx.flags, 'max-modes');
   const maxVerify = numFlag(ctx.flags, 'max-verify');
+  // 配额的触发间隔可临时收窄（例如 CI 里想每 2 条改动就强制简化一次）。
+  // 只开放 every：`maxGrowth` 与 `minReduction` 改的是判据的语义，不该由命令行随手调
+  const shrinkEvery = numFlag(ctx.flags, 'shrink-every');
   const dryRun = boolFlag(ctx.flags, 'dry-run');
   // `--max-cost` 覆盖配置：CI 里想临时收紧预算不必改文件
   const maxCost = numFlag(ctx.flags, 'max-cost') ?? ctx.config.maxCostUsd;
@@ -175,6 +212,7 @@ async function cycle(ctx: CliContext): Promise<number> {
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...(maxVerify !== undefined ? { maxVerify } : {}),
     ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
+    ...(shrinkEvery !== undefined ? { shrinkPolicy: { every: shrinkEvery } } : {}),
     ...(dryRun ? { dryRun: true } : {}),
     ...tuningOf(ctx),
     ...(asJson
@@ -227,12 +265,17 @@ function stopLabel(reason: RoundStopReason): string {
       return '本轮没有可采纳的改动';
     case 'no_failures':
       return '没有失败样本';
+    case 'shrink_stalled':
+      return '简化轮没交出可用的删除（配额到期，只接受净简化提案）';
   }
 }
 
 /** 单轮的完整回执（多轮时每轮打一遍） */
 function renderCycle(report: CycleReport): void {
   say(`轮次 ${report.cycleId}（记录 ${report.path}）`);
+  if (report.shrink?.required === true) {
+    say(`简化轮：${report.shrink.reason ?? '配额已到期'}`);
+  }
   if (report.modes.length === 0) {
     say('没有失败样本，无需改进');
     return;
@@ -268,6 +311,16 @@ function renderCycle(report: CycleReport): void {
     );
     const hint = diffHint(v);
     if (hint !== undefined) say(`        ${hint}`);
+  }
+  if (report.holdoutBatch !== undefined) {
+    const b = report.holdoutBatch;
+    // 复用（只在未分期工程里可能）必须明说：它不会报错，但那一次验证的假阳性已经
+    // 不再是 5%，而通过率看起来与第一次一模一样
+    const reuse =
+      b.priorUses > 0
+        ? `（⚠️ 复用第 ${b.priorUses + 1} 次${b.enforced ? '' : '：工程未分期留出集'}）`
+        : '';
+    say(`\n留出集第 ${b.phase} 批 ${b.cases.length} 条${b.enforced ? '' : '（未分期）'}${reuse}`);
   }
   if (report.accepted.length > 0) {
     const suffix = report.dryRun ? '（dry-run，未落盘）' : '';

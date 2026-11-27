@@ -44,6 +44,15 @@ export interface ProposeContext {
    * （「说停还在花钱」），恰好打在成本归因最在意的位置。
    */
   readonly signal?: AbortSignal | undefined;
+  /**
+   * 简化轮指令 —— 由净简化配额触发时传入，缺席 = 不是简化轮。
+   *
+   * 为什么是「指令」而不是「过滤」：过滤只能拒掉变胖的提案（`runCycle` 确实也这么做，
+   * 那一步省的是评测钱），但模型不知道这一轮只许删，它会一次次交出"再补一段"的方案，
+   * 然后被一条条拒掉 —— 一整轮下来零产出，人会读成「RSI 坏了」。把意图说进提示词，
+   * 才有机会真的拿到一条可用的简化。
+   */
+  readonly shrink?: { readonly reason: string; readonly minReduction: number } | undefined;
 }
 
 /** 提案这一步的产出与它自己的花费（两个都要，缺一个就得靠「先调再读属性」的时序约定） */
@@ -73,7 +82,8 @@ const PROPOSER_SYSTEM = `你是一个 agent 提示词工程师。你的唯一工
 硬约束（违反任意一条，你的输出会被直接丢弃）：
 1. 只输出**正文全文**。不要输出 frontmatter（--- 之间那段），不要输出 diff，不要输出解释性前后缀。
 2. 不许假设有新的工具、新的技能、新的文件可读。你只能改措辞、结构、检查清单、输出格式要求。
-3. 不许删掉原文里已有的关键要求。你的改动应该是**增补或收紧**，而不是缩减。
+3. 不许删掉原文里已有的关键要求。默认的改动方向是**增补或收紧**，而不是缩减。
+   唯一的例外是「简化轮」：那时正文里会明确写出来，按那一节的指令做。
 4. 正文必须自包含：它会被单独当作一次子运行的 system prompt 使用，看不到对话历史。
 
 判断依据：如果失败是「该调的工具没调」，就在正文里写清触发条件与调用顺序；如果是「结论不对」，就在正文里固定输出格式与必须覆盖的要点；如果是「太贵/太长」，就收紧步骤数与输出长度。
@@ -206,7 +216,7 @@ export class LlmProposer implements Proposer {
         : {}),
       ...(this.config.maxCostUsd !== undefined ? { maxCostUsd: this.config.maxCostUsd } : {}),
     });
-    const prompt = renderPrompt(mode, current, lessons);
+    const prompt = renderPrompt(mode, current, lessons, ctx.shrink);
     const { result } = await app.run([{ role: 'user', content: prompt }], {
       ...(ctx.client !== undefined ? { client: ctx.client } : {}),
       ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
@@ -239,7 +249,12 @@ export class LlmProposer implements Proposer {
   }
 }
 
-function renderPrompt(mode: FailureMode, current: string, lessons: readonly LessonEntry[]): string {
+function renderPrompt(
+  mode: FailureMode,
+  current: string,
+  lessons: readonly LessonEntry[],
+  shrink: ProposeContext['shrink'],
+): string {
   const evidence = mode.samples
     .map(
       (s, i) =>
@@ -256,14 +271,41 @@ function renderPrompt(mode: FailureMode, current: string, lessons: readonly Less
 
 ## 失败证据
 ${evidence}
-${renderLessons(lessons)}
+${renderLessons(lessons)}${renderShrink(shrink, current)}
 ## 当前正文（你的输出将完整替换它）
 """
 ${current}
 """
 
 ## 你的任务
-改写上面这段正文，使这类失败不再发生。直接输出新正文。改不出有把握的方案就输出 NONE。`;
+${shrink === undefined ? '改写上面这段正文，使这类失败不再发生。直接输出新正文。改不出有把握的方案就输出 NONE。' : '在满足简化轮要求的前提下改写上面这段正文（能顺手修掉这次失败更好，但**变小**是硬要求）。直接输出新正文；这段正文确实没有可删的冗余就输出 NONE。'}`;
+}
+
+/**
+ * 简化轮指令。
+ *
+ * 为什么要给出具体字数上限：只说「请简化」，模型会做措辞层面的微调（把"应该"改成"须"），
+ * 长度几乎不变，而配额判据是硬性的 —— 于是每一轮都产出"看起来简化了、其实没变短"的
+ * 提案，全部被拒。给出目标字数，模型才有可能真的合并段落。
+ *
+ * 也刻意说清「简化 ≠ 删要求」：这一段提示词最容易被删掉的是文件格式与工具约束，
+ * 而它们恰恰是回归门与留出集会抓的东西 —— 让人读的时候知道这是有代价的。
+ */
+export function renderShrink(shrink: ProposeContext['shrink'], current: string): string {
+  if (shrink === undefined) return '';
+  const before = current.trim().length;
+  const limit = Math.floor(before * (1 - shrink.minReduction));
+  return `
+## 本轮是简化轮（优先级高于上面所有「增补」类要求）
+${shrink.reason}
+
+这一轮**只接受净简化**：删掉重复的、合并同义的、去掉没起作用的步骤与检查项。
+- 不许新增段落、不许新增检查项、不许把同一件事换个说法再讲一遍；
+- 改动后正文必须比现在**至少短 ${(shrink.minReduction * 100).toFixed(0)}%**
+  （现在 ${before} 字 ⇒ 目标不超过 ${limit} 字）。这是硬门槛，不达标会被直接丢弃；
+- 简化不等于删要求：输出格式、必须调用的工具、必须覆盖的要点这些硬约束要保留。
+  该删的是复述、堆叠的举例、以及同一件事说两遍。
+`;
 }
 
 /**

@@ -1,10 +1,11 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import type { WorkspacePaths } from '../config.js';
+import type { HarnessConfig, WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { objectAt, readJsonObject, requiredText } from '../util/shape.js';
+import { atomicWrite } from './journal.js';
 import { cyclesDir } from './paths.js';
-import type { Proposal, VerifyOutcome } from './types.js';
+import type { CycleReport, Proposal, VerifyOutcome } from './types.js';
 
 /**
  * `cycles/*.json` 的**唯一读入口**。
@@ -25,7 +26,14 @@ import type { Proposal, VerifyOutcome } from './types.js';
  * `accepted[].id`。这三条正好是三个消费点（`findCandidate` / `ledger` / `rounds`）会
  * 立刻解引用的路径 —— 校验深度按「谁会立刻崩」定，不追求完整 schema。
  */
-export const CYCLE_SCHEMA = 2;
+/**
+ * 3 = 2026-11-27：`verified[].proposal.patch` 之外多了两个**只增字段** ——
+ * `holdoutBatch`（这一轮用了哪批留出集）与 `shrink`（这一轮是不是简化轮）。
+ * 两者都是可选的，所以读侧不必迁移：缺失就是「那一轮还没有这个概念」，
+ * 而不是「那一轮没这么做」。bump 的意义在于**写入侧自证**，让将来的人能凭版本号
+ * 判断一份记录"知道哪些事"。
+ */
+export const CYCLE_SCHEMA = 3;
 
 export interface CycleRecord {
   readonly path: string;
@@ -115,4 +123,40 @@ function timeOf(at: string | undefined, cycleId: string): number {
   if (m === null) return 0;
   const t = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}.${m[5]}Z`);
   return Number.isNaN(t) ? 0 : t;
+}
+
+/**
+ * `2026-11-20T14-30-05-123Z`：ISO 直接当文件名，字典序即时间序。
+ *
+ * 对外导出是因为**手工采纳**也要先拿到 id 才能记留出集消耗（见 `acceptFrom`）：
+ * 消耗账在轮次记录之前写，两者必须用同一个 id，否则「这一批被哪一轮用掉的」对不上。
+ */
+export function makeCycleId(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-');
+}
+
+/**
+ * 落一份轮次记录。**自动 RSI 与手工采纳共用** —— 手工 `rsi accept` 若不落记录，
+ * `rsi regress` 就永远找不到那次采纳的基准（于是手工采纳的改动永远监测不到），
+ * `rsi ledger` 也只能把它标成 `unverified`。
+ */
+export function writeCycle(
+  config: HarnessConfig,
+  body: Omit<CycleReport, 'cycleId' | 'path' | 'at'>,
+  cycleId = makeCycleId(),
+): CycleReport {
+  // 时刻写成**字段**，不靠文件名反解：文件名是给人看的，不该同时是数据接口
+  const at = new Date().toISOString();
+  const path = persistCycle(config, { at, cycleId, ...body });
+  return { at, ...body, cycleId, path };
+}
+
+function persistCycle(config: HarnessConfig, report: Omit<CycleReport, 'path'>): string {
+  const dir = cyclesDir(config);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${report.cycleId}.json`);
+  // 与 journal 同款：写到一半崩了不能留下半个 cycle JSON —— 那是 RSI 唯一的审计依据。
+  // `schema` 一起写：读取侧（cycles.ts）靠它做迁移，没有它只能按「版本化之前」猜
+  atomicWrite(path, `${JSON.stringify({ ...report, schema: CYCLE_SCHEMA }, null, 2)}\n`);
+  return path;
 }

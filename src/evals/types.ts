@@ -12,6 +12,7 @@
  * 全部是规则式判定，没有一条依赖模型 —— 裁判不确定，RSI 就会把随机波动当进步。
  */
 import { fingerprint } from '../util/hash.js';
+import { aggregateHits, aggregateModels, unionOrUnknown } from './aggregate.js';
 
 export interface ToolArgExpect {
   readonly tool: string;
@@ -60,6 +61,18 @@ export interface EvalCase {
   readonly expect: EvalExpect;
   /** 缺省 `train`：老用例不必改一个字也能继续用 */
   readonly split?: EvalSplit | undefined;
+  /**
+   * 留出集的**批次号**（frontmatter `phase`，正整数）。只对 `split: holdout` 有意义。
+   *
+   * 存在的理由不是「分类好看」，是**让留出集可以被消耗**：一批只用一次，用完必须换批。
+   * 不分期时，30 轮 × 每轮 5% 显著性的累积假阳性约 78% —— 闭环越转越自信，
+   * 而每一轮的门都在「合法地」放过一点噪声（RRSI 的对照组就是这么长出来的）。
+   *
+   * 缺席 = 未分期：整份留出集算作**同一批**。此时消耗仍被记录、复用仍被计数并出声，
+   * 但**不硬拦** —— 老工程加一个字段之前，行为不该被悄悄改掉（那是 breaking change，
+   * 而且会被读成「RSI 忽然不干活了」）。声明了 `phase` 的工程才进入强制模式。
+   */
+  readonly phase?: number | undefined;
   /**
    * 这条用例要水合的记忆键（frontmatter `memory_keys`）。缺席 = 不接记忆（裸 agent）。
    *
@@ -136,10 +149,27 @@ export interface CaseResult {
    * 报告是 `harness evidence` / `harvest --from-report` 的唯一任务来源，分组也必须随它落盘。
    */
   readonly split?: EvalSplit | undefined;
+  /**
+   * 留出集的批次号（由 `runOne` 从用例透传）。缺席 = 未分期或不属于留出集。
+   *
+   * 报告必须带上它：`splitReport` 之后「哪一批被用掉了」只能从这一处读出来，
+   * 而消耗账又是**跨轮**的（下一轮读它才知道还剩哪批没用）。
+   */
+  readonly phase?: number | undefined;
   /** 本次实际调用过的技能（去重）—— RSI 据此判断「该改哪个文件」 */
   readonly skills: readonly string[];
   /** 本次实际委派过的子 agent（去重） */
   readonly subagents: readonly string[];
+  /**
+   * 本条的**菜单签名**（run 根属性 `tools.menuHash`，上游 0.10.15 起有常量名）。
+   *
+   * 与 `models` 并列而不是并进 `tokens` 那一堆：它回答的不是「花了多少」，而是
+   * 「这条用例被测的那个东西是不是同一个」。缺席 = 这条没挂工具（合法），
+   * 或这条的多个轮次出现了两个不同的菜单（那它的差异无法归因）。
+   */
+  readonly menuHash?: string | undefined;
+  /** 本条的提示词资产版本表（run 根属性 `prompts.versions`）；缺席 = 没有带版本的资产 */
+  readonly promptVersions?: string | undefined;
 }
 
 /**
@@ -221,6 +251,21 @@ export interface EvalReport {
   readonly models?: readonly string[] | undefined;
   /** 全轮降级次数（各用例求和）；缺席 = 老报告 */
   readonly fallbackUsed?: number | undefined;
+  /**
+   * 全轮的**菜单签名集合**（去重排序）；缺席 = 至少一条用例没记。
+   *
+   * 为什么是集合而不是单值：同一批用例里菜单理论上只有一个，但「多轮用例跑到一半换了
+   * 菜单」「一条裸用例没挂工具」都会让并集出现多个值。单值会把这两种情况压成一个数，
+   * 而它们对「能不能比」的含义完全不同 —— 一个该警示，一个只是没工具。
+   *
+   * 三条读法（与 `models` 同一条纪律）：
+   * - 缺席 ⇒ **不知道**（老报告 / 有跑崩的用例没留下根属性）—— 不能当「一样」用；
+   * - `[]` ⇒ 整批都没挂工具 —— 这是**可确认的一致**，不是不知道；
+   * - 多个值 ⇒ 这批用例内部菜单就不一致，通过率变化不能归因到单一次改动。
+   */
+  readonly menuHashes?: readonly string[] | undefined;
+  /** 全轮的提示词资产版本表（`name@ver` 去重排序）；缺席 / `[]` 的读法同上 */
+  readonly promptVersions?: readonly string[] | undefined;
   /** 本轮被用到的资产（按用例数降序）—— 提案选目标的数据来源 */
   readonly skillHits: readonly AssetHit[];
 }
@@ -239,6 +284,10 @@ export function caseSetFingerprint(cases: readonly EvalCase[]): string {
       followUps: c.followUps ?? [],
       expect: c.expect,
       split: c.split ?? 'train',
+      // 批次号进指纹：重新分期等于换了留出集，而「这批验过的东西」与之前那批不是同一把尺子。
+      // 只在有值时进 —— 给每条老用例平白加一个 `phase: undefined` 会让所有既有报告
+      // 立刻变成「用例集变了」（与下面 memoryKeys 同一个理由）。
+      ...(c.phase !== undefined ? { phase: c.phase } : {}),
       // 只在**非空**时进指纹：给每条老用例平白加一个 `memoryKeys: []` 会让所有
       // 既有报告立刻变成「用例集变了」，那不是判定标准变了，只是我们换了个写法
       ...(c.memoryKeys !== undefined && c.memoryKeys.length > 0
@@ -258,6 +307,8 @@ export function summarize(
   const passed = cases.filter((c) => c.passed).length;
   const priced = cases.filter((c) => c.costUsd !== undefined);
   const modelFacts = aggregateModels(cases);
+  const menuHashes = unionOrUnknown(cases, (c) => c.menuHash);
+  const promptVersions = unionOrUnknown(cases, (c) => c.promptVersions);
   return {
     total: cases.length,
     passed,
@@ -276,58 +327,10 @@ export function summarize(
     ...(env.finishedAt !== undefined ? { finishedAt: env.finishedAt } : {}),
     ...(env.model !== undefined ? { model: env.model } : {}),
     ...modelFacts,
+    // 条件展开：`[]` 与缺席是两件事（「确认没挂工具」vs「不知道」），
+    // 写成 `menuHashes: []` 会把两者压成同一个读数
+    ...(menuHashes !== undefined ? { menuHashes } : {}),
+    ...(promptVersions !== undefined ? { promptVersions } : {}),
     skillHits: aggregateHits(cases),
   };
-}
-
-/**
- * 全轮的模型事实 —— 并集与降级次数。
- *
- * **只要有一条用例没记，就整体返回空**（与 `costKnown` 同一条纪律）：并集少一个模型、
- * 次数少算几次，都会让 `sameModel` 得出「两边一样」的假结论；而假结论比「不知道」
- * 贵得多 —— 它会让人照着去改提示词。
- *
- * 两种「不知道」的处理不同，因为病因不同：
- * - 某条用例没有 trace（首轮就抛）⇒ 本轮确实无法确认模型集合；
- * - 有 trace 但一个 `llm.turn` 都没有 ⇒ 集合为空，不算「不知道」，只是没跑回合。
- */
-function aggregateModels(cases: readonly CaseResult[]): {
-  models?: readonly string[] | undefined;
-  fallbackUsed?: number | undefined;
-} {
-  if (cases.length === 0 || cases.some((c) => c.models === undefined)) return {};
-  const seen = new Set<string>();
-  const models: string[] = [];
-  for (const c of cases) {
-    for (const m of c.models ?? []) {
-      if (seen.has(m)) continue;
-      seen.add(m);
-      models.push(m);
-    }
-  }
-  const fallbackUsed = cases.reduce((sum, c) => sum + (c.fallbackUsed ?? 0), 0);
-  return models.length === 0 ? { fallbackUsed } : { models, fallbackUsed };
-}
-
-/**
- * 按资产聚合命中。同一个资产出现在 N 条用例里就是 N 条 `cases`。
- *
- * 重复调用（同一技能在一轮里被调 3 次）**不**重复计数：这里要回答的是「哪条用例
- * 走过它」，不是「调了几次」。调了几次看 trace，那才是它的位置。
- */
-function aggregateHits(cases: readonly CaseResult[]): AssetHit[] {
-  const byTarget = new Map<string, Set<string>>();
-  for (const c of cases) {
-    for (const name of c.skills) add(byTarget, `skill:${name}`, c.name);
-    for (const name of c.subagents) add(byTarget, `agent:${name}`, c.name);
-  }
-  return [...byTarget.entries()]
-    .map(([target, set]) => ({ target, cases: [...set].sort() }))
-    .sort((a, b) => b.cases.length - a.cases.length || a.target.localeCompare(b.target));
-}
-
-function add(map: Map<string, Set<string>>, target: string, caseName: string): void {
-  const set = map.get(target);
-  if (set === undefined) map.set(target, new Set([caseName]));
-  else set.add(caseName);
 }

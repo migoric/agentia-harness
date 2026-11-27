@@ -5,6 +5,7 @@ import { HarnessError } from '../errors.js';
 import type { GateOptions } from '../evals/gate.js';
 import { runCycle } from './loop.js';
 import type { Proposer } from './propose.js';
+import type { ShrinkPolicy } from './shrink.js';
 import type { CycleReport } from './types.js';
 
 /**
@@ -49,11 +50,18 @@ export interface RunRoundsOptions {
   readonly timeoutMs?: number | undefined;
   readonly concurrency?: number | undefined;
   readonly retries?: number | undefined;
+  /** 净简化配额的阈值（每轮现算状态，不跨轮维护游标） */
+  readonly shrinkPolicy?: ShrinkPolicy | undefined;
   /** 每轮结束后的回调（CLI 用它打印） */
   readonly onRound?: ((report: CycleReport, index: number) => void) | undefined;
 }
 
-export type RoundStopReason = 'rounds' | 'budget' | 'no_progress' | 'no_failures';
+export type RoundStopReason =
+  | 'rounds'
+  | 'budget'
+  | 'no_progress'
+  | 'no_failures'
+  | 'shrink_stalled';
 
 export interface RoundsReport {
   readonly rounds: readonly CycleReport[];
@@ -110,6 +118,7 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
       ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+      ...(opts.shrinkPolicy !== undefined ? { shrinkPolicy: opts.shrinkPolicy } : {}),
     });
     reports.push(report);
     priorSpent += report.costUsd;
@@ -120,7 +129,15 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
       break;
     }
     if (report.accepted.length === 0) {
-      stopReason = report.modes.length === 0 ? 'no_failures' : 'no_progress';
+      // 简化轮零采纳要单独说：这不是「改不动了」，是「这一轮被配额限定为只许删，
+      // 而模型没交出可用的删除」。两者的下一步完全不同（继续提 vs 人去删/放宽配额），
+      // 混成 no_progress 会让人对着一个"再跑一次"永远不会变的结果反复重跑
+      stopReason =
+        report.shrink?.required === true
+          ? 'shrink_stalled'
+          : report.modes.length === 0
+            ? 'no_failures'
+            : 'no_progress';
       break;
     }
   }

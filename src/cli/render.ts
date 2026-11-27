@@ -131,6 +131,10 @@ export function renderComparison(
     `环境  模型 ${fmtModel(baseline)} → ${fmtModel(candidate)} · ` +
       `agent ${baseline.agent} → ${candidate.agent} · ` +
       `harness ${baseline.harnessVersion ?? '未记录'} → ${candidate.harnessVersion ?? '未记录'}`,
+    // 菜单与资产版本是「这次到底被测了什么」的另外两半（模型是第一半）。放在环境行下面
+    // 而不是藏在明细里：通过率一掉，人第一个要排除的就是「我改的东西生效了吗」
+    `菜单  ${fmtFact(baseline.menuHashes)} → ${fmtFact(candidate.menuHashes)}`,
+    `版本  ${fmtFact(baseline.promptVersions)} → ${fmtFact(candidate.promptVersions)}`,
     '',
     `门：${g.ok ? 'PASS' : 'BLOCK'} (${g.code}) —— ${g.reason}`,
   ];
@@ -144,6 +148,30 @@ export function renderComparison(
   }
   if (!g.sameAgent) {
     lines.push('注意：两次跑分的 agent 不同（name@version 不一致）—— 比的可能不是同一个东西。');
+  }
+  // 菜单 / 资产版本：可比性的另外两半。与模型那条同一档 —— **只警示、不否决**：
+  // 「换菜单」「换资产版本」都是合法实验，但它们必须带着读，否则通过率的变化会被
+  // 全算到「提示词改得好不好」头上
+  if (factDiffers(baseline.menuHashes, candidate.menuHashes)) {
+    lines.push(
+      '注意：两次跑分的工具菜单签名不同 —— 通过率的变化里有一部分来自「模型能看见的工具变了」，' +
+        '不能整段读成提示词改动的效果。',
+    );
+  }
+  if (factDiffers(baseline.promptVersions, candidate.promptVersions)) {
+    lines.push(
+      '注意：两次跑分的提示词资产版本不同 —— 差异应首先归因到这几份资产，而不是模型或采样。',
+    );
+  }
+  if (factUnknown(baseline.menuHashes) || factUnknown(candidate.menuHashes)) {
+    lines.push(
+      '注意：菜单签名未记录（老报告，或有用例没留下根属性）—— 无法确认两次的工具菜单是否一致。',
+    );
+  }
+  if (factUnknown(baseline.promptVersions) || factUnknown(candidate.promptVersions)) {
+    lines.push(
+      '注意：提示词资产版本未记录（老报告，或资产没写 version）—— 无法确认两次的措辞是否一致。',
+    );
   }
   if (g.sameCaseSet === false) {
     if (g.onlyInBaseline.length === 0 && g.onlyInCandidate.length === 0) {
@@ -192,6 +220,30 @@ function fmtModel(r: EvalReport): string {
   const fb =
     r.fallbackUsed !== undefined && r.fallbackUsed > 0 ? `（降级 ${r.fallbackUsed} 次）` : '';
   return set.join(' + ') + fb;
+}
+
+/**
+ * 一组「可比性事实」的打字形态（菜单签名集合 / 资产版本集合）。
+ *
+ * 三档都必须能打出来，否则读数会被压平：`未记录` = 不知道（老报告 / 有用例没留根属性）、
+ * `（无）` = **确认没有**（裸用例没挂工具、资产没写 version）、多个值 = 这批内部就不一致。
+ * 把后两档都打成空串，等于把「确认没有」与「不知道」混成同一个读数 —— 门那套
+ * 成本判据踩过同一个坑（`costKnown`）。
+ */
+function fmtFact(set: readonly string[] | undefined): string {
+  if (set === undefined) return '未记录';
+  if (set.length === 0) return '（无）';
+  return set.length === 1 ? (set[0] ?? '') : `${set.join(' | ')}（多个）`;
+}
+
+/** 两边都**有读数**且不同 —— 只要有一边不知道，就不算「不同」（不知道 ≠ 不同）。 */
+function factDiffers(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  if (a === undefined || b === undefined) return false;
+  return a.join('\u0000') !== b.join('\u0000');
+}
+
+function factUnknown(x: readonly string[] | undefined): boolean {
+  return x === undefined;
 }
 
 /** span 级差异最多打这么多条 —— 再多的部分交给 `--json`，终端里刷屏等于没有输出 */

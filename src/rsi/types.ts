@@ -260,6 +260,41 @@ export interface CycleReport {
    * 「提案器到底有没有看到历史」—— 而它恰恰是最容易接线漏掉的一环。
    */
   readonly historyConsulted?: number | undefined;
+  /**
+   * 这一轮**实际用了哪一批**留出集，以及用之前它被用过几次。
+   *
+   * 缺席三义（读的人必须分得开，别压平）：
+   * - 工程没有留出集 ⇒ 这一轮根本没这一步；
+   * - `priorUses: 0` ⇒ 这一批是第一次用（正常）；
+   * - `priorUses: N > 0` ⇒ 未分期工程的复用，此时 `enforced` 为 false ——
+   *   假阳性正在累积，而系统按设计**没有拦**（拦了等于给老工程一个 breaking change）。
+   *
+   * 把 `enforced` 一起落盘，是因为「复用 N 次」这件事有两种完全不同的含义：
+   * 强制模式下它不可能出现（出现就是 bug），未分期模式下它是已知的债。
+   */
+  readonly holdoutBatch?:
+    | {
+        readonly phase: number;
+        readonly cases: readonly string[];
+        readonly priorUses: number;
+        readonly enforced: boolean;
+      }
+    | undefined;
+  /**
+   * 这一轮是不是**简化轮**（净简化配额触发），以及为什么。
+   *
+   * 缺席 = 旧记录（配额是 2026-11-27 才有的）。写 `required: false` 与缺席不是一回事：
+   * 前者是「算过，这轮不需要简化」，后者是「那时还没有这个概念」。
+   */
+  readonly shrink?:
+    | {
+        readonly required: boolean;
+        readonly reason?: string | undefined;
+        readonly sinceShrink: number;
+        readonly growth: number;
+        readonly basis: 'cost' | 'tokens' | 'mixed' | 'unknown';
+      }
+    | undefined;
   /** 本轮记录的落盘路径（dryRun 也写：人审需要证据） */
   readonly path: string;
 }

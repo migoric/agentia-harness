@@ -5,7 +5,7 @@
 
 ## 准备本地环境
 
-依赖 `@migor/agentia@^0.10.15`，直接从 registry 装，不需要并排检出上游：
+依赖 `@migor/agentia@^0.10.16`，直接从 registry 装，不需要并排检出上游：
 
 ```bash
 git clone https://github.com/migoric/agentia-harness.git

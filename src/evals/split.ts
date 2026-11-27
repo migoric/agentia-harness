@@ -26,11 +26,7 @@ export function splitReport(report: EvalReport): SplitViews {
   // 带过去会让基线（全量指纹）与候选（只跑 train 得到的子集指纹）永远不相等，
   // 于是每轮验证都被判成 `case_set_changed` —— 那不是「判定标准变了」，是拿两把
   // 不同刻度的尺子量同一件事。
-  const env = {
-    ...(report.model !== undefined ? { model: report.model } : {}),
-    ...(report.harnessVersion !== undefined ? { harnessVersion: report.harnessVersion } : {}),
-    ...(report.finishedAt !== undefined ? { finishedAt: report.finishedAt } : {}),
-  };
+  const env = envOf(report);
   const view = (cases: EvalReport['cases']): EvalReport =>
     summarize(cases, report.assetFingerprint, report.agent, env);
   return {
@@ -39,6 +35,35 @@ export function splitReport(report: EvalReport): SplitViews {
     trainCases: train.map((c) => c.name),
     holdoutCases: holdout.map((c) => c.name),
   };
+}
+
+/** 报告里的环境事实（视图必须带着它们，否则门会把「同一个东西」判成不可比） */
+function envOf(report: EvalReport): Parameters<typeof summarize>[3] {
+  return {
+    ...(report.model !== undefined ? { model: report.model } : {}),
+    ...(report.harnessVersion !== undefined ? { harnessVersion: report.harnessVersion } : {}),
+    ...(report.finishedAt !== undefined ? { finishedAt: report.finishedAt } : {}),
+  };
+}
+
+/**
+ * 取这份报告里**指定用例**的子视图。
+ *
+ * 分批留出要用它：候选只跑被选中的那一批，基线却还是整份留出集。直接拿整份基线
+ * 去比，门会先报 `case_set_changed`（「仅基线有 h2」）—— 那不是判定标准变了，
+ * 是两边比的不是同一批。**基线必须跟着批次一起收窄**。
+ *
+ * 与 `splitReport` 同口径：不带 `caseFingerprint`（子集的指纹与整批不同），
+ * 环境事实原样带过去。
+ */
+export function subsetReport(report: EvalReport, cases: readonly string[]): EvalReport {
+  const want = new Set(cases);
+  return summarize(
+    report.cases.filter((c) => want.has(c.name)),
+    report.assetFingerprint,
+    report.agent,
+    envOf(report),
+  );
 }
 
 /**

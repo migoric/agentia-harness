@@ -1,20 +1,23 @@
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
 import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import type { GateOptions } from '../evals/gate.js';
-import { runSuite, type SuiteTuning } from '../evals/run.js';
-import { splitReport } from '../evals/split.js';
+import { pickTuning, runSuite, type SuiteTuning } from '../evals/run.js';
+import { splitReport, subsetReport } from '../evals/split.js';
 import { acceptProposal } from './accept.js';
 import { attribute, collectFailures } from './attribute.js';
 import { Budget } from './budget.js';
-import { CYCLE_SCHEMA } from './cycles.js';
+import { makeCycleId, writeCycle } from './cycles.js';
 import { validateHoldout } from './holdout.js';
-import { atomicWrite } from './journal.js';
+import { appendHoldoutUse, holdoutProgress, pickHoldoutBatch } from './holdout-batch.js';
 import { lessonsOf } from './ledger.js';
-import { cyclesDir } from './paths.js';
 import type { Proposer } from './propose.js';
+import {
+  DEFAULT_SHRINK_POLICY,
+  partitionForShrink,
+  type ShrinkPolicy,
+  shrinkState,
+} from './shrink.js';
 import type { CycleReport, Proposal, VerifyOutcome } from './types.js';
 import { isWorthAccepting, verifyProposal } from './verify.js';
 
@@ -69,6 +72,13 @@ export interface CycleOptions extends SuiteTuning {
    * 调用方替实现兜底，而且多一轮磁盘扫描。回调是最小接口。
    */
   readonly onAcceptedAssets?: ((assets: AssetSet) => void) | undefined;
+  /**
+   * 净简化配额的阈值。缺省：每 5 条改动 / 累计成本涨 50% 就要求一轮只许删与合并。
+   *
+   * 放在选项里而不是配置里，理由是它属于**调度**而不是工程事实：同一套资产，
+   * CI 里想更激进（every: 2）时不必改仓库里的文件。缺省值就是推荐值。
+   */
+  readonly shrinkPolicy?: ShrinkPolicy | undefined;
 }
 
 export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
@@ -89,6 +99,26 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   // 不报错、只是多花钱。`--rounds` 的上限是整次运行的（prior 由调用方累加）。
   const budget = new Budget(opts.maxCostUsd, opts.priorSpentUsd ?? 0);
 
+  /**
+   * 这一轮是普通的「修失败」轮，还是**简化轮**。
+   *
+   * 在花钱之前算：它决定「这一轮允许改什么」，而这件事必须在提案之前定下来 ——
+   * 提完案再筛，等于让模型先用一次调用去写一份注定被丢弃的稿子。
+   *
+   * 状态从历史现算（`shrink.ts`），不落游标：`cycles/*.json` 已经是采纳与门结论的
+   * 唯一真相，再加一个"当前是不是简化轮"的文件，就多了一处会与历史不一致的东西。
+   */
+  const shrink = shrinkState(opts.config, opts.shrinkPolicy);
+  const minReduction = opts.shrinkPolicy?.minReduction ?? DEFAULT_SHRINK_POLICY.minReduction;
+  // 三态口径：`required: false` 是「算过、这轮不用简化」，与「旧记录没有这个字段」不同
+  const shrinkFacts: NonNullable<CycleReport['shrink']> = {
+    required: shrink.required,
+    ...(shrink.reason !== undefined ? { reason: shrink.reason } : {}),
+    sinceShrink: shrink.sinceShrink,
+    growth: shrink.growth,
+    basis: shrink.basis,
+  };
+
   // 先读教训、再跑基线。顺序有代价含义：账本坏了（半截 cycle JSON）要在花掉一遍
   // 评测钱**之前**炸；读失败也绝不能降级成「没有历史」——那正好是「提案器重复
   // 试同一个坏方向」的成因，而它看起来完全正常。
@@ -101,7 +131,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     ...(opts.client !== undefined ? { client: opts.client } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-    ...tuning(opts),
+    ...pickTuning(opts),
   });
   const views = splitReport(fullBaseline);
   const baseline = views.train;
@@ -123,6 +153,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       costUsd: budget.spentUsd,
       costKnown: budget.costKnown,
       budget: budget.snapshot(true),
+      shrink: shrinkFacts,
       // 没有 historyConsulted：这条路径根本没走到提案那一步（见 CycleReport 的三态说明）
     });
   }
@@ -140,6 +171,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       costUsd: budget.spentUsd,
       costKnown: budget.costKnown,
       budget: budget.snapshot(false),
+      shrink: shrinkFacts,
       // 同上：没有失败模式就没有提案，也就没有「参考了几条历史」
     });
   }
@@ -153,6 +185,11 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     history: lessons,
+    // 只说"请简化"不够 —— 必须给出目标字数（`renderShrink`），否则模型交出的
+    // 是措辞层面的微调，长度几乎不变，然后被配额判据一条条拒掉
+    ...(shrink.required && shrink.reason !== undefined
+      ? { shrink: { reason: shrink.reason, minReduction } }
+      : {}),
   });
   const proposals = proposed.proposals;
   // 提案也烧钱，且发生在预算闸第一次检查之前 —— 只记基线与候选时 `--max-cost`
@@ -167,7 +204,12 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   let winner: VerifyOutcome | undefined;
   let budgetStopped = false;
 
-  for (const proposal of proposals.slice(0, maxVerify)) {
+  // 简化轮：先筛再验（规则在 `shrink.ts`，这里是"用了它"而不是"又写一遍"）。
+  // 顺序有成本含义：变胖的提案一条都不跑评测，而简化轮恰好是最缺钱的那一轮
+  const { allowed: candidates, blocked } = partitionForShrink(proposals, shrink, minReduction);
+  rejected.push(...blocked);
+
+  for (const proposal of candidates.slice(0, maxVerify)) {
     if (budget.exceeded()) {
       budgetStopped = true;
       rejected.push({
@@ -191,7 +233,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
         ...(opts.client !== undefined ? { client: opts.client } : {}),
         ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
         ...(opts.gateOptions !== undefined ? { gateOptions: opts.gateOptions } : {}),
-        ...tuning(opts),
+        ...pickTuning(opts),
         only: views.trainCases,
       });
     } catch (e) {
@@ -209,21 +251,31 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       rejected.push({ proposal, reason: outcome.gate.reason });
       continue;
     }
-    if (!isWorthAccepting(outcome)) {
-      // 门放行但没有任何用例变好：这只是「没变坏」，不值得落盘（会污染 git 历史）
-      rejected.push({ proposal, reason: '没有任何用例变好（仅"没变差"，不值得改动资产）' });
+    if (!isWorthAccepting(outcome, { shrink: shrink.required, minReduction })) {
+      // 门放行但没有任何用例变好：这只是「没变坏」，不值得落盘（会污染 git 历史）。
+      // 简化轮是唯一例外 —— 那一轮想要的正是「不变差但更小」
+      rejected.push({
+        proposal,
+        reason: shrink.required
+          ? '没有用例变好，且补丁没有真正变小（简化轮要求净减少）'
+          : '没有任何用例变好（仅"没变差"，不值得改动资产）',
+      });
       continue;
     }
     // 只记住赢家，不在这里落盘：留出集验证还没做，落了就没法拒了
     winner = outcome;
   }
 
-  for (const proposal of proposals.slice(maxVerify)) {
+  for (const proposal of candidates.slice(maxVerify)) {
     rejected.push({ proposal, reason: `超过本轮验证上限（${maxVerify}），本次不验证` });
   }
 
   // 留出集只在赢家身上跑一次。跑完即使发现过拟合，也不回头试第二候选 ——
   // 否则留出集就成了第二个调参集，这一整层验证的意义会归零。
+  //
+  // 「一次」是**每一批**一次（`holdout-batch.ts`）：留出集不变而轮次无限时，
+  // 30 轮 × 每轮 5% 的累积假阳性约 78% —— 每一轮的门都"合法地"放过一点噪声。
+  let holdoutBatch: CycleReport['holdoutBatch'];
   if (winner !== undefined && holdoutBaseline !== undefined) {
     if (budget.exceeded()) {
       budgetStopped = true;
@@ -233,32 +285,67 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       });
       winner = undefined;
     } else {
-      try {
-        const holdout = await validateHoldout({
-          config: opts.config,
-          assets: opts.assets,
-          proposal: winner.proposal,
-          baseline: holdoutBaseline,
-          cases: views.holdoutCases,
-          ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
-          ...(opts.client !== undefined ? { client: opts.client } : {}),
-          ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-          ...tuning(opts),
-        });
-        budget.charge(holdout.candidate.costUsd, holdout.candidate.costKnown);
-        winner = { ...winner, holdout };
-        const i = verified.findIndex((v) => v.proposal.id === winner?.proposal.id);
-        if (i >= 0) verified[i] = winner;
-      } catch (e) {
-        rejected.push({
-          proposal: winner.proposal,
-          reason: `留出集验证失败: ${e instanceof Error ? e.message : String(e)}`,
-        });
+      const progress = holdoutProgress(opts.config, holdoutBaseline.cases);
+      const pick = pickHoldoutBatch(progress);
+      if (!pick.ok) {
+        // 用完就停，不"退回第一批发重新用"：同一批第二次被用来验候选时，
+        // 它已经被候选挑选过一遍，事实上已经是第二个 train
+        rejected.push({ proposal: winner.proposal, reason: `留出集不可用：${pick.reason}` });
         winner = undefined;
+      } else {
+        try {
+          const holdout = await validateHoldout({
+            config: opts.config,
+            assets: opts.assets,
+            proposal: winner.proposal,
+            // 基线跟着批次一起收窄：候选只跑这一批，拿整份留出集当基线会被门判成
+            // 「用例集不一致」—— 那不是判定标准变了，是两边比的不是同一批
+            baseline: subsetReport(holdoutBaseline, pick.batch.cases),
+            cases: pick.batch.cases,
+            ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+            ...(opts.client !== undefined ? { client: opts.client } : {}),
+            ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+            ...pickTuning(opts),
+          });
+          budget.charge(holdout.candidate.costUsd, holdout.candidate.costKnown);
+          winner = { ...winner, holdout };
+          const i = verified.findIndex((v) => v.proposal.id === winner?.proposal.id);
+          if (i >= 0) verified[i] = winner;
+          // 消耗记账：**与结果无关**。通过也消耗、否决也消耗 —— 只在"通过"时记账，
+          // 等于把没通过的尝试变成免费的重复抽样，而那正是假阳性的来源。
+          //
+          // dry-run 也消耗：验一眼就是看一眼，资产没动不代表数据没被看过。
+          appendHoldoutUse(opts.config, {
+            at: Date.now(),
+            cycleId,
+            proposalId: winner.proposal.id,
+            phase: pick.batch.phase,
+            cases: pick.batch.cases,
+            passed: holdout.gate.ok,
+            reason: holdout.gate.reason,
+          });
+          holdoutBatch = {
+            phase: pick.batch.phase,
+            cases: pick.batch.cases,
+            priorUses: pick.batch.used,
+            enforced: progress.enforced,
+          };
+        } catch (e) {
+          // 验证本身崩掉（补丁过期、装配错）**不消耗批次**：那不是一次观测。
+          // 这条缝的代价是「重试一次坏掉的验证」，收益是「配置错误不会烧掉一整批留出集」
+          rejected.push({
+            proposal: winner.proposal,
+            reason: `留出集验证失败: ${e instanceof Error ? e.message : String(e)}`,
+          });
+          winner = undefined;
+        }
       }
     }
   }
-  if (winner !== undefined && !isWorthAccepting(winner)) {
+  if (
+    winner !== undefined &&
+    !isWorthAccepting(winner, { shrink: shrink.required, minReduction })
+  ) {
     rejected.push({
       proposal: winner.proposal,
       reason: `留出集未通过：${winner.holdout?.gate.reason ?? '未知原因'}`,
@@ -267,7 +354,16 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   }
   if (winner !== undefined) {
     if (!dryRun) {
-      const { assets: after } = acceptProposal(opts.config, opts.assets, winner);
+      const { assets: after } = acceptProposal(
+        opts.config,
+        opts.assets,
+        winner,
+        shrink.required
+          ? {
+              reasonSuffix: `简化轮（${shrink.reason ?? '配额到期'}）—— 采纳标准是"更小"，不是"变好"`,
+            }
+          : {},
+      );
       opts.onAcceptedAssets?.(after);
     }
     accepted.push(winner.proposal);
@@ -288,49 +384,11 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     // 「预算已用完」的轮次，看起来像闸失灵
     budget: budget.snapshot(budgetStopped || budget.exceeded()),
     historyConsulted: lessons.length,
+    shrink: shrinkFacts,
+    ...(holdoutBatch === undefined ? {} : { holdoutBatch }),
   });
 }
 
-/** 只把**给了值**的调优键往下传（显式 undefined 与不传不同，这里保持同一口径） */
-function tuning(o: SuiteTuning): SuiteTuning {
-  return {
-    ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
-    ...(o.concurrency !== undefined ? { concurrency: o.concurrency } : {}),
-    ...(o.retries !== undefined ? { retries: o.retries } : {}),
-  };
-}
-
-/** `2026-11-20T14-30-05-123Z`：ISO 直接当文件名，字典序即时间序 */
-function makeCycleId(): string {
-  return new Date().toISOString().replace(/[:.]/g, '-');
-}
-
-// 路径定义搬到 paths.ts（ledger 也要用，留在 loop 会形成 loop ↔ ledger 的值循环）。
-// 这里继续 re-export：`index.ts` 与既有调用一直从 loop 取它。
-export { cyclesDir };
-
-/**
- * 落一份轮次记录。**自动 RSI 与手工采纳共用** —— 手工 `rsi accept` 若不落记录，
- * `rsi regress` 就永远找不到那次采纳的基准（于是手工采纳的改动永远监测不到），
- * `rsi ledger` 也只能把它标成 `unverified`。
- */
-export function writeCycle(
-  config: HarnessConfig,
-  body: Omit<CycleReport, 'cycleId' | 'path' | 'at'>,
-  cycleId = makeCycleId(),
-): CycleReport {
-  // 时刻写成**字段**，不靠文件名反解：文件名是给人看的，不该同时是数据接口
-  const at = new Date().toISOString();
-  const path = persistCycle(config, { at, cycleId, ...body });
-  return { at, ...body, cycleId, path };
-}
-
-function persistCycle(config: HarnessConfig, report: Omit<CycleReport, 'path'>): string {
-  const dir = cyclesDir(config);
-  mkdirSync(dir, { recursive: true });
-  const path = join(dir, `${report.cycleId}.json`);
-  // 与 journal 同款：写到一半崩了不能留下半个 cycle JSON —— 那是 RSI 唯一的审计依据。
-  // `schema` 一起写：读取侧（cycles.ts）靠它做迁移，没有它只能按「版本化之前」猜
-  atomicWrite(path, `${JSON.stringify({ ...report, schema: CYCLE_SCHEMA }, null, 2)}\n`);
-  return path;
-}
+// 轮次记录的读写都在 `cycles.ts`（那一侧是「记录长什么样」的唯一定义处，
+// 读写分家时 schema 与版本迁移迟早会对不上）。这里 re-export 保持既有导入面不变。
+export { makeCycleId, writeCycle } from './cycles.js';

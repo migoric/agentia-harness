@@ -84,7 +84,7 @@ export {
   verifyInSandbox,
 } from './rsi/code/sandbox.js';
 export type { CodeFileState, CodeJournal, CodePatch, CodeVerify } from './rsi/code/types.js';
-export { CYCLE_SCHEMA, type CycleRecord, readCycles } from './rsi/cycles.js';
+export { CYCLE_SCHEMA, type CycleRecord, readCycles, writeCycle } from './rsi/cycles.js';
 export {
   buildEvidenceCorpus,
   type EvidenceCorpus,
@@ -92,6 +92,18 @@ export {
   type EvidenceOptions,
 } from './rsi/evidence.js';
 export { type HoldoutOptions, validateHoldout } from './rsi/holdout.js';
+export {
+  appendHoldoutUse,
+  type BatchPick,
+  type BatchProgress,
+  describeProgress,
+  type HoldoutProgress,
+  type HoldoutUse,
+  holdoutProgress,
+  holdoutUsePath,
+  pickHoldoutBatch,
+  readHoldoutUses,
+} from './rsi/holdout-batch.js';
 export {
   appendJournal,
   atomicWrite,
@@ -101,9 +113,10 @@ export {
   repairJournal,
 } from './rsi/journal.js';
 export { type LedgerEntry, lessonsOf, readLedger } from './rsi/ledger.js';
-export { type CycleOptions, cyclesDir, runCycle, writeCycle } from './rsi/loop.js';
+export { type CycleOptions, runCycle } from './rsi/loop.js';
 export { type ChangeManifest, manifestFor, validateManifest } from './rsi/manifest.js';
 export { readProposal, writeProposal } from './rsi/manual.js';
+export { cyclesDir } from './rsi/paths.js';
 export { LlmProposer, type ProposeContext, type Proposer } from './rsi/propose.js';
 export {
   checkRegression,
@@ -118,6 +131,14 @@ export {
   type RunRoundsOptions,
   runRounds,
 } from './rsi/rounds.js';
+export {
+  DEFAULT_SHRINK_POLICY,
+  isShrinkPatch,
+  type ShrinkPolicy,
+  type ShrinkState,
+  shrinkState,
+  shrinkStateOf,
+} from './rsi/shrink.js';
 export type {
   AssetPatch,
   CycleReport,

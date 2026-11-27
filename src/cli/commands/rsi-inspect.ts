@@ -1,6 +1,13 @@
 import type { ModelClient } from '@migor/agentia';
 import { describeError } from '../../errors.js';
+import { loadEvalCases } from '../../evals/load.js';
 import { revertLast } from '../../rsi/accept.js';
+import {
+  describeProgress,
+  type HoldoutProgress,
+  holdoutProgress,
+  readHoldoutUses,
+} from '../../rsi/holdout-batch.js';
 import { readJournal, repairJournal } from '../../rsi/journal.js';
 import { readLedger, revertNote } from '../../rsi/ledger.js';
 import { checkRegression } from '../../rsi/regress.js';
@@ -16,6 +23,42 @@ import { tuningOf } from './run.js';
  * 「看历史」和「改资产」混在一个模块里时，读路径迟早会顺手写点什么。唯一的例外是
  * `regress --revert`，但那也是显式开关，且仍然走 `revertLast` 的指纹校验。
  */
+
+/**
+ * 留出集消耗的一行摘要。
+ *
+ * 放在 `status` 里而不是单开命令：它是**采纳历史的一部分**（这一批被谁用掉了），
+ * 而 `status` 正是人回看"最近发生了什么"的地方。`--json` 面刻意不变 ——
+ * 改它的形状会让既有脚本静默读错，而这条读数不是机器决策的输入。
+ */
+function holdoutLine(ctx: CliContext): string | undefined {
+  const uses = readHoldoutUses(ctx.config);
+  const last = uses[uses.length - 1];
+  const tail =
+    last === undefined
+      ? '；还没用过'
+      : `；最近一次${last.passed ? '通过' : '未通过'}（${last.proposalId}）`;
+  const progress = progressOf(ctx);
+  // 没有留出集时不要印「留出集为空」：绝大多数工程根本没配 holdout，那不是异常状态
+  if (progress !== undefined && progress.batches.length > 0) {
+    return `${describeProgress(progress)}${tail}`;
+  }
+  // evals 读不出来（没有目录 / 某个用例写坏）时退回只报次数：`status` 是只读命令，
+  // 不该因为一条无关的用例文件而整个失效，但也不能装作没有留出集这回事
+  if (uses.length === 0) return undefined;
+  const phases = [...new Set(uses.map((u) => u.phase))].sort((a, b) => a - b);
+  return `留出集消耗 ${uses.length} 次（批 ${phases.join('、')}）${tail}`;
+}
+
+/** 磁盘上的留出用例 → 分批进度；读不出来就返回 undefined（由调用方降级） */
+function progressOf(ctx: CliContext): HoldoutProgress | undefined {
+  try {
+    const holdout = loadEvalCases(ctx.config.evalsDir).filter((c) => c.split === 'holdout');
+    return holdoutProgress(ctx.config, holdout);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * `rsi journal [--repair]` —— 看账本，或者修掉「末行半截」。
@@ -186,6 +229,8 @@ export function status(ctx: CliContext): number {
     say('还没有任何采纳记录');
     return 0;
   }
+  const holdout = holdoutLine(ctx);
+  if (holdout !== undefined) say(holdout);
   for (const e of entries) {
     const when = new Date(e.at).toISOString().replace('T', ' ').slice(0, 19);
     say(`${when}  ${e.status.padEnd(8)}  ${e.proposalId}  ${e.target}`);

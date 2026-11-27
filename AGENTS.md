@@ -91,15 +91,18 @@ L2 与 L1 的差别不在「改什么文件」，在**失败的代价**：提示
   不能只把 signal 传下去（下游可能不配合）；重试只认 `stopReason === 'error'`，断言失败
   重试等于用采样次数掩盖问题。
 - 断言工具序列（`expect_tools`）依赖 agentia 的 `tool.input` 事件名。它属于上游的 core
-  词汇表，**0.10.14 起进了公共导出面** —— 本仓一律从 `@migor/agentia` import 那 7 个常量
+  词汇表，**0.10.14 起进了公共导出面** —— 本仓一律从 `@migor/agentia` import 那 10 个常量
   （`TOOL_INPUT_EVENT` / `TOOL_OUTPUT_EVENT` / `USAGE_MISSING_EVENT` / `USAGE_PARTIAL_EVENT`
-  / `CONTEXT_BUDGET_EVENT` / `LLM_FALLBACK_EVENT` / `CONFIG_FALLBACKS_ATTR`），**不写字面量**。
+  / `CONTEXT_BUDGET_EVENT` / `LLM_FALLBACK_EVENT` / `CONFIG_FALLBACKS_ATTR` /
+  `MENU_HASH_ATTR` / `MENU_NAMES_ATTR` / `PROMPTS_VERSIONS_ATTR`），**不写字面量**。
+  后三个是 run 根属性（菜单签名与资产版本表），**0.10.16 起**才在公共导出面上 ——
+  本仓依赖它们的下限因此是 0.10.16（发布顺序见 CHANGELOG 的 0.4.0 节）。
   此前那份本地副本（`run/trace-events.ts`）已随 0.10.14 删除。删的理由不是整洁：抄字面量
   在上游改名后**不报错**，只静默读到 0 条 —— 工具序列变空、成本判据恒真。
 - **测试夹具要反过来写成字面量**，这是刻意的：`tests/evals.test.ts` 用真实调用产出的 trace
   断言工具序列非空、`tests/model-read.test.ts` 用 `'llm.fallback'` 构造输入。如果夹具也
   import 常量，上游改名时夹具跟着一起变，那条行为断言就永远绿 —— 夹具必须是**独立证人**。
-- 生产代码里出现这 7 个字面量会被 `tests/architecture.test.ts` 拦下（注释里的举例不算，
+- 生产代码里出现这 10 个字面量会被 `tests/architecture.test.ts` 拦下（注释里的举例不算，
   它按代码区扫描）。这条守卫与上面那条「夹具用字面量」是一对，缺了任一半都会退化。
 - **「用了哪个模型」只能从 trace 读，不许用 `config.model` 近似**。唯一入口是
   `run/model-read.ts`：`llm.turn` 的 span 名就是实际模型，`llm.fallback` 是换环，

@@ -47,6 +47,7 @@ harness rsi             跑一轮闭环
   --rounds <n>          连续跑 n 轮（每轮最多采纳一个；预算跨轮共享）
   --dry-run             只验证不落盘（记录仍写盘，供人审；不能与 --rounds 同用）
   --max-cost <usd>      整次运行的总预算（含提案、基线、候选；--rounds 下跨轮共享）
+  --shrink-every <n>    连续 n 条改动没让资产变小，就强制下一轮只接受净简化提案（缺省 5）
   --timeout/--concurrency/--retries   见 evals.md 的三个旋钮
 harness rsi status      采纳历史
 harness rsi ledger      决策账本：预测 vs 实际结果（--json 输出）

@@ -8,6 +8,7 @@ import type { EvalCase, EvalExpect, ToolArgExpect } from './types.js';
 const CASE_KEYS: readonly string[] = [
   'name',
   'split',
+  'phase',
   'memory_keys',
   'expect_contains',
   'expect_not_contains',
@@ -118,6 +119,7 @@ function parseCase(path: string): EvalCase {
       `${path}: split 只能是 train / holdout（收到 "${split}"）—— 拼错会让用例静默混进 train，留出集就此失效`,
     );
   }
+  const phase = phaseOf(scalar(fm, 'phase', path), split, path);
   const { task, followUps } = splitTurns(fm.body, path);
   // 记忆键：空列表等于没写（不接记忆）—— 「写了空数组」与「没写」是同一件事，
   // 硬要区分只会让指纹多一个永远为空的字段。
@@ -193,9 +195,42 @@ function parseCase(path: string): EvalCase {
     ...(followUps.length > 0 ? { followUps } : {}),
     expect,
     ...(split !== undefined ? { split } : {}),
+    ...(phase !== undefined ? { phase } : {}),
     ...(memoryKeys.length > 0 ? { memoryKeys } : {}),
     path,
   };
+}
+
+/**
+ * 留出集分批号（`phase`）。
+ *
+ * 三条都在加载期炸，因为它们都有一个共同的坏症状：**静默**。
+ * - 写成 `phase: 一` / `phase: 0` / `phase: 1.5`：要么整批被跳过（于是留出集少一批，
+ *   你会以为还有 3 批可验），要么每次都是同一批；
+ * - 写在 train 用例上：`phase` 被无声忽略，人以为自己在分期，其实留出集只有一批；
+ * - 不写：老工程照旧（整份留出集 = 一批），行为不变。
+ */
+function phaseOf(
+  raw: string | undefined,
+  split: string | undefined,
+  path: string,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  if (split !== 'holdout') {
+    throw new HarnessError(
+      'eval.invalid',
+      `${path}: phase 只对 split: holdout 的用例有意义（这条是 ${split ?? 'train'}）—— ` +
+        '写在 train 上不会报错但也不会生效，人却会以为留出集已经分了批',
+    );
+  }
+  if (!/^[1-9]\d*$/.test(raw.trim())) {
+    throw new HarnessError(
+      'eval.invalid',
+      `${path}: phase 必须是正整数（收到 "${raw}"）—— 留出集批次号从 1 开始，` +
+        '写错会让这一批静默消失或与别的批合并',
+    );
+  }
+  return Number(raw.trim());
 }
 
 /**

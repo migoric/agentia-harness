@@ -48,10 +48,22 @@ export interface AcceptResult {
   readonly assets: AssetSet;
 }
 
+export interface AcceptOptions {
+  /**
+   * 追加到 journal 理由后面的那一句 —— 用来解释「这一次采纳为什么不受常规判据约束」。
+   *
+   * 目前只有一个使用者：简化轮。它采纳的是"通过率没变、但资产确实变小"的改动，
+   * 而 journal 里只写门的话会变成 `无变化` —— 三个月后回看的人会以为这条是误采纳。
+   * 审计线索的价值全在"当时凭什么"，缺这一句就等于缺了那一半。
+   */
+  readonly reasonSuffix?: string | undefined;
+}
+
 export function acceptProposal(
   config: WorkspacePaths,
   assets: AssetSet,
   outcome: VerifyOutcome,
+  opts: AcceptOptions = {},
 ): AcceptResult {
   if (!outcome.gate.ok) {
     throw new HarnessError('rsi.gate_blocked', `回归门未通过，拒绝采纳：${outcome.gate.reason}`);
@@ -76,7 +88,11 @@ export function acceptProposal(
     );
   }
   const { proposal } = outcome;
-  const { entry, assets: after } = writePatch(config, assets, proposal, outcome.gate.reason);
+  const reason =
+    opts.reasonSuffix === undefined
+      ? outcome.gate.reason
+      : `${outcome.gate.reason}；${opts.reasonSuffix}`;
+  const { entry, assets: after } = writePatch(config, assets, proposal, reason);
   appendJournal(config, entry);
   return { entry, assets: after };
 }

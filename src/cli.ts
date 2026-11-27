@@ -64,6 +64,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --max-modes <n>       最多给几个失败模式提方案（缺省 3）
     --max-verify <n>      最多验证几个提案（缺省 3）
     --max-cost <usd>      整次运行的成本上限（--rounds 下跨轮共享；覆盖配置 maxCostUsd）
+    --shrink-every <n>    连续 n 条改动没让资产变小，就强制下一轮只接受净简化提案（缺省 5）
     --timeout/--concurrency/--retries   见 eval 节
   rsi revert [id]         回滚最近一次采纳（给 id 可防期间插入新采纳）
   rsi status              看采纳历史
@@ -107,6 +108,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'max-verify',
     'max-cost',
     'rounds',
+    'shrink-every',
     'revert',
     'from',
     'timeout',

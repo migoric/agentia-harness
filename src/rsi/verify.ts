@@ -9,6 +9,7 @@ import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
 import { parseFrontmatter } from '../util/frontmatter.js';
 import { fingerprint } from '../util/hash.js';
+import { isShrinkPatch } from './shrink.js';
 import type { AssetPatch, Proposal, VerifyOutcome } from './types.js';
 
 /**
@@ -40,6 +41,23 @@ export interface VerifyOptions extends SuiteTuning {
   readonly only?: readonly string[] | undefined;
 }
 
+/** `isWorthAccepting` 的调用参数 —— 只有「这一轮的目标是什么」一个维度 */
+export interface WorthAcceptingOptions {
+  /**
+   * 本轮是**简化轮**（净简化配额触发）。
+   *
+   * 存在的理由：简化轮想要的恰恰是「通过率不变、但资产更小」—— 而这在平时是
+   * 明确不采纳的（"没有用例变好"）。不开口子的话，配额一旦触发就再也采纳不了任何
+   * 东西：它会把闭环锁死在"必须修好一条用例"上，而这一轮的任务本来就不是修用例。
+   *
+   * 口子开得很窄：仍要过门（含留出集），且补丁必须**确实更小**
+   * （`isShrinkPatch`）。不是"简化轮里什么都算数"。
+   */
+  readonly shrink?: boolean | undefined;
+  /** 净减少下限（与 `shrinkState` 的 policy 同一个数，别两处各写一份） */
+  readonly minReduction?: number | undefined;
+}
+
 /**
  * 门放行之后还要问的一句：**有没有用例真的变好？**
  *
@@ -48,12 +66,20 @@ export interface VerifyOptions extends SuiteTuning {
  * no-op 污染 —— 下一轮再也分不清哪次改动真正起作用。
  *
  * 自动 RSI 与手写提案共用这一条：提案**来源**可以是人或模型，采纳标准不能变。
+ * 唯一的例外是简化轮（见 `WorthAcceptingOptions.shrink`），而它换来的是「更小」，
+ * 一个同样可机械核对、且平时拿不到的结果。
  */
-export function isWorthAccepting(outcome: VerifyOutcome): boolean {
+export function isWorthAccepting(
+  outcome: VerifyOutcome,
+  opts: WorthAcceptingOptions = {},
+): boolean {
   if (!outcome.gate.ok) return false;
   // 留出集用默认门：train 涨分但留出集退步，是过拟合最典型的形状，必须拒
   if (outcome.holdout !== undefined && !outcome.holdout.gate.ok) return false;
-  return outcome.gate.fixedCases.length > 0 || outcome.gate.passRateDelta > 0;
+  if (outcome.gate.fixedCases.length > 0 || outcome.gate.passRateDelta > 0) return true;
+  // 平时「只变小、没变好」不值得落盘（会污染 git 历史）；简化轮例外 ——
+  // 那一轮的目标就是变小，而变小本身是**可机械核对**的收益
+  return opts.shrink === true && isShrinkPatch(outcome.proposal.patch, opts.minReduction);
 }
 
 export async function verifyProposal(opts: VerifyOptions): Promise<VerifyOutcome> {

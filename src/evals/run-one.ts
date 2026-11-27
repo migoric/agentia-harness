@@ -1,5 +1,6 @@
 import { InMemoryMemoryStore, type ModelClient } from '@migor/agentia';
 import { costOf } from '../run/cost.js';
+import { menuFacts } from '../run/menu-read.js';
 import { modelUsage } from '../run/model-read.js';
 import type { Runner, RunOutcome } from '../run/runner.js';
 import { mergeTraces } from '../run/trace-merge.js';
@@ -123,10 +124,14 @@ export async function runOne(
     // 前几轮真跑过，模型事实就得留下：把「降级到 B 才崩」记成「什么都没跑」，
     // 会让这一轮的模型集合与降级次数凭空消失，而报告是可比性判断的唯一依据
     const mu = spent === undefined ? undefined : modelUsage(spent);
+    // 前几轮真跑过，菜单与资产版本也得留下：这一条虽然崩了，它的菜单仍是「本轮用过什么」
+    // 的证据；漏掉它会让整批变成「至少一条没记 ⇒ 不知道」，而这批本来是可以确认的
+    const mf = spent === undefined ? {} : menuFacts(spent);
     return {
       name: c.name,
       task: c.task,
       split: c.split,
+      ...(c.phase === undefined ? {} : { phase: c.phase }),
       passed: false,
       failures: [
         `${timedOut ? '用例超时' : 'run 抛出'}${failedTurn === undefined ? '' : `（第 ${failedTurn} 轮）`}${done}: ${
@@ -142,6 +147,7 @@ export async function runOne(
       skills: [],
       subagents: [],
       ...(mu === undefined ? {} : { models: mu.models, fallbackUsed: mu.fallbacks }),
+      ...mf,
       ...(plannedTurns === undefined ? {} : { turns: plannedTurns }),
       ...(failedTurn === undefined ? {} : { failedTurn }),
     };
@@ -153,6 +159,7 @@ export async function runOne(
     name: c.name,
     task: c.task,
     split: c.split,
+    ...(c.phase === undefined ? {} : { phase: c.phase }),
     passed: failures.length === 0,
     failures,
     tokens: out.tokens,
@@ -167,6 +174,8 @@ export async function runOne(
     // 条件展开：外部构造的 outcome 可能没这两个字段（见 `RunOutcome.models`），
     // 写 `[]` 会让「没记」与「一个回合都没跑」在报告里长成一样
     ...(out.models === undefined ? {} : { models: out.models, fallbackUsed: out.fallbacks ?? 0 }),
+    // 菜单签名与资产版本：与模型集合同属「这一条到底被测了什么」的证据
+    ...menuFacts(out.trace),
     ...(out.turns === undefined ? {} : { turns: out.turns }),
     ...(out.failedTurn === undefined ? {} : { failedTurn: out.failedTurn }),
   };

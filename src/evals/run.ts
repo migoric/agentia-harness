@@ -45,6 +45,21 @@ export interface SuiteTuning {
   readonly retries?: number | undefined;
 }
 
+/**
+ * 只把**给了值**的调优键往下传（显式 `undefined` 与「不传」不同，这里保持同一口径）。
+ *
+ * 放在这里而不是各调用点各写一份：调优键一旦增加（比如将来的 thinking 预算），
+ * 漏传一处就会让「基线与候选用了不同的调优」—— 那正是回归门最怕的不可比，
+ * 而它不会报错，只会让结论偏向"变好"。
+ */
+export function pickTuning(o: SuiteTuning): SuiteTuning {
+  return {
+    ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
+    ...(o.concurrency !== undefined ? { concurrency: o.concurrency } : {}),
+    ...(o.retries !== undefined ? { retries: o.retries } : {}),
+  };
+}
+
 export interface RunSuiteOptions extends SuiteTuning {
   readonly config: HarnessConfig;
   readonly assets: AssetSet;
