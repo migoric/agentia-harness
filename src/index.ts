@@ -43,6 +43,11 @@ export { type GateOptions, type GateResult, gate } from './evals/gate.js';
 export { type HarvestedCase, harvestCase } from './evals/harvest.js';
 export { loadEvalCases, TURN_SEPARATOR } from './evals/load.js';
 export {
+  EVAL_REPORT_SCHEMA_VERSION,
+  reportSchemaVersion,
+  summarize,
+} from './evals/report.js';
+export {
   check,
   type RunSuiteOptions,
   runSuite,
@@ -60,7 +65,6 @@ export {
   type EvalReport,
   type EvalSplit,
   type ReportEnv,
-  summarize,
   type ToolArgExpect,
 } from './evals/types.js';
 export {

@@ -76,6 +76,12 @@ export function isWorthAccepting(
   if (!outcome.gate.ok) return false;
   // 留出集用默认门：train 涨分但留出集退步，是过拟合最典型的形状，必须拒
   if (outcome.holdout !== undefined && !outcome.holdout.gate.ok) return false;
+  // 路由不塌缩（判据 27）：通过率涨了、但路由准确率掉了同样不采纳。
+  // 典型形状是「所有请求都被派给同一个 agent」—— 通过率可能微涨（那个 agent 确实
+  // 也能答），而意图层与成本模型同时失效，单一 passRate 看不出来。
+  const rb = outcome.baseline.routeAccuracy;
+  const rc = outcome.candidate.routeAccuracy;
+  if (rb !== undefined && rc !== undefined && rc < rb) return false;
   if (outcome.gate.fixedCases.length > 0 || outcome.gate.passRateDelta > 0) return true;
   // 平时「只变小、没变好」不值得落盘（会污染 git 历史）；简化轮例外 ——
   // 那一轮的目标就是变小，而变小本身是**可机械核对**的收益

@@ -12,7 +12,6 @@
  * 全部是规则式判定，没有一条依赖模型 —— 裁判不确定，RSI 就会把随机波动当进步。
  */
 import { fingerprint } from '../util/hash.js';
-import { aggregateHits, aggregateModels, unionOrUnknown } from './aggregate.js';
 
 export interface ToolArgExpect {
   readonly tool: string;
@@ -59,6 +58,14 @@ export interface EvalCase {
    */
   readonly followUps?: readonly string[] | undefined;
   readonly expect: EvalExpect;
+  /**
+   * 期望被派到的 agentId（frontmatter `route`）。**只有意图层用例才写它**。
+   *
+   * 为什么它与 `expect` 分开：`expect` 判的是「回答对不对」，`route` 判的是
+   * 「该谁回答」。这两件事会独立退化 —— 派错的 agent 也可能答对（它恰好也知道），
+   * 于是只看通过率的门会放过一次真正的路由塌缩（所有话都派给同一个 agent）。
+   */
+  readonly route?: string | undefined;
   /** 缺省 `train`：老用例不必改一个字也能继续用 */
   readonly split?: EvalSplit | undefined;
   /**
@@ -170,6 +177,21 @@ export interface CaseResult {
   readonly menuHash?: string | undefined;
   /** 本条的提示词资产版本表（run 根属性 `prompts.versions`）；缺席 = 没有带版本的资产 */
   readonly promptVersions?: string | undefined;
+  /**
+   * 期望被派到的 agentId（由 `runOne` 从用例的 `route` 透传）。
+   *
+   * 为什么报告里要存一份「期望」：`routeAccuracy` 是**跨轮**读的（这一轮的候选报告
+   * vs 上一轮的基线报告），而基线报告是上一个进程写的 —— 那时候的用例定义已经不在
+   * 手里了。不随结果落盘，就等于每次比较都少一半信息。
+   */
+  readonly expectRoute?: string | undefined;
+  /**
+   * 本条**实际**被派到的 agentId。缺席 = 这条不是意图层用例，或执行器没采到。
+   *
+   * 只有 `expectRoute` 与 `routedTo` 都有值的那条才进 `routeAccuracy`，
+   * 否则「没测」会被算成「测错」。
+   */
+  readonly routedTo?: string | undefined;
 }
 
 /**
@@ -209,6 +231,13 @@ export interface ReportEnv {
 }
 
 export interface EvalReport {
+  /**
+   * 报告结构版本（写侧恒为 `EVAL_REPORT_SCHEMA_VERSION`）。
+   *
+   * **读侧不要直接读它** —— 用 `reportSchemaVersion(raw)`：老报告没有这个字段，
+   * 直接读会拿到 `undefined`，然后被当成「版本未知」和「坏报告」混在一起。
+   */
+  readonly schemaVersion?: number | undefined;
   readonly total: number;
   readonly passed: number;
   readonly passRate: number;
@@ -266,6 +295,16 @@ export interface EvalReport {
   readonly menuHashes?: readonly string[] | undefined;
   /** 全轮的提示词资产版本表（`name@ver` 去重排序）；缺席 / `[]` 的读法同上 */
   readonly promptVersions?: readonly string[] | undefined;
+  /**
+   * 路由准确率（`routedTo === route` 的比例）。**缺席 = 没有一条用例声明了 `route`**。
+   *
+   * 为什么要一个独立读数而不是揉进 `passRate`：路由塌缩的典型形状是
+   * 「通过率不变甚至微涨，但所有请求都派给了同一个 agent」——
+   * 单一的 passRate 看不出来，而它同时废掉了意图层与成本模型（每次都走同一个重 agent）。
+   */
+  readonly routeAccuracy?: number | undefined;
+  /** 参与路由计分的用例条数（分母）。缺席语义同 `routeAccuracy` */
+  readonly routeCases?: number | undefined;
   /** 本轮被用到的资产（按用例数降序）—— 提案选目标的数据来源 */
   readonly skillHits: readonly AssetHit[];
 }
@@ -296,41 +335,4 @@ export function caseSetFingerprint(cases: readonly EvalCase[]): string {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return fingerprint(JSON.stringify(rows));
-}
-
-export function summarize(
-  cases: readonly CaseResult[],
-  assetFingerprint: string,
-  agent: string,
-  env: ReportEnv = {},
-): EvalReport {
-  const passed = cases.filter((c) => c.passed).length;
-  const priced = cases.filter((c) => c.costUsd !== undefined);
-  const modelFacts = aggregateModels(cases);
-  const menuHashes = unionOrUnknown(cases, (c) => c.menuHash);
-  const promptVersions = unionOrUnknown(cases, (c) => c.promptVersions);
-  return {
-    total: cases.length,
-    passed,
-    passRate: cases.length === 0 ? 0 : passed / cases.length,
-    tokens: cases.reduce((sum, c) => sum + c.tokens, 0),
-    costUsd: priced.reduce((sum, c) => sum + (c.costUsd ?? 0), 0),
-    // 一条用例没定价就让整轮「成本不可比」—— 总和偏低会漏判成本回退
-    costKnown: cases.length > 0 && priced.length === cases.length,
-    cases,
-    assetFingerprint,
-    agent,
-    // 条件展开而不是写 `model: env.model`：`exactOptionalPropertyTypes` 下
-    // 「键存在但值为 undefined」与「键缺席」是两件事，而老报告里这两者要能区分
-    ...(env.caseFingerprint !== undefined ? { caseFingerprint: env.caseFingerprint } : {}),
-    ...(env.harnessVersion !== undefined ? { harnessVersion: env.harnessVersion } : {}),
-    ...(env.finishedAt !== undefined ? { finishedAt: env.finishedAt } : {}),
-    ...(env.model !== undefined ? { model: env.model } : {}),
-    ...modelFacts,
-    // 条件展开：`[]` 与缺席是两件事（「确认没挂工具」vs「不知道」），
-    // 写成 `menuHashes: []` 会把两者压成同一个读数
-    ...(menuHashes !== undefined ? { menuHashes } : {}),
-    ...(promptVersions !== undefined ? { promptVersions } : {}),
-    skillHits: aggregateHits(cases),
-  };
 }

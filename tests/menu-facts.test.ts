@@ -3,7 +3,8 @@ import { describe, it } from 'node:test';
 import type { Span, Trace } from '@migor/agentia';
 import { renderComparison } from '../src/cli/render.js';
 import { gate } from '../src/evals/gate.js';
-import { type CaseResult, summarize } from '../src/evals/types.js';
+import { summarize } from '../src/evals/report.js';
+import type { CaseResult } from '../src/evals/types.js';
 import { menuFacts } from '../src/run/menu-read.js';
 
 /**

@@ -150,6 +150,9 @@ export async function runOne(
       ...mf,
       ...(plannedTurns === undefined ? {} : { turns: plannedTurns }),
       ...(failedTurn === undefined ? {} : { failedTurn }),
+      // 期望路由随结果落盘（见 `CaseResult.expectRoute`）：基线报告可能是上一版用例写的，
+      // 那时 `route` 已不在手里，只有报告自己能把它带回来
+      ...(c.route === undefined ? {} : { expectRoute: c.route }),
     };
   }
 
@@ -171,6 +174,7 @@ export async function runOne(
     traceId: out.trace.traceId,
     skills: out.skills,
     subagents: out.subagents,
+    ...(c.route === undefined ? {} : { expectRoute: c.route }),
     // 条件展开：外部构造的 outcome 可能没这两个字段（见 `RunOutcome.models`），
     // 写 `[]` 会让「没记」与「一个回合都没跑」在报告里长成一样
     ...(out.models === undefined ? {} : { models: out.models, fallbackUsed: out.fallbacks ?? 0 }),

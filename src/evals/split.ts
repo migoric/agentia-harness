@@ -1,4 +1,5 @@
-import { type EvalReport, summarize } from './types.js';
+import { summarize } from './report.js';
+import type { EvalReport } from './types.js';
 
 /**
  * 把一份完整报告拆成两个视图 —— train 用来**选**改动，holdout 用来**验**改动。

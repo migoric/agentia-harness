@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { Span, Trace } from '@migor/agentia';
 import { gate } from '../src/evals/gate.js';
-import { type CaseResult, summarize } from '../src/evals/types.js';
+import { summarize } from '../src/evals/report.js';
+import type { CaseResult } from '../src/evals/types.js';
 import { modelUsage, sameModelSet } from '../src/run/model-read.js';
 
 /**

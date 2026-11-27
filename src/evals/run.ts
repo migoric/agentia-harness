@@ -6,8 +6,9 @@ import { effectiveModel } from '../run/app.js';
 import { createRunner } from '../run/runner.js';
 import { harnessVersion } from '../version.js';
 import { loadEvalCases } from './load.js';
+import { summarize } from './report.js';
 import { runOne } from './run-one.js';
-import { caseSetFingerprint, type EvalReport, summarize } from './types.js';
+import { caseSetFingerprint, type EvalReport } from './types.js';
 
 // 工具事件提取的唯一实现搬到了 tool-events.ts（序列 / 次数 / 参数共用一份扫描）。
 // 保留从本模块再导出：index.ts 与既有测试一直从这里取 toolSequence。

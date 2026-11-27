@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { diffTraces } from '@migor/agentia';
 import { HarnessError } from '../../errors.js';
 import { gate } from '../../evals/gate.js';
+import { EVAL_REPORT_SCHEMA_VERSION, reportSchemaVersion } from '../../evals/report.js';
 import type { EvalReport } from '../../evals/types.js';
 import { boolFlag, numFlag } from '../args.js';
 import type { CliContext } from '../context.js';
@@ -110,6 +111,16 @@ export function readReport(root: string, path: string): EvalReport {
     throw new HarnessError(
       'eval.invalid',
       `${full} 不像一份评测报告（缺 cases/total）—— 请用 harness eval --save 生成`,
+    );
+  }
+  // 结构版本：老报告没有这个字段 ⇒ 按 v1 读（**不许炸**，它们是历史证据）。
+  // 比本进程新的报告只出声不拒读 —— 拒读会让「升级 harness 之后再也没法看旧基线」
+  // 变成真的；而静默读则可能把「新字段没读到」误当成「新字段为空」。
+  const v = reportSchemaVersion(r);
+  if (v > EVAL_REPORT_SCHEMA_VERSION) {
+    say(
+      `⚠️ ${path} 是报告结构 v${v}（本进程认识 v${EVAL_REPORT_SCHEMA_VERSION}）：` +
+        '读得出的字段照常参与比较，新字段会被忽略。',
     );
   }
   return r as EvalReport;

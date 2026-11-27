@@ -7,7 +7,8 @@ import { scriptedClient } from '@migor/agentia';
 import { discoverAssets } from '../src/assets/discover.ts';
 import { loadConfig } from '../src/config.ts';
 import { loadEvalCases } from '../src/evals/load.ts';
-import { type CaseResult, summarize } from '../src/evals/types.ts';
+import { summarize } from '../src/evals/report.ts';
+import type { CaseResult } from '../src/evals/types.ts';
 import {
   appendHoldoutUse,
   describeProgress,

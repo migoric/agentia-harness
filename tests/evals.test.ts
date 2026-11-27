@@ -8,6 +8,7 @@ import { discoverAssets } from '../src/assets/discover.ts';
 import { loadConfig } from '../src/config.ts';
 import { gate } from '../src/evals/gate.ts';
 import { loadEvalCases } from '../src/evals/load.ts';
+import { summarize } from '../src/evals/report.ts';
 import { check, runSuite, toolSequence } from '../src/evals/run.ts';
 import {
   type CaseResult,
@@ -15,7 +16,6 @@ import {
   type EvalCase,
   type EvalReport,
   type ReportEnv,
-  summarize,
 } from '../src/evals/types.ts';
 import { createRunner, type RunOutcome } from '../src/run/runner.ts';
 
