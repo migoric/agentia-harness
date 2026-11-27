@@ -53,6 +53,10 @@ harness rsi status      采纳历史
 harness rsi ledger      决策账本：预测 vs 实际结果（--json 输出）
 harness rsi journal     采纳日志（--json 输出）；中途崩过留下的半截末行会指出
   --repair              截掉半截末行（先备份；截完必须能读通，中间行坏了不修）
+harness rsi --watch     常驻推进轮次（单实例锁 + 心跳 + 节流；写权限只在进程里）
+  --every <s>           轮与轮之间的间隔秒数（缺省 900）
+  --max-rounds <n>      最多跑几轮
+  --until <时间>        到这个时刻就停（ISO 或 2026-11-29T08:00）
 harness rsi regress     采纳之后那些用例还通过吗（有回归退出码 1）
   --revert              检测到回归就自动回滚（仍过指纹校验）
 harness rsi revert [id] 回滚最近一次采纳；给 id 可防期间插入了新采纳
@@ -63,7 +67,7 @@ harness rsi accept --from <json>   手写提案也过完整验证门才采纳
 ## 服务与代码补丁
 
 ```
-harness serve           起 HTTP 服务（POST /v1/run、GET /health）
+harness serve           HTTP 面：POST /v1/run、GET /health、只读看板 / 与 /api/*
 harness patch <diff>    验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
   --yes                 验证通过后落盘（代码补丁必须人工确认）
   --verify "npm test"   覆盖配置里的验证命令（code.verify）

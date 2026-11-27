@@ -1,6 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { ModelClient } from '@migor/agentia';
-import { discoverAssets } from '../assets/discover.js';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
@@ -15,18 +14,22 @@ import {
   statusOf,
   TIMED_OUT,
 } from './http.js';
+import { fingerprintOnDisk } from './read/workspace.js';
+import { handleReadRoute, type LastRun, type ReadRuntime } from './web.js';
 
 /**
- * 最小 HTTP 面。
- *
- * 只有两个端点，是刻意的：harness 的 server 不是产品，是**让别的进程能调这个
- * agent** 的缝。真要会话管理、审批、SSE 那一套，用 agentia 的 `transport/`
- * （它已经做完了），别在这里长第二套。
+ * HTTP 面：**执行入口 + 只读看板**。
  *
  * ```
  * POST /v1/run    { "task": "..." }  →  { text, ok, stopReason, tokens, costUsd, durationMs, traceId, skills }
  * GET  /health                       →  { ok, agent, assets, uptimeMs, queued, maxQueue, auth }
+ * GET  /                             →  只读看板（静态壳）
+ * GET  /openapi.json                 →  路由表自描述
+ * GET  /api/*                        →  报告 / 轮次 / 账本 / worker / 进度（见 `routes.ts`）
  * ```
+ *
+ * 只读面是 2026-11-28 按 D9 补上的：**web 只读，写权限留在 CLI 与常驻 worker 里**。
+ * 完整的路由清单在 `routes.ts`（单一来源），实现分居 `web.ts`（read）与本文件（core）。
  *
  * `/run` 与 `/v1/health` 是**旧路径别名**（版本前缀加进来之前只有这两个字符串，
  * 已有人在用）。新调用方写 `/v1/run` —— 有一天要破坏性改协议时，那是唯一能靠
@@ -101,6 +104,12 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
 
   let closing = false;
   let pending = 0;
+  /**
+   * 只读看板要的两个读数。放在**同一个可变对象**里而不是两个闭包变量：
+   * `/api/progress` 需要它们是同一刻的读数（「在跑」与「上一次结果」分开取，
+   * 会出现「running=true 但 lastRun 已经是刚才那次」的自相矛盾快照）。
+   */
+  const stats: { running: number; last: LastRun | null } = { running: 0, last: null };
   /** 串行链：一次只有一个 run 在跑（见文件头第 1 条） */
   let chain: Promise<unknown> = Promise.resolve();
 
@@ -115,6 +124,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       maxBody,
       maxQueue,
       ...(apiKey !== undefined ? { apiKey } : {}),
+      stats,
       isClosing: () => closing,
       queued: () => pending,
       queue: (fn) => {
@@ -168,6 +178,8 @@ interface HandlerCtx {
   readonly maxQueue: number;
   /** 已解析的鉴权 key；缺席 = 只服务回环地址 */
   readonly apiKey?: string | undefined;
+  /** 只读看板读的实时状态（见 `startServer` 里的注释） */
+  readonly stats: { running: number; last: LastRun | null };
   isClosing(): boolean;
   /** 当前排队 + 在飞的请求数（健康检查里给运维看，也用来确认串行闸真的在生效） */
   queued(): number;
@@ -180,6 +192,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
     if (c.isClosing()) {
       return json(res, 503, { error: '服务正在关闭，不再接受新请求' });
     }
+    // 只读看板与只读 API（`/`、`/openapi.json`、`/api/*`）。放在 health 之前：
+    // 它们按路由表匹配，不相干的路径会立刻返回 false，不会截走 `/v1/run`。
+    if (await handleReadRoute(req, res, url, readRuntime(c))) return;
     if (req.method === 'GET' && HEALTH_PATHS.has(url)) {
       // 服务的 runner 用的是**启动时**的资产快照。RSI 采纳之后磁盘变了而进程没变，
       // 探针若只报快照指纹，运维看到的是一台「资产是新的」的旧进程。现读一次磁盘，
@@ -234,6 +249,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
       // 超时仍必须由这里兑现（race），不能只靠把 signal 传下去 —— 见 util/abort.ts。
       const work = c.queue(async (): Promise<RunOutcome | typeof TIMED_OUT> => {
         const gate = combineAbort(undefined, c.timeoutMs);
+        c.stats.running += 1;
         try {
           const run = c.runner.run(task, {
             signal: gate.signal,
@@ -245,14 +261,29 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
           if (gate.timedOut()) return TIMED_OUT;
           throw e;
         } finally {
+          c.stats.running -= 1;
           gate.dispose();
         }
       });
       {
         const out = await work;
         if (out === TIMED_OUT) {
+          c.stats.last = {
+            at: new Date().toISOString(),
+            ok: false,
+            durationMs: c.timeoutMs,
+            traceId: '',
+            stopReason: 'timeout',
+          };
           return json(res, 504, { error: `请求超时（${c.timeoutMs}ms）`, code: 'run.timeout' });
         }
+        c.stats.last = {
+          at: new Date().toISOString(),
+          ok: out.ok,
+          durationMs: out.durationMs,
+          traceId: out.trace.traceId,
+          stopReason: out.stopReason,
+        };
         return json(res, 200, {
           text: out.text,
           ok: out.ok,
@@ -283,19 +314,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, c: HandlerCtx):
 }
 
 /**
- * 现读磁盘上的资产指纹（`/health` 的 `assetDrift` 用）。
- *
- * 服务的 runner 用的是**启动时**的快照，而 RSI 采纳会在进程活着的时候改盘。探针
- * 只报快照指纹时，运维看到的是「资产是新的」——实际跑的是旧的。
- *
- * `null` = 读不动（目录被删、frontmatter 坏了）。这里吞掉异常而不是让 `/health`
- * 跟着 500：进程还活着、还能接请求，只是资产和启动时不一样了 —— 那正是要靠
- * 探针说出来、然后重启的事，而不是把探针本身打挂。
+ * 只读面要的运行时视图（`web.ts` 的入参）。装配只在这一处，免得两处口径漂移
+ * ——「在跑吗」与「上一次结果」必须来自同一个 `stats` 对象才自洽。
  */
-function fingerprintOnDisk(config: HarnessConfig): string | null {
-  try {
-    return discoverAssets({ skills: config.skillsDir, agents: config.agentsDir }).fingerprint;
-  } catch {
-    return null;
-  }
+function readRuntime(c: HandlerCtx): ReadRuntime {
+  return {
+    config: c.config,
+    assets: c.assets,
+    startedAt: c.startedAt,
+    apiKey: c.apiKey,
+    maxQueue: c.maxQueue,
+    queued: () => c.queued(),
+    running: () => c.stats.running > 0,
+    lastRun: () => c.stats.last,
+  };
 }

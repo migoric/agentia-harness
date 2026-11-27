@@ -198,9 +198,10 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 | `harness evidence`       | 把报告导出成三层证据语料（经验 / 决策 / 对账）        |
 | `harness lock [--check]` | 重写资产锁 / 校验与锁一致                             |
 | `harness rsi`            | 跑一轮闭环（`--rounds` / `--dry-run` / `--max-cost`） |
+| `harness rsi --watch`    | 常驻推进（单实例锁 + 心跳 + 节流，写权限只在进程里）  |
 | `harness rsi regress`    | 采纳之后那些用例还通过吗（`--revert` 才动手）         |
 | `harness patch <diff>`   | 在 worktree 沙箱里验证一个代码补丁（`--yes` 才落盘）  |
-| `harness serve`          | 起 HTTP 服务（POST /v1/run、GET /health）             |
+| `harness serve`          | HTTP 面：POST /v1/run + 只读看板 `/` 与 `/api/*`      |
 
 退出码是接口的一部分：`0` 正常、`1` 跑了但没达标、`2` 配置/资产/用法错。**拼错字段一律退出码 2** —— 这些错此前都表现为「配了但没生效」，症状却出现在成本和通过率上。
 
@@ -208,7 +209,7 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 
 ## 已知边界
 
-- **server 是缝不是产品**：只有 `/v1/run` 与 `/health`。要会话、审批、SSE，用 agentia 的 `transport/`。
+- **web 只读，写权限只在进程里**：`serve` 提供 `/v1/run`、`/health` 与只读看板（`/`、`/api/*`）；写 `evals/`、assets、journal 只能通过 CLI 或 `rsi --watch`。要会话、审批、SSE，用 agentia 的 `transport/`。
 - **L2 只做增量改**，且提案不由模型生成：不支持删文件、重命名、二进制补丁；一个补丁只跑一条验证命令。
 - **只支持 Anthropic 兼容端点**：`pricing` 里配 OpenAI 模型不会让它走 OpenAI 端点，那只是价格表。
 - **评测默认不落 trace**：`--keep-traces` 才落盘。反复跑会把 `traces.jsonl` 撑成垃圾场。

@@ -18,6 +18,7 @@ import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { journal, ledger, regress, status } from './rsi-inspect.js';
+import { watchCommand } from './rsi-watch.js';
 import { tuningOf } from './run.js';
 
 /** `harness rsi [revert|status|propose|accept]` —— 闭环的入口 */
@@ -33,6 +34,8 @@ export async function rsiCommand(
   if (sub === 'journal') return journal(ctx);
   if (sub === 'propose') return proposeFrom(ctx);
   if (sub === 'accept') return acceptFrom(ctx);
+  // `--watch` 是「跑很多轮」的常驻形态，与 `--rounds` 互斥（后者是一次性跑完就退）
+  if (boolFlag(ctx.flags, 'watch')) return watchCommand(ctx);
   if (sub !== undefined) {
     throw new HarnessError(
       'config.invalid',

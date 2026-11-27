@@ -22,11 +22,14 @@
 
 ## HTTP 面
 
-`harness serve` 起一个最小服务，给**别的进程**调这个 agent。它不是产品：要会话、审批、SSE，用 agentia 的 `transport/`。
+`harness serve` 起两样东西：**执行入口**（给别的进程调这个 agent）和**只读看板**
+（给人看报告、轮次、账本、谁在跑）。会话、审批、SSE 那一套仍用 agentia 的
+`transport/` —— 这里不长第二套。
 
 ```bash
 curl -s localhost:8787/v1/run -H 'content-type: application/json' \
   -d '{"task":"看下这个 issue 该给谁"}' | jq .text
+open http://127.0.0.1:8787/    # 只读看板
 ```
 
 三道闸，缺省都是安全的那一侧：
@@ -46,6 +49,40 @@ curl -s localhost:8787/v1/run -H 'content-type: application/json' \
 `auth` 告诉你这台机器当前是 `key` 还是 `loopback`；`assetDrift` 告诉你**磁盘上的资产是否已经和进程里那份快照不一样了** —— RSI 采纳之后就是这种情况，此时进程跑的仍是旧资产，该重启。`assetDrift: null` 表示磁盘读不动（文件坏了/被删），这也得能看见：进程还活着，只是它手里的资产来源没了。
 
 `/v1/run` 的超时**从真正开始执行算起**，不含排队时间。否则队列里有 8 个请求时，排在最后那个可能「还没跑就超时」，而它拿到的 504 会被读成「模型太慢」。
+
+### 只读看板与只读 API
+
+路由表的**单一来源**是 `src/server/routes.ts`，`GET /openapi.json` 由它生成 ——
+文档与实现不会各说各话（判据 20 用「双向枚举 + 每条路由真的应答」验这件事）。
+
+| 路径 | 内容 |
+| --- | --- |
+| `GET /` | 看板（静态壳：概览 / 报告 / 轮次 / 账本；零外链，断网可用） |
+| `GET /openapi.json` | 路由表自描述 |
+| `GET /api/workspace` | 资产指纹与漂移、各目录条目数、worker 状态 |
+| `GET /api/reports` | `.workspace/reports/*.json` 的摘要列表 + 读不动的文件与原因 |
+| `GET /api/reports/:name` | 单份报告**原样**返回（报告是证据，不替它补字段） |
+| `GET /api/rsi/cycles`、`/api/rsi/cycles/:id` | 轮次列表与单轮明细（明细不含宿主绝对路径） |
+| `GET /api/rsi/journal?limit=50` | 账本尾部 |
+| `GET /api/rsi/worker` | worker 的锁与心跳（谁在跑、还活着吗） |
+| `GET /api/progress` | 在飞 / 排队 / 最近一次 run 的结果 |
+
+**web 不持有写权限**（D9）。写工作区（`evals/`、assets、journal）只在 CLI 与
+`rsi --watch` 里：`POST /eval`、`PUT /assets` 这类请求一律 `405` + `allow: GET`，
+不存在「只是还没做」的写口。理由不是洁癖 —— RSI 的正确性建立在「同时只有一轮在推进、
+提案与采纳在同一进程、每一步都可回滚」三个前提上，网络触发会把它们同时打掉，而且
+失败是静默的（文件改了、历史没写）。
+
+鉴权口径与 `/v1/run` 一致：配了 `server.apiKeyEnv` 就必须带 Bearer。**例外是 `/` 与
+`/openapi.json`** —— 它们是纯静态壳（不含任何工作区数据），浏览器没有方便的带 header
+方式，让它们免费换来的是「打开页面就知道该敲哪条命令」；数据仍然要凭据。
+
+生成报告给看板读：
+
+```bash
+harness eval --save .workspace/reports/$(date +%F).json
+harness serve --port 8787
+```
 
 ## 代码补丁（L2）
 
@@ -82,7 +119,7 @@ L1 改的是提示词，能修的是「模型理解错了」。有些失败改�
 - **不做并行分支编排**：并行留给工具层（`maxToolConcurrency`）。两套并行的闸比没有闸更危险。
 - **`suspended` 不在本层**：等审批 / 等时刻交给外层 run 的 `approvals`。图的检查点与 HITL 挂起是两种中断，混在一起会让「续跑」有两个互相不知道的状态源。
 - **没有自己的预算账本**：累计成本靠外层 run 或宿主推进。
-- **server 是缝不是产品**：只有 `/v1/run` 与 `/health`。要会话、审批、SSE，用 agentia 的 `transport/`。
+- **web 只读，写权限只在进程里**：只读看板与 `/api/*` 全是 GET；写 `evals/`、assets、journal 只能通过 CLI 或 `rsi --watch`。要会话、审批、SSE，用 agentia 的 `transport/`。
 - **超时与配额只管单进程**：请求串行、队列有上限、单请求有超时；没有跨进程调度与分布式限流。多副本请在前面加一层网关，或按副本数自行分摊。
 - **评测默认不落 trace**：`harness eval --keep-traces` 才落盘，同时把 `traceId` 写进报告（失败用例会打印出来）。缺省不落是纪律 —— 评测反复跑会把 `traces.jsonl` 撑成垃圾场。
 - **`.workspace/` 可整体删除**：`traces.jsonl`、`rsi/`（journal、cycles、proposals）、`evidence/`、`sandbox/` 全是运行时产物，删掉不影响下次运行。代价是丢掉审计历史 —— 预测对账、采纳记录、回归基准都从这里读，删了就只能从 git 里看资产改了什么。目前没有轮转策略，长期跑要自己看着点。

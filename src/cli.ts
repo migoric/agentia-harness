@@ -65,6 +65,10 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --max-verify <n>      最多验证几个提案（缺省 3）
     --max-cost <usd>      整次运行的成本上限（--rounds 下跨轮共享；覆盖配置 maxCostUsd）
     --shrink-every <n>    连续 n 条改动没让资产变小，就强制下一轮只接受净简化提案（缺省 5）
+    --watch               常驻推进：一轮一改、串行、有节流与停手条件（D9：写权限只在进程里）
+    --every <s>           轮与轮之间的间隔秒数（缺省 900）
+    --max-rounds <n>      最多跑几轮
+    --until <时间>        到这个时刻就停（ISO 或 2026-11-29T08:00）
     --timeout/--concurrency/--retries   见 eval 节
   rsi revert [id]         回滚最近一次采纳（给 id 可防期间插入新采纳）
   rsi status              看采纳历史
@@ -79,7 +83,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --verify "npm test"   覆盖配置里的验证命令
     --timeout <ms>        验证命令超时（缺省 10 分钟）
     --revert              回滚最近一次代码补丁
-  serve                   起 HTTP 服务（POST /v1/run、GET /health）
+  serve                   起 HTTP 服务（POST /v1/run、GET /health、只读看板 / 与 /api/*）
     --port <n>            端口（缺省 8787）
     --host <ip>           监听地址（缺省 127.0.0.1；对外监听需配 server.apiKeyEnv）
     --timeout <ms>        单次 /v1/run 的超时（超时按 504 返回）
@@ -115,6 +119,10 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'concurrency',
     'retries',
     'repair',
+    'watch',
+    'every',
+    'max-rounds',
+    'until',
   ],
   patch: ['yes', 'verify', 'timeout', 'revert'],
   serve: ['port', 'host', 'timeout'],
