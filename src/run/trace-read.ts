@@ -59,7 +59,13 @@ export function readTraceLines(
   try {
     text = readFileSync(path, 'utf8');
   } catch {
-    throw new Error(`读不到 ${path} —— 还没跑过任何任务（或路径不对）`);
+    // 「文件不存在」有两种常见成因，而默认的那种**不是**「没跑过」：trace 默认不落盘
+    // （每次留一份会让 .workspace 涨得很快），所以跑过十次 eval 的工程照样可以没有这个
+    // 文件，而报告里的 `traceId` 一直填着。说成「还没跑过任何任务」会把人引向
+    // 「是不是评测没跑成功」—— 真正要做的是加 `--keep-traces` 重跑一次。
+    throw new Error(
+      `读不到 ${path} —— 这个工程还没落过 trace。trace 默认不留：跑 eval 时加 --keep-traces 才有（路径不对也会走到这里）`,
+    );
   }
   const all = text.split('\n').filter((l) => l.trim() !== '');
   const lines = tail !== undefined && tail > 0 ? all.slice(-tail) : all;

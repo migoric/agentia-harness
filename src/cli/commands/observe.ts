@@ -26,9 +26,17 @@ export function traceCommand(ctx: CliContext, id: string | undefined): number {
   const traces = readTraces(ctx.config, numFlag(ctx.flags, 'tail'));
   const hit = traces.filter((t) => t.traceId.startsWith(id)).at(-1);
   if (hit === undefined) {
+    // 「找不到」有两种截然不同的病因，报同一句话会让人往错的方向查：
+    // 一条都没落过（没开 `--keep-traces`，或者报告是别的机器跑的）与落过但没匹配上
+    // （前缀打错、或要的那条在 `--tail` 窗口之外）。前者占绝大多数 —— 默认就不落盘，
+    // 而报告里的 `traceId` 照样是填着的，于是「报告里有 id、trace 里查不到」是常态。
+    const why =
+      traces.length === 0
+        ? '还没有任何 trace 落盘 —— trace 默认不留（每次落盘会让 .workspace 涨得很快），跑 eval 时加 --keep-traces 才会留'
+        : '共落了这么些条；id 支持前缀匹配，要查更早的加 --tail <n>（缺省只看全部）';
     throw new HarnessError(
       'run.failed',
-      `${ctx.config.tracesPath} 里没有以 "${id}" 开头的 trace（共 ${traces.length} 条）`,
+      `${ctx.config.tracesPath} 里没有以 "${id}" 开头的 trace（共 ${traces.length} 条）—— ${why}`,
     );
   }
   if (boolFlag(ctx.flags, 'json')) json(hit);
