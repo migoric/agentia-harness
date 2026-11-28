@@ -237,10 +237,12 @@ export class LlmProposer implements Proposer {
     if (after.trim() === before.trim()) {
       throw new HarnessError('rsi.no_signal', `提案没有实际改动 ${target}（模式 ${mode.id}）`);
     }
-    if (after.length > before.length * 3) {
+    const limit = maxAfterChars(before);
+    if (after.trim().length > limit) {
       throw new HarnessError(
         'rsi.no_signal',
-        `提案把 ${target} 扩张到 ${after.length} 字（原文 ${before.length}）—— 超过 3 倍几乎总是模型在复述任务而非改进`,
+        `提案把 ${target} 扩张到 ${after.trim().length} 字（原文 ${before.trim().length}，上限 ${limit}）` +
+          ' —— 超出这个量级几乎总是模型在复述任务而非改进',
       );
     }
     if (after.trimStart().startsWith('---')) {
@@ -276,6 +278,11 @@ ${renderLessons(lessons)}${renderShrink(shrink, current)}
 """
 ${current}
 """
+
+## 长度上限
+改写后的正文不得超过 ${maxAfterChars(current)} 字（现在是 ${current.trim().length} 字）。
+超过会被**直接丢弃**，连验证都不会跑 —— 这是机器判据，不是风格建议。
+短正文（几百字以内）允许比原稿长很多，但别把用例的任务描述抄进来。
 
 ## 你的任务
 ${shrink === undefined ? '改写上面这段正文，使这类失败不再发生。直接输出新正文。改不出有把握的方案就输出 NONE。' : '在满足简化轮要求的前提下改写上面这段正文（能顺手修掉这次失败更好，但**变小**是硬要求）。直接输出新正文；这段正文确实没有可删的冗余就输出 NONE。'}`;
@@ -332,6 +339,23 @@ ${lines.join('\n')}
 这些方向被真实验证否定过。如果你的方案与其中某条本质相同（同一个目标 + 同一种改法），
 换个不同的改法；如果你认为上次失败另有原因，不要解释，直接给出**不同**的写法。
 `;
+}
+
+/**
+ * 提案正文的长度上限 —— 守卫与提示词**共用这一个数**。
+ *
+ * 3 倍是给长正文的：一份 2000 字的提示词被扩到 6000 字，几乎一定是在复述任务。
+ * 但短正文按 3 倍卡会把**合理的增补**判死：87 字的摘要器技能要加上「日期格式」「输出
+ * 示例」两段就过 300 字，而模型完全是在按指令做事 —— `PROPOSER_SYSTEM` 第 3 条明确
+ * 写着「默认的改动方向是增补或收紧」。400 字是给这种情况的底板。
+ *
+ * 这个数还必须**写进提案提示词**（见 `renderPrompt`）：机器约束不告诉模型，它只能猜，
+ * 而猜错的代价是一整轮验证的钱。2026-11-28 用真模型跑 RSI 时实测到：87 字的技能被
+ * 扩到 739 字、提案直接被丢，RSI 一轮提出 0 个提案 —— 而 mock 模型永远只追加一句，
+ * 所以这条冲突在此之前从未暴露。
+ */
+export function maxAfterChars(before: string): number {
+  return Math.max(before.trim().length * 3, 400);
 }
 
 /** 模型习惯包 ``` 围栏；剥掉它，否则正文里会混进 Markdown 代码块标记 */
