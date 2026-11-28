@@ -13,6 +13,46 @@ import { aggregateHits, aggregateModels, unionOrUnknown } from './aggregate.js';
 import type { CaseResult, EvalReport, ReportEnv } from './types.js';
 
 /**
+ * 全部用例采了同样多次才有共同的区间分母；任何一条缺席或数值不同 ⇒ `undefined`。
+ *
+ * 为什么不允许「取最大/取平均」：区间回答的是「这个通过率有多稳」，而分母不一致时
+ * 那个问题本身没有答案 —— 三条用例各跑 3 次与一条跑 3 次、两条跑 1 次，后者的
+ * 有效样本量不是一个整数，硬凑一个数就会算出一个看不出问题的区间。
+ */
+function uniformSamples(cases: readonly CaseResult[]): number | undefined {
+  const first = cases[0]?.samples;
+  if (first === undefined) return undefined;
+  return cases.every((c) => c.samples === first) ? first : undefined;
+}
+
+/**
+ * Wilson score 区间（95%）。
+ *
+ * 选它而不是 `p ± 1.96·√(p(1-p)/n)`：后者在 p 贴近 0 或 1 时会算出越界的上下限
+ * （负数或 >100%），而 RSI 长期运行在「几乎全过」这个角落。Wilson 在极端比例与
+ * 小样本下都不越界，且 n 很小时会自动给出一个诚实的宽区间。
+ *
+ * `n === 0` 时返回 `[0, 1]` —— 「什么都不知道」的正确表达，而不是 0。
+ */
+export function wilsonInterval(
+  passed: number,
+  total: number,
+  z = 1.96,
+): { readonly low: number; readonly high: number } {
+  if (total <= 0) return { low: 0, high: 1 };
+  const p = passed / total;
+  const z2 = z * z;
+  const denom = 1 + z2 / total;
+  const center = (p + z2 / (2 * total)) / denom;
+  const margin = (z * Math.sqrt((p * (1 - p)) / total + z2 / (4 * total * total))) / denom;
+  // 夹紧到 [0,1]：浮点误差在 p=0 / p=1 时可能让边界偏出一个 ulp
+  return {
+    low: Math.max(0, Math.min(1, center - margin)),
+    high: Math.max(0, Math.min(1, center + margin)),
+  };
+}
+
+/**
  * 报告结构版本。
  *
  * 为什么要它：报告是**跨版本**消费的（基线可能是上个版本写的，读取方是今天这个版本）。
@@ -64,11 +104,25 @@ export function summarize(
   const menuHashes = unionOrUnknown(cases, (c) => c.menuHash);
   const route = aggregateRoute(cases);
   const promptVersions = unionOrUnknown(cases, (c) => c.promptVersions);
+
+  // 采样口径：**全部用例一致**才算有共同分母，否则整体缺席（见 EvalReport.samples）
+  const samples = uniformSamples(cases);
+  const totalSamples = cases.reduce((sum, c) => sum + (c.samples ?? 1), 0);
+  // 老报告没有 passedSamples：按 `passed ? 1 : 0` 回填，与 samples=1 完全等价
+  const passedSamples = cases.reduce((sum, c) => sum + (c.passedSamples ?? (c.passed ? 1 : 0)), 0);
+  const ci =
+    samples !== undefined && samples > 1 && totalSamples > 0
+      ? wilsonInterval(passedSamples, totalSamples)
+      : undefined;
+
   return {
     schemaVersion: EVAL_REPORT_SCHEMA_VERSION,
     total: cases.length,
     passed,
-    passRate: cases.length === 0 ? 0 : passed / cases.length,
+    // 样本级微平均：samples=1 时与 `passed / total` 逐位相同，老口径不变
+    passRate: totalSamples === 0 ? 0 : passedSamples / totalSamples,
+    ...(samples === undefined ? {} : { samples }),
+    ...(ci === undefined ? {} : { passRateLow: ci.low, passRateHigh: ci.high }),
     tokens: cases.reduce((sum, c) => sum + c.tokens, 0),
     costUsd: priced.reduce((sum, c) => sum + (c.costUsd ?? 0), 0),
     // 一条用例没定价就让整轮「成本不可比」—— 总和偏低会漏判成本回退

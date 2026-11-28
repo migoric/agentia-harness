@@ -75,6 +75,7 @@ export async function validateHoldout(opts: HoldoutOptions): Promise<HoldoutResu
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
       ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+      ...(opts.repeat !== undefined ? { repeat: opts.repeat } : {}),
       only: opts.cases,
     }),
   );

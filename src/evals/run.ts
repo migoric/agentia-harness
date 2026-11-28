@@ -8,7 +8,7 @@ import { createRunner } from '../run/runner.js';
 import { harnessVersion } from '../version.js';
 import { loadEvalCases } from './load.js';
 import { summarize } from './report.js';
-import { runOne } from './run-one.js';
+import { runSampled } from './sample.js';
 import { caseSetFingerprint, type EvalReport } from './types.js';
 
 // 工具事件提取的唯一实现搬到了 tool-events.ts（序列 / 次数 / 参数共用一份扫描）。
@@ -45,6 +45,14 @@ export interface SuiteTuning {
   readonly concurrency?: number | undefined;
   /** 只对「run 抛出」重试的次数（缺省 0） */
   readonly retries?: number | undefined;
+  /**
+   * 每条用例重复采样几次（缺省 1，即不重复）。
+   *
+   * 与 `retries` 正交，两者不能互相替代：`retries` 是「跑崩了再来一次」
+   * （只对崩溃生效，断言失败不重试），`repeat` 是「同样条件多采几次」
+   * （对断言结果采样，用来把噪声和真实变化分开）。
+   */
+  readonly repeat?: number | undefined;
 }
 
 /**
@@ -59,6 +67,7 @@ export function pickTuning(o: SuiteTuning): SuiteTuning {
     ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
     ...(o.concurrency !== undefined ? { concurrency: o.concurrency } : {}),
     ...(o.retries !== undefined ? { retries: o.retries } : {}),
+    ...(o.repeat !== undefined ? { repeat: o.repeat } : {}),
   };
 }
 
@@ -113,10 +122,13 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
       opts.keepTraces === true,
     ) as unknown as CaseRunner);
   const limit = Math.max(1, opts.concurrency ?? 1);
-  // 有界并发 + 保序直接用上游实现（agentia 公共面导出，边界处理更细）——
-  // 结果顺序决定两次跑分的 diff 是不是噪声；本地曾有过一份逐行等价的实现，
-  // 那种「改一处漏一处」的重复比复用的耦合贵得多
-  const results = await mapWithConcurrency(cases, limit, (c) => runOne(runner, c, opts));
+  const repeat = Math.max(1, opts.repeat ?? 1);
+  // 并发粒度是**用例**，不是单次采样：`--concurrency 4 --repeat 3` 同时飞 4 条用例、
+  // 每条内部串行跑 3 次，而不是同时飞 12 个请求。后者会让「一轮花了多少钱」
+  // 与「哪条用例贵」互相污染，而 RSI 的成本归因全靠这个
+  const results = await mapWithConcurrency(cases, limit, (c) =>
+    runSampled(runner, c, opts, repeat),
+  );
   return summarize(
     results,
     opts.assets.fingerprint,
@@ -146,3 +158,4 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
  */
 export { check } from './check.js';
 export { type OneShotOptions, runOne } from './run-one.js';
+export { aggregateSamples, runSampled } from './sample.js';

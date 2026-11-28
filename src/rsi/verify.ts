@@ -113,6 +113,7 @@ export async function verifyProposal(opts: VerifyOptions): Promise<VerifyOutcome
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
       ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+      ...(opts.repeat !== undefined ? { repeat: opts.repeat } : {}),
       ...(opts.only !== undefined ? { only: opts.only } : {}),
     }),
   );

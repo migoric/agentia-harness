@@ -1,6 +1,6 @@
 import type { DiffEntry, Span, Trace, TraceDiff } from '@migor/agentia';
 import type { GateResult } from '../evals/gate.js';
-import type { EvalReport } from '../evals/types.js';
+import type { CaseResult, EvalReport } from '../evals/types.js';
 
 /**
  * 终端渲染 —— 纯函数，不碰 IO。
@@ -87,14 +87,16 @@ export function renderReport(report: EvalReport): string {
   const lines: string[] = [];
   for (const c of report.cases) {
     lines.push(
-      `${c.passed ? 'PASS' : 'FAIL'}  ${c.name}  (${c.tokens} token${fmtCost(c.costUsd)}, ${c.iterations} 轮)` +
+      // 采样次数 >1 时把「2/3 通过」写在状态后面：它解释了为什么这条既可能是 PASS
+      // 也可能看起来像噪声 —— 不写的话，同一条用例两次跑出不同结论时无从解释
+      `${c.passed ? 'PASS' : 'FAIL'}${fmtSamples(c)}  ${c.name}  (${c.tokens} token${fmtCost(c.costUsd)}, ${c.iterations} 轮)` +
         // 只给失败用例附上 traceId：成功用例也可以有，但打出来全是噪声
         (c.passed || c.traceId === undefined ? '' : `  trace ${c.traceId}`),
     );
     for (const f of c.failures) lines.push(`      - ${f}`);
   }
   lines.push(
-    `\n${report.passed}/${report.total} 通过（${(report.passRate * 100).toFixed(1)}%）· ` +
+    `\n${report.passed}/${report.total} 通过（${fmtRate(report)}）· ` +
       `${report.tokens} token${report.costKnown ? fmtCost(report.costUsd) : ''} · 资产 ${report.assetFingerprint}`,
   );
   /*
@@ -137,8 +139,8 @@ export function renderComparison(
   g: GateResult,
 ): string {
   const lines = [
-    `基线  ${baseline.passed}/${baseline.total}（${(baseline.passRate * 100).toFixed(1)}%）· ${baseline.tokens} token${baseline.costKnown ? fmtCost(baseline.costUsd) : ''} · ${baseline.assetFingerprint}`,
-    `候选  ${candidate.passed}/${candidate.total}（${(candidate.passRate * 100).toFixed(1)}%）· ${candidate.tokens} token${candidate.costKnown ? fmtCost(candidate.costUsd) : ''} · ${candidate.assetFingerprint}`,
+    `基线  ${baseline.passed}/${baseline.total}（${fmtRate(baseline)}）· ${baseline.tokens} token${baseline.costKnown ? fmtCost(baseline.costUsd) : ''} · ${baseline.assetFingerprint}`,
+    `候选  ${candidate.passed}/${candidate.total}（${fmtRate(candidate)}）· ${candidate.tokens} token${candidate.costKnown ? fmtCost(candidate.costUsd) : ''} · ${candidate.assetFingerprint}`,
     `环境  模型 ${fmtModel(baseline)} → ${fmtModel(candidate)} · ` +
       `agent ${baseline.agent} → ${candidate.agent} · ` +
       `harness ${baseline.harnessVersion ?? '未记录'} → ${candidate.harnessVersion ?? '未记录'}`,
@@ -323,4 +325,23 @@ function fmtSide(v: unknown): string {
 function truncate(text: string): string {
   const MAX = 90;
   return text.length <= MAX ? text : `${text.slice(0, MAX)}…`;
+}
+
+const pct = (x: number): string => `${(x * 100).toFixed(1)}%`;
+
+/**
+ * 通过率 —— 有区间就把区间一起打出来。
+ *
+ * 只打点估计会让人把 88.0% → 88.0% 读成「没变化」，而两次单次采样的读数本来就
+ * 分不出这一点点差异。区间在场时，「没变化」与「样本不够」是两件可以区分的事。
+ */
+function fmtRate(r: EvalReport): string {
+  if (r.passRateLow === undefined || r.passRateHigh === undefined) return pct(r.passRate);
+  return `${pct(r.passRate)}；95% 区间 ${pct(r.passRateLow)}–${pct(r.passRateHigh)}，各 ${r.samples ?? '?'} 次采样`;
+}
+
+/** 单条用例的采样读数（`(2/3)`）；没重复采样时返回空串，不改变原输出 */
+function fmtSamples(c: CaseResult): string {
+  if (c.samples === undefined || c.samples <= 1) return '';
+  return `(${c.passedSamples ?? (c.passed ? 1 : 0)}/${c.samples})`;
 }

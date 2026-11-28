@@ -106,6 +106,25 @@ export interface CaseResult {
   readonly task: string;
   readonly passed: boolean;
   readonly failures: readonly string[];
+  /**
+   * 这条用例被**采样**了几次（`--repeat n`）。缺席 = 1（没开重复采样，或老报告）。
+   *
+   * 与 `turns` 不是一回事：`turns` 是同一段对话往深处走一轮（被测对象变了），
+   * `samples` 是同一段对话从头再来一遍（只减小测量噪声，被测对象不变）。混成一个
+   * 字段会让「多轮用例跑了一次」与「单轮用例跑了三次」在报告里长得一样。
+   *
+   * 缺席而不是写 1：老报告没有这个字段，而「跑了一次」与「不知道跑了几次」在
+   * 判据里的权重不同 —— 只有前者能用点估计当结论。
+   */
+  readonly samples?: number | undefined;
+  /**
+   * 这 `samples` 次里通过了几次。缺席 = `passed ? 1 : 0`（老报告 / 未重复采样）。
+   *
+   * `passed` 是它的**过半**判定（`passedSamples * 2 >= samples`），不是「全部通过」：
+   * 温度不为 0 时要求次次通过，等于把长尾当退步，RSI 会因此拒绝所有正常改动。
+   * 判「有没有退步」的活交给 `EvalReport.passRate` 的区间，而不是这个布尔。
+   */
+  readonly passedSamples?: number | undefined;
   readonly tokens: number;
   /**
    * 这条用例花了多少美元；`undefined` = 没有读数（脚本客户端，或模型不在价格表内）。
@@ -240,7 +259,38 @@ export interface EvalReport {
   readonly schemaVersion?: number | undefined;
   readonly total: number;
   readonly passed: number;
+  /**
+   * 通过率 —— **样本级**微平均（`Σ passedSamples / Σ samples`），不是用例级比值。
+   *
+   * 两者在 `--repeat 1` 时数值相同（每条恰好一个样本），所以老报告的读法不变；
+   * 开了重复采样之后才有区别，而样本级是唯一能让区间算得出来的口径 ——
+   * 按用例数当分母，方差无从估计（3 条用例各跑 3 次，自由度不是 3 而是 9）。
+   */
   readonly passRate: number;
+  /**
+   * 每条用例被采样的次数（`--repeat`）。缺席 = 没开重复采样，或**各条不一致**
+   * （部分用例跑 3 次、部分跑 1 次时，整体区间没有共同的分母）。
+   *
+   * 写 1 而不是省略是不行的：1 意味着「每条跑了一次」，那是一个**可用点估计**的
+   * 声明；缺席意味着「不知道」。回退门对这两者的处理不同（见 `gate`）。
+   */
+  readonly samples?: number | undefined;
+  /**
+   * 通过率的 Wilson 95% 区间（按**采样次数**算，不是按用例数）。
+   *
+   * 为什么是 Wilson 而不是 `p ± 1.96·σ`：样本量小（3~5 次）且 p 贴近 0/1 时，
+   * 正态近似会算出越界的上下限（< 0 或 > 1），而 RSI 恰恰长期运行在「几乎全过」
+   * 这个角落里。Wilson 在小样本与极端比例下都不越界，是这里唯一能用的近似。
+   *
+   * 一个刻意的近似：把同一条用例的 N 次采样当成独立伯努利试验。严格说它们不独立
+   * （同一条提示词、同一个模型），真实方差会更大一点 —— 于是这个区间**偏窄**。
+   * 偏窄的方向是「更容易判出显著性」，也就是更保守地保护判据（宁可漏报退步，
+   * 不把噪声当退步）。这个方向是有意选的。
+   *
+   * 缺席 = 不知道（老报告 / 没开重复采样）—— 此时门退回点估计，与引入区间之前一致。
+   */
+  readonly passRateLow?: number | undefined;
+  readonly passRateHigh?: number | undefined;
   readonly tokens: number;
   /** 全轮美元成本；`costKnown` 为 false 时这个 0 不代表免费（见 `costKnown`） */
   readonly costUsd: number;

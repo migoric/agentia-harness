@@ -186,6 +186,28 @@ const root = await project();
     (report.skillHits ?? []).some((h) => h.target === 'skill:example'),
     `skillHits=${JSON.stringify(report.skillHits)}`,
   );
+
+  // `--repeat` 的 CLI 接线只有这条能覆盖：单测直接调 `aggregateSamples`，绕过了
+  // flag 解析、`tuningOf` 透传与 `summarize` 的样本级汇总三处
+  const repSave = join(root, '.workspace', 'offline-repeat.json');
+  const rep = await cli(['eval', '--repeat', '3', '--save', repSave], { root, base: fake.url });
+  const repReport = JSON.parse(readFileSync(repSave, 'utf8'));
+  const firstCase = repReport.cases?.[0] ?? {};
+  check(
+    'eval --repeat 3：每条采 3 次、逐条记样本数、报告带 Wilson 区间',
+    rep.code === 0 &&
+      repReport.samples === 3 &&
+      firstCase.samples === 3 &&
+      firstCase.passedSamples === 3 &&
+      typeof repReport.passRateLow === 'number' &&
+      typeof repReport.passRateHigh === 'number',
+    `code=${rep.code} samples=${repReport.samples} case=${JSON.stringify({ s: firstCase.samples, p: firstCase.passedSamples })} ci=${repReport.passRateLow}~${repReport.passRateHigh}\n${rep.out}`,
+  );
+  check(
+    'eval --repeat 3：token 是三次的和，不是平均（报告要能对上账）',
+    repReport.tokens === report.tokens * 3,
+    `单次=${report.tokens} 三次=${repReport.tokens}`,
+  );
   fake.stop();
 }
 

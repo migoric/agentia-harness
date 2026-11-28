@@ -53,6 +53,14 @@ export interface RunRoundsOptions {
   readonly timeoutMs?: number | undefined;
   readonly concurrency?: number | undefined;
   readonly retries?: number | undefined;
+  /**
+   * 每条用例重复采样几次（见 `SuiteTuning.repeat`）。
+   *
+   * 跨轮必须**同一个值**：第 1 轮采 1 次、第 2 轮采 3 次时，两轮的通过率不在同一个
+   * 噪声水平上，`gate` 会拿一个更稳的读数去比一个更抖的读数 —— 那让「本轮变好了」
+   * 变成采样次数的函数。
+   */
+  readonly repeat?: number | undefined;
   /** 净简化配额的阈值（每轮现算状态，不跨轮维护游标） */
   readonly shrinkPolicy?: ShrinkPolicy | undefined;
   /** 每轮结束后的回调（CLI 用它打印） */
@@ -141,6 +149,7 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
       ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+      ...(opts.repeat !== undefined ? { repeat: opts.repeat } : {}),
       ...(opts.shrinkPolicy !== undefined ? { shrinkPolicy: opts.shrinkPolicy } : {}),
       ...(opts.stage !== undefined ? { stage: opts.stage } : {}),
       ...(opts.runner !== undefined ? { runner: opts.runner } : {}),

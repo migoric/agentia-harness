@@ -25,7 +25,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "test": "node --import tsx --test 'tests/**/*.test.ts'",
+    "test": "node --experimental-test-coverage --test-coverage-exclude='tests/**' --test-coverage-lines=87 --test-coverage-branches=79 --test-coverage-functions=88 --import tsx --test 'tests/**/*.test.ts'",
     "test:watch": "node --import tsx --test --watch 'tests/**/*.test.ts'",
     "e2e:offline": "node scripts/offline-e2e.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",

@@ -1,5 +1,6 @@
 import { sameModelSet } from '../run/model-read.js';
 import { usd } from '../util/usd.js';
+import { significance } from './significance.js';
 import type { EvalReport } from './types.js';
 
 /**
@@ -55,6 +56,14 @@ export interface GateResult {
     | 'case_set_changed'
     | 'case_regression'
     | 'pass_rate_dropped'
+    /**
+     * 通过率降了，但在重复采样下**没到显著**（单侧 z 检验未过临界值）。
+     *
+     * 单独一个 code 而不是并进 `pass`：`pass` 的意思是「没看出问题」，这个的意思是
+     * 「看出了一个下降，但当前的采样量不足以支持结论」。两者的下一步不同 ——
+     * 后者该做的是加大 `--repeat`，而不是再改一版提示词。
+     */
+    | 'pass_rate_dropped_not_significant'
     | 'cost_regression'
     | 'token_regression'
     | 'not_comparable';
@@ -251,11 +260,29 @@ function gateCore(baseline: EvalReport, candidate: EvalReport, opts: GateOptions
     };
   }
   if (passRateDelta < 0) {
+    const sig = significance(baseline, candidate, shared);
+    if (sig !== undefined && !sig.significant) {
+      // 有重复采样、但下降没达到显著 ⇒ 不否决。
+      //
+      // 这是整条门里唯一「看见了退步却放行」的分支，所以理由必须写成可以被复核的
+      // 一句话，而不是「噪声」两个字：给出两边的次数、采样数、z 值。读的人要能立刻
+      // 判断「是我该加 --repeat，还是这条真的没退步」。
+      return {
+        ...common,
+        ok: true,
+        code: 'pass_rate_dropped_not_significant',
+        reason:
+          `通过率下降 ${(Math.abs(passRateDelta) * 100).toFixed(1)}pt（${sig.baseRate} → ${sig.candRate}，` +
+          `各采样 ${sig.samples} 次），但统计上不足以判为退步（单侧 z=${sig.z.toFixed(2)}，` +
+          `未过 -1.645）—— 按通过处理，下降已记录。想让它成为判据就把 --repeat 加大`,
+      };
+    }
     return {
       ...common,
       ok: false,
       code: 'pass_rate_dropped',
-      reason: `通过率下降 ${(passRateDelta * 100).toFixed(1)}pt（${baseRate} → ${candRate}${scopeNote}）`,
+      // `Math.abs`：`passRateDelta` 本身带负号，与「下降」连写会输出「下降 -33.3pt」
+      reason: `通过率下降 ${(Math.abs(passRateDelta) * 100).toFixed(1)}pt（${baseRate} → ${candRate}${scopeNote}）`,
     };
   }
   if (passRateDelta === 0) {

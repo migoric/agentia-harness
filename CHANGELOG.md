@@ -4,6 +4,40 @@
 
 格式：`## [版本] - 日期`，每条都说清「改了什么」与「为什么」。
 
+## [Unreleased]
+
+### 新增
+
+**`--repeat n`：把「单次观测」变成「测量」。**
+
+回归门一直有否决权，而它读的 `passRate` 此前是**一次观测**：温度不是 0，同一条用例同一份
+资产两次跑分本来就可能一个过一个挂。88% → 92% 可能只是两次抽样之差，`pass_rate_dropped`
+会据此否决一个本身没问题的提案；反向的假进步还会进账本，成为下一轮的先验 —— 错误就此复利。
+
+- `src/evals/sample.ts`（新）：同一条用例重复采样 N 次并聚合。**N=1 时原样返回**，
+  一个字段都不加 —— 默认路径与没有这个特性时逐字节相同；
+- `CaseResult` 增 `samples` / `passedSamples`；`EvalReport` 增 `samples` 与
+  `passRateLow` / `passRateHigh`（Wilson 95%，小样本与极端比例下都不越界）；
+- `passRate` 改为**样本级微平均**（`Σ passed / Σ samples`）。`samples=1` 时与旧的
+  用例级比值逐位相同，老报告的读法不变；
+- `src/evals/significance.ts`（新）：两比例单侧 z 检验。`gate` 只在「两边采样数相同且
+  ≥ 2、用例集相同、z < -1.645」时按退步否决；否则退回点估计，行为与之前完全一致；
+- 新增门结论 `pass_rate_dropped_not_significant`（`ok: true`）：看见了下降但采样量
+  不足以支持结论。**单独一个 code**，因为它下一步该做的是加大 `--repeat`，不是改提示词；
+- `--repeat` 走 `tuningOf` 单点接线，`eval` / `rsi` / `rsi --watch` / `rsi regress` /
+  留出集自动同值 —— 基线跑 1 次、候选跑 3 次会让门拿两种噪声水平的读数互比。
+
+### 变更
+
+**测试带上覆盖率门禁**（`npm test` 内建）。
+
+此前 93% 只是「这次碰巧」：CI 不跑覆盖率、不设阈值，新模块（`config-balance.ts`）
+已经掉到 77% 行 / 58% 分支而无人知晓。现在 `npm test` 用
+`--test-coverage-exclude='tests/**'` 只统计 `src/`，阈值 87 行 / 79 分支 / 88 函数
+（当前水位 89.4 / 81.1 / 90.2）。
+
+顺带修一处旧文案：`pass_rate_dropped` 的理由原先输出「下降 -33.3pt」（负号重复）。
+
 ## [0.4.0] - 2026-11-28
 
 > **依赖前提**：本版起 `src/run/menu-read.ts` 从 `@migor/agentia` import 三个 run 根属性常量

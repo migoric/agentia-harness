@@ -82,6 +82,7 @@ export async function checkRegression(opts: RegressOptions): Promise<RegressRepo
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
     ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
     ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+    ...(opts.repeat !== undefined ? { repeat: opts.repeat } : {}),
   });
 
   // 全部用例都跑崩 ≠ 回归。缺凭据 / 端点挂掉时每条都是 error，若当成回归，

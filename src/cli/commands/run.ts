@@ -156,15 +156,30 @@ export function tuningOf(ctx: CliContext): SuiteTuning {
   const timeoutMs = numFlag(ctx.flags, 'timeout');
   const concurrency = numFlag(ctx.flags, 'concurrency');
   const retries = numFlag(ctx.flags, 'retries');
+  const repeat = numFlag(ctx.flags, 'repeat');
   return {
     ...(timeoutMs !== undefined ? { timeoutMs: positive(timeoutMs, '--timeout') } : {}),
     ...(concurrency !== undefined ? { concurrency: positive(concurrency, '--concurrency') } : {}),
     ...(retries !== undefined ? { retries: Math.max(0, Math.trunc(retries)) } : {}),
+    ...(repeat !== undefined ? { repeat: positiveInt(repeat, '--repeat') } : {}),
   };
 }
 
 function positive(n: number, flag: string): number {
   if (n <= 0) throw new HarnessError('config.invalid', `${flag} 必须是正数（收到 ${n}）`);
+  return n;
+}
+
+/**
+ * 正整数 —— `--repeat` 专用。
+ *
+ * 不用 `Math.trunc` 抹平原值：`--repeat 2.5` 的意图不明（2 次还是 3 次？），静默取整会
+ * 让「我以为采样了 3 次」与报告里的事实差一次，而采样次数正是判断区间的唯一依据。
+ */
+function positiveInt(n: number, flag: string): number {
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new HarnessError('config.invalid', `${flag} 必须是正整数（收到 ${n}）`);
+  }
   return n;
 }
 

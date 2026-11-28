@@ -39,6 +39,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --timeout <ms>        单条用例超时（超时按失败记）
     --concurrency <n>     并发跑几条（缺省 1：串行，成本最好归因）
     --retries <n>         只对「跑崩了」重试几次（断言失败不重试）
+    --repeat <n>          每条用例重复采样 n 次（缺省 1）；用来把噪声和真实变化分开
     --keep-traces         把每次运行的 trace 落盘（默认不落，供失败后回查链路）
   report <基线.json> <候选.json>
                           两份报告比一次并过回归门；门不过退出码 1
@@ -73,7 +74,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --every <s>           轮与轮之间的间隔秒数（缺省 900）
     --max-rounds <n>      最多跑几轮
     --until <时间>        到这个时刻就停（ISO 或 2026-11-29T08:00）
-    --timeout/--concurrency/--retries   见 eval 节
+    --timeout/--concurrency/--retries/--repeat   见 eval 节
   rsi revert [id]         回滚最近一次采纳（给 id 可防期间插入新采纳）
   rsi status              看采纳历史
   rsi ledger              决策账本：当初的预测 vs 实际验证结果（--json 机器可读）
@@ -105,7 +106,17 @@ const GLOBAL_FLAGS = ['root', 'agent', 'json'] as const;
 const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   init: [],
   run: [],
-  eval: ['save', 'only', 'keep-traces', 'timeout', 'concurrency', 'retries', 'remote', 'token-env'],
+  eval: [
+    'save',
+    'only',
+    'keep-traces',
+    'timeout',
+    'concurrency',
+    'retries',
+    'repeat',
+    'remote',
+    'token-env',
+  ],
   report: ['max-token-growth', 'max-cost-growth', 'allow-case-set-change'],
   trace: ['tail'],
   diff: ['tail'],
@@ -128,6 +139,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'timeout',
     'concurrency',
     'retries',
+    'repeat',
     'repair',
     'watch',
     'every',
