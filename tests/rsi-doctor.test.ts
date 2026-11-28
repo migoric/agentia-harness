@@ -70,6 +70,31 @@ describe('rsi doctor', () => {
     assert.match(r.out, /p9/);
   });
 
+  it('意图完好但正文被人手改过 ⇒ 退出码 1（写入口会拒绝，doctor 不能说可以开跑）', () => {
+    const root = project();
+    const asset = join(root, 'agents', 'main.md');
+    writeFileSync(asset, '---\ndescription: 主\n---\n期间被手改的内容。\n', 'utf8');
+    mkdirSync(join(root, '.workspace', 'rsi'), { recursive: true });
+    writeFileSync(
+      join(root, '.workspace', 'rsi', 'accept-intent.json'),
+      JSON.stringify({
+        schema: 1,
+        at: Date.now(),
+        proposalId: 'p-hand',
+        target: 'agent:main',
+        before: '你是执行者。',
+        after: '你是执行者，并解释理由。',
+        reason: 'test',
+        assetsBefore: 'x',
+      }),
+      'utf8',
+    );
+    const r = runCli(['rsi', 'doctor'], root);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /既不是采纳前、也不是采纳后/);
+    assert.match(r.out, /p-hand/);
+  });
+
   it('没配模型凭据也能跑（它回答的正是「为什么起不来」）', () => {
     const root = project();
     const r = runCli(['rsi', 'doctor'], root, { ANTHROPIC_API_KEY: undefined });

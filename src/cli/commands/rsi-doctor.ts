@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { WorkspacePaths } from '../../config.js';
 import { describeError } from '../../errors.js';
 import { loadEvalCases } from '../../evals/load.js';
-import { readAcceptIntent } from '../../rsi/commit.js';
+import { classifyAcceptRecovery } from '../../rsi/commit.js';
 import { readJournal } from '../../rsi/journal.js';
 import { cyclesDir } from '../../rsi/paths.js';
 import { readPending } from '../../rsi/pending.js';
@@ -92,9 +92,9 @@ function lockLine(p: WorkspacePaths): DoctorLine {
  * 自动补齐或清理。但如果**没有任何写入口会跑**，它就那么留着 —— 所以要说出来。
  */
 function intentLine(p: WorkspacePaths): DoctorLine {
-  let intent: ReturnType<typeof readAcceptIntent>;
+  let state: ReturnType<typeof classifyAcceptRecovery>;
   try {
-    intent = readAcceptIntent(p);
+    state = classifyAcceptRecovery(p);
   } catch (e) {
     // 坏掉的意图记录会让**每次**开跑都失败，这正是最需要 doctor 说出来的形态
     return {
@@ -103,12 +103,23 @@ function intentLine(p: WorkspacePaths): DoctorLine {
       problem: true,
     };
   }
-  if (intent === undefined) return { item: '采纳', detail: '没有中断的中间态', problem: false };
+  if (state.kind === 'none') return { item: '采纳', detail: '没有中断的中间态', problem: false };
+  if (state.kind === 'unknown') {
+    // 意图完好但正文对不上：写入口会拒绝继续。若这里还报「可以开跑」，
+    // doctor 就只是在骗人 —— 必须按阻塞项报。
+    return {
+      item: '采纳',
+      detail: `${state.reason}（${state.intent.proposalId}）—— 开跑会被拒绝；确认后删掉 accept-intent.json`,
+      problem: true,
+    };
+  }
   return {
     item: '采纳',
     detail:
-      `上一次采纳没有走完（${intent.proposalId} → ${intent.target}）—— ` +
-      '下次开跑会按磁盘正文自动补齐或清理',
+      `上一次采纳没有走完（${state.intent.proposalId} → ${state.intent.target}）：` +
+      (state.kind === 'after'
+        ? '资产已改、账本缺条目，开跑时自动补齐'
+        : '写盘前就中断，开跑时自动清理'),
     problem: false,
   };
 }

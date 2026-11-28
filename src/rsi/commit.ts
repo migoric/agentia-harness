@@ -180,24 +180,58 @@ export function readAcceptIntent(p: WorkspacePaths): AcceptIntent | undefined {
  * - 正文是别的 ⇒ 期间有人手改。**不猜**：保留意图并抛错，让人看一眼 —— 自动把
  *   一条手改的内容记成「RSI 采纳的」是最坏的一种自动化。
  */
-export function recoverAccept(p: WorkspacePaths): string | undefined {
+/**
+ * 只读地把「上次采纳走到哪一步」分成四类 —— **doctor 和恢复路径共用同一个判据**。
+ *
+ * 只校验意图文件本身是不够的：最危险的一种中间态是「意图完好、但资产正文被人
+ * 手改过」，此时开跑必失败。doctor 若只看文件在不在，就会说出「可以开跑」，
+ * 而下一秒写入口抛 `rsi.bad_record` —— 诊断工具因此失去全部意义。
+ */
+export type AcceptRecoveryState =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'after'; readonly intent: AcceptIntent }
+  | { readonly kind: 'before'; readonly intent: AcceptIntent }
+  | { readonly kind: 'unknown'; readonly intent: AcceptIntent; readonly reason: string };
+
+export function classifyAcceptRecovery(p: WorkspacePaths): AcceptRecoveryState {
   const intent = readAcceptIntent(p);
-  if (intent === undefined) return undefined;
+  if (intent === undefined) return { kind: 'none' };
 
   const current = discoverAssets({ skills: p.skillsDir, agents: p.agentsDir });
   const asset = findAsset(current, intent.target);
   if (asset === undefined) {
-    throw new HarnessError(
-      'rsi.bad_record',
-      `上一次采纳的目标 "${intent.target}" 已经不存在了（${acceptIntentPath(p)}）。` +
-        '确认这个资产是被有意删除之后，删掉那个文件再继续',
-    );
+    return {
+      kind: 'unknown',
+      intent,
+      reason: `上一次采纳的目标 "${intent.target}" 已经不存在了`,
+    };
   }
   const text = readFileSync(asset.path, 'utf8');
-  const afterText = renderFile(asset.path, intent.after);
-  const beforeText = renderFile(asset.path, intent.before);
+  if (text === renderFile(asset.path, intent.after)) return { kind: 'after', intent };
+  if (text === renderFile(asset.path, intent.before)) return { kind: 'before', intent };
+  return {
+    kind: 'unknown',
+    intent,
+    reason: `${intent.target} 的内容既不是采纳前、也不是采纳后 —— 期间有人手改过`,
+  };
+}
 
-  if (text === afterText) {
+/** 上次采纳崩在中间吗 —— 崩了就把账面补到与磁盘一致。返回一句人话（没有残留时 `undefined`）。 */
+export function recoverAccept(p: WorkspacePaths): string | undefined {
+  const state = classifyAcceptRecovery(p);
+  if (state.kind === 'none') return undefined;
+  const { intent } = state;
+
+  if (state.kind === 'unknown') {
+    throw new HarnessError(
+      'rsi.bad_record',
+      `${state.reason}。请确认期望内容后删掉 ${acceptIntentPath(p)}；` +
+        '在没有确认之前不要继续跑 RSI（否则这次改动可能被记成 RSI 的采纳）',
+    );
+  }
+
+  const current = discoverAssets({ skills: p.skillsDir, agents: p.agentsDir });
+  if (state.kind === 'after') {
     const journal = readJournal(p);
     const recorded = journal.some(
       (e) => e.status === 'accepted' && e.proposalId === intent.proposalId,
@@ -214,14 +248,6 @@ export function recoverAccept(p: WorkspacePaths): string | undefined {
       '（资产已改、账本缺条目，已按磁盘内容补记）'
     );
   }
-  if (text === beforeText) {
-    clearIntent(p);
-    return `清理了一次未生效的采纳（${intent.proposalId}：资产在写盘前就中断了）`;
-  }
-  throw new HarnessError(
-    'rsi.bad_record',
-    `${intent.target} 的内容既不是采纳前、也不是采纳后 —— 期间有人手改过。` +
-      `请确认期望内容后删掉 ${acceptIntentPath(p)}；在没有确认之前不要继续跑 RSI` +
-      '（否则这次手改可能被记成 RSI 的采纳）',
-  );
+  clearIntent(p);
+  return `清理了一次未生效的采纳（${intent.proposalId}：资产在写盘前就中断了）`;
 }
