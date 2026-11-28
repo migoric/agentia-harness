@@ -5,6 +5,7 @@ import { type AssetSet, assetKey, findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { type GateOptions, gate } from '../evals/gate.js';
+import { flakyCases } from '../evals/history.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
 import type { CaseRunner } from '../run/case-runner.js';
@@ -121,7 +122,13 @@ export async function verifyProposal(opts: VerifyOptions): Promise<VerifyOutcome
     proposal: opts.proposal,
     baseline: opts.baseline,
     candidate,
-    gate: gate(opts.baseline, candidate, opts.gateOptions ?? {}),
+    gate: gate(opts.baseline, candidate, {
+      ...opts.gateOptions,
+      // 抖动名单由 verify 自己读，而不是从 CLI 一路透传：这条路径有四个调用方
+      // （`rsi` / `rounds` / `rsi accept` / 回归检查），漏传一处的症状是「有时认抖动、
+      // 有时不认」—— 而那是一种最难查的不一致（同一份提案两处结论不同）
+      ...(opts.gateOptions?.flaky !== undefined ? {} : { flaky: flakyCases(opts.config) }),
+    }),
   };
 }
 

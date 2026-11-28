@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { diffTraces } from '@migor/agentia';
 import { HarnessError } from '../../errors.js';
 import { gate } from '../../evals/gate.js';
+import { flakyCases } from '../../evals/history.js';
 import { EVAL_REPORT_SCHEMA_VERSION, reportSchemaVersion } from '../../evals/report.js';
 import type { EvalReport } from '../../evals/types.js';
 import { boolFlag, numFlag } from '../args.js';
@@ -86,9 +87,13 @@ export function reportCommand(
   const candidate = readReport(ctx.root, candidatePath);
   const tokenGrowth = numFlag(ctx.flags, 'max-token-growth');
   const costGrowth = numFlag(ctx.flags, 'max-cost-growth');
+  // 历史是**判定集的成员资格**，不是比较的输入：一条用例如果历史上就在抖，
+  // 它今天挂了不能算退步。`--no-history` 留给「我就想按纯点估计看」的场合。
+  const flaky = boolFlag(ctx.flags, 'no-history') ? undefined : flakyCases(ctx.config);
   const g = gate(baseline, candidate, {
     ...(tokenGrowth !== undefined ? { maxTokenGrowth: tokenGrowth } : {}),
     ...(costGrowth !== undefined ? { maxCostGrowth: costGrowth } : {}),
+    ...(flaky !== undefined ? { flaky } : {}),
     // 用例集变了默认拒绝（分母不同，「变好还是变差」没有依据）；显式开这个口子
     // 等于声明「我知道评测集改过，只看同名用例」
     ...(boolFlag(ctx.flags, 'allow-case-set-change') ? { allowCaseSetChange: true } : {}),

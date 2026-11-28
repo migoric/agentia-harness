@@ -1,7 +1,9 @@
 import { sameModelSet } from '../run/model-read.js';
 import { usd } from '../util/usd.js';
+import { modelNoteOf, modelSetOf } from './model-note.js';
 import { significance } from './significance.js';
 import type { EvalReport } from './types.js';
+import { regressionVerdict } from './verdict.js';
 
 /**
  * 回归门 —— RSI 唯一的「否决权」。
@@ -47,6 +49,13 @@ export interface GateOptions {
    * 「我知道分子分母变了，只看交集」。
    */
   readonly allowCaseSetChange?: boolean;
+  /**
+   * 已知会抖的用例名（来自 `history.flakyCases`）。缺席 = 不带历史，行为与以前一致。
+   *
+   * 只影响「原本通过的用例变失败」这一条：若变失败的全是这类用例，降级为
+   * `case_regression_flaky`（不否决）；只要有一条是稳的，照旧否决。
+   */
+  readonly flaky?: ReadonlySet<string> | undefined;
 }
 
 export interface GateResult {
@@ -55,6 +64,13 @@ export interface GateResult {
     | 'pass'
     | 'case_set_changed'
     | 'case_regression'
+    /**
+     * 变失败的用例**全部**是历史上忽过忽挂的（见 `GateOptions.flaky`）。
+     *
+     * `ok: true` 但仍然是独立一个 code：它的意思是「看见了一次失败，但不该据此
+     * 判断退步」。与 `pass` 的区别是下一步 —— 该做的是让这些用例稳定下来。
+     */
+    | 'case_regression_flaky'
     | 'pass_rate_dropped'
     /**
      * 通过率降了，但在重复采样下**没到显著**（单侧 z 检验未过临界值）。
@@ -251,14 +267,8 @@ function gateCore(baseline: EvalReport, candidate: EvalReport, opts: GateOptions
       reason: `两份报告没有同名用例（${setIssue}）—— 无从比较`,
     };
   }
-  if (regressedCases.length > 0) {
-    return {
-      ...common,
-      ok: false,
-      code: 'case_regression',
-      reason: `${regressedCases.length} 条原本通过的用例变失败：${regressedCases.join(', ')}`,
-    };
-  }
+  // 历史知识（哪些用例本来就在抖）在这一条上改写结论 —— 判定在 `verdict.ts` 里
+  if (regressedCases.length > 0) return regressionVerdict(common, regressedCases, opts.flaky);
   if (passRateDelta < 0) {
     const sig = significance(baseline, candidate, shared);
     if (sig !== undefined && !sig.significant) {
@@ -346,44 +356,4 @@ function sharedPassed(
 ): string {
   const passed = names.filter((n) => cases.get(n)?.passed === true).length;
   return `${passed}/${names.length}`;
-}
-
-/** 报告里的模型集合；老报告没有 `models` 时用单值 `model` 造一个一元素集合 */
-function modelSetOf(r: EvalReport): readonly string[] | undefined {
-  if (r.models !== undefined && r.models.length > 0) return r.models;
-  return r.model === undefined ? undefined : [r.model];
-}
-
-function modelLabel(r: EvalReport): string {
-  const set = modelSetOf(r);
-  return set === undefined ? '未记录' : set.join(', ');
-}
-
-/**
- * 模型事实的附注 —— 两类事都会让「通过率变化」不再可读成「改动效果」：
- *
- * - **集合不同**：跨模型对比本身是合法实验（「换个便宜模型还过不过」），但成本与
- *   token 的阈值是按同一个模型的噪声水平定的；
- * - **发生过降级**：降级轮与未降级轮不是同一个基准。混在一起算通过率，等于拿两种
- *   分布当一种 —— 而这恰恰是 fallback 链最容易制造出来的假象。
- *
- * 两条都不否决（否决权只给回归与成本），但都必须说出来。
- */
-function modelNoteOf(
-  baseline: EvalReport,
-  candidate: EvalReport,
-  sameModel: boolean | undefined,
-): string | undefined {
-  const notes: string[] = [];
-  if (sameModel === false) {
-    notes.push(`模型集合不同（基线 ${modelLabel(baseline)}；候选 ${modelLabel(candidate)}）`);
-  }
-  const fbB = baseline.fallbackUsed;
-  const fbC = candidate.fallbackUsed;
-  if ((fbB ?? 0) > 0 || (fbC ?? 0) > 0) {
-    notes.push(
-      `发生过模型降级（基线 ${fbB ?? '未记录'} 次、候选 ${fbC ?? '未记录'} 次）—— 降级轮与未降级轮不是同一个基准`,
-    );
-  }
-  return notes.length === 0 ? undefined : notes.join('；');
 }

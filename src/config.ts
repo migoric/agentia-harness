@@ -5,7 +5,7 @@ import { type ModelPrice, readPricing } from './config-pricing.js';
 import type { RemoteConfig } from './config-remote.js';
 import { readRemote } from './config-remote.js';
 import { HarnessError } from './errors.js';
-import { type Fail, isPlainObject, objectAt, onlyKeys, readJsonObject } from './util/shape.js';
+import { type Fail, objectAt, onlyKeys, readJsonObject } from './util/shape.js';
 
 export type { BalanceSettings } from './config-balance.js';
 export type { ModelPrice } from './config-pricing.js';

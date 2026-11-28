@@ -212,6 +212,57 @@ const root = await project();
 }
 
 {
+  // 并发：只有 ≥2 条用例才真的并发（一条用例时 `--concurrency` 是空转的）
+  const fake = await startFake();
+  const conc = await project();
+  writeFileSync(
+    join(conc, 'evals', 'b-second.md'),
+    '---\nname: second\nexpect_contains: 要点\n---\n再压一段：把这段话也压成三条要点。\n',
+    'utf8',
+  );
+  const serial = join(conc, '.workspace', 'c1.json');
+  const parallel = join(conc, '.workspace', 'c2.json');
+  const s1 = await cli(['eval', '--repeat', '2', '--save', serial], { root: conc, base: fake.url });
+  const s2 = await cli(['eval', '--concurrency', '2', '--repeat', '2', '--save', parallel], {
+    root: conc,
+    base: fake.url,
+  });
+  const r1 = JSON.parse(readFileSync(serial, 'utf8'));
+  const r2 = JSON.parse(readFileSync(parallel, 'utf8'));
+  check(
+    'eval --concurrency 2：结果顺序与串行逐条一致（diff 才是资产差异，不是调度顺序）',
+    s1.code === 0 &&
+      s2.code === 0 &&
+      r2.total === 2 &&
+      r1.cases.map((c) => c.name).join() === r2.cases.map((c) => c.name).join(),
+    `串行=${r1.cases.map((c) => c.name)} 并发=${r2.cases.map((c) => c.name)}\n${s2.out}`,
+  );
+  check(
+    'eval --concurrency 2 --repeat 2：并发粒度是用例，每条仍采满 2 次',
+    r2.cases.every((c) => c.samples === 2) && r2.tokens > 0,
+    `samples=${r2.cases.map((c) => c.samples)} tokens=${r2.tokens}\n${s2.out}`,
+  );
+
+  // history 的接线只有这里能覆盖：单测直接调 `appendRun`，绕过「eval 结束时记账」
+  // 与 flag 解析两处，而「记了但没写进去」正是这类功能最常见的坏法
+  const h = await cli(['history', '--json'], { root: conc });
+  const hj = h.json ?? {};
+  check(
+    'history：每次 eval 自动记账，per-case 次数对得上',
+    h.code === 0 &&
+      hj.runs === 2 &&
+      Array.isArray(hj.cases) &&
+      hj.cases.length === 2 &&
+      hj.cases.every((c) => c.runs === 2),
+    `code=${h.code} runs=${hj.runs} cases=${JSON.stringify(
+      (hj.cases ?? []).map((c) => `${c.name}:${c.runs}`),
+    )}\n${h.out}`,
+  );
+  rmSync(conc, { recursive: true, force: true });
+  fake.stop();
+}
+
+{
   const fake = await startFake(['--fail-first', '1']);
   const r = await cli(['run', '压成要点', '--json'], { root, base: fake.url });
   const j = r.json ?? {};

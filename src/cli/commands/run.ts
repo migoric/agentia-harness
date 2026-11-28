@@ -1,8 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join as joinPath, relative as relativePath, resolve } from 'node:path';
 import { type HarnessConfig, reportsDir } from '../../config.js';
-import { HarnessError } from '../../errors.js';
+import { describeError, HarnessError } from '../../errors.js';
+import { appendRun } from '../../evals/history.js';
 import { runSuite, type SuiteTuning } from '../../evals/run.js';
+import type { EvalReport } from '../../evals/types.js';
 import type { CaseRunner } from '../../run/case-runner.js';
 import { unpricedHint } from '../../run/endpoint.js';
 import { createRemoteRunner } from '../../run/remote.js';
@@ -98,14 +100,20 @@ export async function evalCommand(ctx: CliContext): Promise<number> {
   // 这是这段话存在的理由：约定目录若只写在看板里、而 CLI 要求人肉给出完整路径，
   // 「刚跑完评测，看板里 0 份报告」就是默认体验，且两侧都不报错。
   const saveArg = ctx.flags.save;
+  let saved: string | undefined;
   if (saveArg !== undefined) {
     const target =
       saveArg === true
         ? joinPath(reportsDir(ctx.config), reportFileName())
         : resolve(ctx.root, saveArg);
     writeJson(target, report);
-    say(`报告已写入 ${relativePath(ctx.root, target)}`);
+    saved = relativePath(ctx.root, target);
+    say(`报告已写入 ${saved}`);
   }
+  // 记账与 `--save` 无关：报告是**某一次**的快照，历史是**所有次**的走向。
+  // 只在 `--save` 时记，等于「不存报告就没有历史」—— 而判断抖动恰恰只需要结果，
+  // 不需要那份 JSON。`--no-history` 留给「试一下，别污染趋势」的场合。
+  if (!boolFlag(ctx.flags, 'no-history')) recordHistory(ctx, report, saved);
 
   if (boolFlag(ctx.flags, 'json')) {
     json(report);
@@ -113,6 +121,21 @@ export async function evalCommand(ctx: CliContext): Promise<number> {
     say(renderReport(report));
   }
   return report.passed === report.total ? 0 : 1;
+}
+
+/**
+ * 把这次运行记进历史账本。失败只出声、不改变退出码。
+ *
+ * 理由是这条路径的**主产品是评测结论**，历史是它的旁证。磁盘只读、空间满、工程根在
+ * 只读挂载上——这些都不该让「评测跑完了、结论正确」变成一次失败。但也不能一声不响：
+ * 静默丢账的症状是几天后发现「抖动判定一直没生效」，而那时已经很难回溯是哪次开始丢的。
+ */
+function recordHistory(ctx: CliContext, report: EvalReport, saved: string | undefined): void {
+  try {
+    appendRun(ctx.config, report, { ...(saved !== undefined ? { report: saved } : {}) });
+  } catch (e) {
+    warn(`历史没记上（${describeError(e)}）—— 评测结果本身不受影响`);
+  }
 }
 
 /**

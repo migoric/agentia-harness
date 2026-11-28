@@ -1,6 +1,3 @@
-import type { ModelClient } from '@migor/agentia';
-import type { HarnessConfig } from '../config.js';
-import type { GateOptions } from '../evals/gate.js';
 import { pickTuning, runSuite } from '../evals/run.js';
 import type { CycleOptions } from './cycle-options.js';
 
@@ -14,13 +11,7 @@ import { makeCycleId } from './cycles.js';
 import { validateHoldout } from './holdout.js';
 import { appendHoldoutUse, holdoutProgress, pickHoldoutBatch } from './holdout-batch.js';
 import { lessonsOf } from './ledger.js';
-import type { Proposer } from './propose.js';
-import {
-  DEFAULT_SHRINK_POLICY,
-  partitionForShrink,
-  type ShrinkPolicy,
-  shrinkState,
-} from './shrink.js';
+import { DEFAULT_SHRINK_POLICY, partitionForShrink, shrinkState } from './shrink.js';
 import { Spender } from './spender.js';
 import { filterTargets } from './target-filter.js';
 import type { CycleReport, Proposal, VerifyOutcome } from './types.js';

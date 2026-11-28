@@ -6,6 +6,7 @@ import { lockCommand } from './cli/commands/assets.js';
 import { balanceCommand } from './cli/commands/balance.js';
 import { evidenceCommand } from './cli/commands/evidence.js';
 import { harvestCommand } from './cli/commands/harvest.js';
+import { historyCommand } from './cli/commands/history.js';
 import { diffCommand, reportCommand, traceCommand } from './cli/commands/observe.js';
 import { patchCommand } from './cli/commands/patch.js';
 import { rsiCommand } from './cli/commands/rsi.js';
@@ -62,6 +63,10 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   lock --check            校验资产与锁是否一致（CI 用），不一致退出码 1
   balance                 查账户余额（DeepSeek 的 /user/balance）；RSI 的未定价模型靠它对账
     --json                机器可读输出
+  history                 用例级历史：每条用例跑过几次、最近怎么走的、有没有抖动
+    --tail <n>            只看最近 n 次运行（缺省全部；抖动判定固定看最近 20 次）
+    --check               有抖动用例就退出码 1（CI 用：判定集里不该有不可信的成员）
+    --json                机器可读输出
   rsi                     跑一轮 RSI：采集→归因→提案→验证→采纳
     --rounds <n>          连续跑 n 轮（每轮最多采纳一个；预算跨轮共享）
     --dry-run             只验证不落盘（人审模式；不能与 --rounds 同用）
@@ -114,10 +119,11 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'concurrency',
     'retries',
     'repeat',
+    'no-history',
     'remote',
     'token-env',
   ],
-  report: ['max-token-growth', 'max-cost-growth', 'allow-case-set-change'],
+  report: ['max-token-growth', 'max-cost-growth', 'allow-case-set-change', 'no-history'],
   trace: ['tail'],
   diff: ['tail'],
   harvest: ['task', 'from-report'],
@@ -126,6 +132,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // 余额查询不发模型调用，但**要 key**：缺 key 时由命令自己报（它能说得更准，
   // 比如「端点支持但 .env 里没有 DEEPSEEK_API_KEY」），不走统一的凭据闸
   balance: [],
+  history: ['tail', 'check'],
   rsi: [
     'dry-run',
     'max-modes',
@@ -224,6 +231,8 @@ async function main(): Promise<number> {
       return lockCommand(ctx);
     case 'balance':
       return balanceCommand(ctx);
+    case 'history':
+      return historyCommand(ctx);
     case 'rsi':
       return rsiCommand(ctx, args._[0], args._[1]);
     case 'patch':

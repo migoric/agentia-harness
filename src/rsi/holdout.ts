@@ -3,6 +3,7 @@ import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { type GateResult, gate } from '../evals/gate.js';
+import { flakyCases } from '../evals/history.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import { HOLDOUT_GATE_OPTIONS } from '../evals/split.js';
 import type { EvalReport } from '../evals/types.js';
@@ -82,6 +83,11 @@ export async function validateHoldout(opts: HoldoutOptions): Promise<HoldoutResu
   return {
     baseline: opts.baseline,
     candidate,
-    gate: noteSmallSample(gate(opts.baseline, candidate, HOLDOUT_GATE_OPTIONS), opts.cases.length),
+    // 留出集上抖动知识更重要：这里每条用例只跑一次，一条天生不稳定的用例足以
+    // 把「候选更差」判出来。名单由本函数自己读（与 verify 同一个理由：不透传）
+    gate: noteSmallSample(
+      gate(opts.baseline, candidate, { ...HOLDOUT_GATE_OPTIONS, flaky: flakyCases(opts.config) }),
+      opts.cases.length,
+    ),
   };
 }
