@@ -331,9 +331,21 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
           : md.routedTo !== undefined
             ? { agent: md.routedTo }
             : {}),
-        // 远程不报「命中哪个技能 / 委派过谁」：留空而不是编
+        /**
+         * 意图层派给了谁 —— 对**归因**来说是「走过这个失败的资产」。
+         *
+         * 不报这一项的后果是实测到过的：归因输出「偏向改（无资产命中）」，提案器只能退回到
+         * 「改主 agent 的 system」。单 agent 的服务上恰好看不出差别（回退目标就是那个 agent），
+         * 多 agent 时就会改错文件 —— 而这正是归因存在的意义。
+         *
+         * 只在**意图层**路径上报（那里 router 是编排者、agent 是被委派者，与本地 subagent
+         * 同构）。直连模式（`--agent`）下对方就是主 agent，报成 subagent 会让归因绕一圈。
+         *
+         * `skills` 仍然留空：远端确实没报「调了哪些技能/工具」。要报得在 service 侧从 trace
+         * 里摘工具事件（`metadata.toolCalls`），那是另一件事，不在这里编。
+         */
         skills: [],
-        subagents: [],
+        subagents: md.dispatch?.agentId !== undefined ? [md.dispatch.agentId] : [],
       };
     }
   }

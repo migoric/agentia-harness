@@ -173,6 +173,35 @@ test('意图层：派单三态才是成败依据（done 才算通过，needs_inp
   assert.match(failed.error?.message ?? '', /r/, '失败原因要带出来');
 });
 
+test('意图层派单 ⇒ 记成 subagent（归因靠它找「该改哪个资产」）', async () => {
+  const runner = createRemoteRunner({
+    baseUrl: 'http://svc',
+    token: 'k',
+    fetchImpl: fakeFetch({
+      result: {
+        kind: 'message',
+        parts: [{ text: '好' }],
+        metadata: { dispatch: { status: 'done', agentId: 'billing' }, usage: { totalTokens: 5 } },
+      },
+    }),
+  });
+  const out = await runner.run('查票');
+  assert.deepEqual(out.subagents, ['billing'], '远程归因全靠这一项，空着就只能瞎猜');
+  assert.equal(out.agent, 'billing');
+});
+
+test('直连模式（没有 dispatch）不把对方当 subagent', async () => {
+  const runner = createRemoteRunner({
+    baseUrl: 'http://svc',
+    token: 'k',
+    fetchImpl: fakeFetch({
+      result: { status: { state: 'completed' }, metadata: { usage: { totalTokens: 5 } } },
+    }),
+  });
+  const out = await runner.run('查票');
+  assert.deepEqual(out.subagents, [], '直连时它自己就是主 agent，报成 subagent 会让归因绕一圈');
+});
+
 test('多轮共用同一个 contextId（换 id 就是换会话，历史接不上）', async () => {
   const ctxIds: string[] = [];
   let call = 0;

@@ -83,6 +83,13 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   const fullBaseline = await runSuite({
     config: opts.config,
     assets: opts.assets,
+    // **必须与候选同一个 runner**。漏了这一句的后果是实测到过的：远程模式下基线跑在本地、
+    // 候选跑在服务上 —— 于是一个本地模型与一个远程服务的成绩被放进同一个门里比较，
+    // 而报告里看起来完全正常（`model` 字段还都是各自报的）。归因也会失真：本地那次没有
+    // 派单，于是「该改哪个资产」永远是空的。
+    //
+    // 基线不需要 `stage`：它用的就是当前资产，而预检已经保证远端跑的就是这一份。
+    ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     ...(opts.client !== undefined ? { client: opts.client } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
