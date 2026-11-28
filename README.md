@@ -61,10 +61,13 @@ CLI 只有一个 bin，名叫 `harness`。**装进项目时**用 `npx harness <�
 
 ```bash
 harness run "把这个仓库的未处理 issue 分个类"   # 跑一次：结果、token、命中技能、traceId
-harness eval --save .workspace/base.json      # 跑用例集，存一份基线报告
+harness eval --save .workspace/base.json      # 存基线（要对比就得给固定路径）
 harness rsi --dry-run                         # 看它想改什么，不落盘
 harness rsi                                   # 真改（过回归门才落盘）
 ```
+
+`--save` 不带路径时写 `.workspace/reports/` —— 只读看板（`harness serve`）读的就是那里，
+所以「想跑完就在页面里点开」就别给路径。
 
 改完提示词，用它回答真正的问题 —— 到底变好没有：
 

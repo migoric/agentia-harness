@@ -25,7 +25,8 @@ harness diff <A> <B>    两份 trace 差在哪（run 级 + span 级；id 可用�
 
 ```
 harness eval            跑评测集；有失败退出码 1
-  --save <文件>         存报告，供 report 对比
+  --save [文件]          存报告，供 report 对比；**不带路径就写 `.workspace/reports/`**
+                         （看板读的就是那个目录 —— 给了路径就一定进不了看板）
   --only <a,b>          只跑这些用例
   --timeout/--concurrency/--retries   见 evals.md 的三个旋钮
   --keep-traces         把 trace 落盘（默认不落；失败用例报告里带 traceId）

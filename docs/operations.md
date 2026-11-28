@@ -80,9 +80,12 @@ open http://127.0.0.1:8787/    # 只读看板
 生成报告给看板读：
 
 ```bash
-harness eval --save .workspace/reports/$(date +%F).json
+harness eval --save          # 不给路径 ⇒ 写 .workspace/reports/<UTC 时间戳>.json
 harness serve --port 8787
 ```
+
+`--save` 带路径时仍按给的路径写，但**看板只读 `.workspace/reports/`** —— 想要「跑完就能在
+页面里点开」，就别给路径。
 
 ## 代码补丁（L2）
 
