@@ -13,6 +13,7 @@ import { boolFlag, csvFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { renderReport } from '../render.js';
+import { authHint, formatError } from '../run-diagnose.js';
 
 /** `harness run "<task>"` —— 跑一次，打印结果与 traceId */
 export async function runCommand(ctx: CliContext, task: string): Promise<number> {
@@ -42,6 +43,14 @@ export async function runCommand(ctx: CliContext, task: string): Promise<number>
     say(
       `\n[${out.stopReason}] ${out.tokens} token${costSuffix(out.costUsd)} · ${out.iterations} 轮 · ${out.durationMs}ms · trace ${out.trace.traceId}`,
     );
+    // 失败原因必须打出来。`text` 在失败时通常是空的，状态行又只有一个 `stopReason`
+    // 词 —— 两者合起来就是「一行没有任何信息的红字」。而 `error` 里其实有完整的
+    // 上游报文（HTTP 状态、端点原话），它此前只走 `--json`，等于**只有写脚本的人看得见**。
+    if (!out.ok && out.error !== undefined) {
+      warn(`\n错误：${formatError(out.error)}`);
+      const hint = authHint(out.error, ctx.config);
+      if (hint !== undefined) warn(hint);
+    }
     if (out.skills.length > 0) say(`技能：${out.skills.join(', ')}`);
     if (out.subagents.length > 0) say(`委派：${out.subagents.join(', ')}`);
     // 「没读数」必须说清是哪一种：一个是配置能修的，一个不是

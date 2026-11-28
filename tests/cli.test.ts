@@ -75,6 +75,35 @@ describe('harness lock', () => {
   });
 });
 
+describe('harness run', () => {
+  /**
+   * 失败时**必须**说出原因。
+   *
+   * 这条测的是真实回归：`run` 失败时 `text` 是空的、状态行只有一个 `[error]` 词，
+   * 于是整个输出是一行没有任何信息的红字，而 `error.message`（含 HTTP 码与上游原话）
+   * 只存在于 `--json` 里 —— 不写脚本的人永远看不到。
+   */
+  it('失败时把上游原因打到 stderr，而不是只留一行状态', async () => {
+    const dir = tmp();
+    run(['init'], dir);
+    const fake = await startFakeEndpoint(['--fail-first', '99']);
+    try {
+      const r = run(['run', '说一句话'], dir, {
+        ANTHROPIC_BASE_URL: fake.url,
+        ANTHROPIC_API_KEY: 'fake',
+      });
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.err, /错误：/, `stderr 应带上失败原因，实际：${r.err}`);
+      // 上游原话要能看见（假端点的 500 报文里写着 injected 500）
+      assert.match(r.err, /injected 500/, `应摘出上游报文，实际：${r.err}`);
+      // 配了端点还 500：不该被劝去「配 endpoint」
+      assert.doesNotMatch(r.err, /没有配 `endpoint`/);
+    } finally {
+      fake.stop();
+    }
+  });
+});
+
 describe('harness eval', () => {
   it('没有用例时报错得体（退出码 1，不是栈崩）', () => {
     const dir = tmp();

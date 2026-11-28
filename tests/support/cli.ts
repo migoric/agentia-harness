@@ -22,7 +22,8 @@ export function runCli(
   cwd: string,
   /** 追加/覆盖的环境变量（`undefined` 值表示**删掉**继承来的那个变量） */
   env: Record<string, string | undefined> = {},
-): { code: number | null; out: string } {
+  /** `out` 是 stdout+stderr 的合并（大多数断言只关心「说了没有」）；需要区分哪条流时用 `err` */
+): { code: number | null; out: string; err: string } {
   const merged: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) delete merged[k];
@@ -33,7 +34,7 @@ export function runCli(
     encoding: 'utf8',
     env: merged,
   });
-  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+  return { code: r.status, out: `${r.stdout}${r.stderr}`, err: r.stderr };
 }
 
 export function tmpProject(prefix = 'harness-cli-'): string {

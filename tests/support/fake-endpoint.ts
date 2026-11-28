@@ -17,10 +17,10 @@ export interface FakeEndpoint {
   stop(): void;
 }
 
-export async function startFakeEndpoint(): Promise<FakeEndpoint> {
+export async function startFakeEndpoint(args: readonly string[] = []): Promise<FakeEndpoint> {
   const port = 18000 + Math.floor(Math.random() * 2000);
   const script = join(import.meta.dirname, '..', '..', 'scripts', 'fake-anthropic.mjs');
-  const child = spawn(process.execPath, [script, '--port', String(port)], {
+  const child = spawn(process.execPath, [script, '--port', String(port), ...args], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stderr: string[] = [];
