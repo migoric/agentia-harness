@@ -559,3 +559,27 @@ describe('--remote 与本地凭据闸', () => {
     assert.doesNotMatch(r.out, /不认识 --remote/);
   });
 });
+
+describe('--help', () => {
+  /** `harness rsi --help` 曾经报「rsi 没有子命令 "--help"」—— 在求助时给一条用法错误 */
+  it('任何命令后面都能问用法，且退出码 0', () => {
+    for (const argv of [
+      ['--help'],
+      ['help'],
+      ['rsi', '--help'],
+      ['eval', '-h'],
+      ['patch', '--help'],
+    ]) {
+      const r = run(argv, tmp());
+      assert.equal(r.code, 0, `${argv.join(' ')} 应退出 0：${r.out}`);
+      assert.match(r.out, /用法：harness/, `${argv.join(' ')} 应打印用法`);
+    }
+  });
+
+  it('`--help` 后面跟一个词也不会被当成它的值', () => {
+    // parseArgs 会把 `--help revert` 读成 flags.help = 'revert'，所以判定必须扫原始 argv
+    const r = run(['rsi', '--help', 'revert'], tmp());
+    assert.equal(r.code, 0);
+    assert.match(r.out, /用法：harness/);
+  });
+});

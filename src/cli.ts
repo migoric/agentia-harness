@@ -90,6 +90,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --timeout <ms>        单次 /v1/run 的超时（超时按 504 返回）
 
 通用参数：
+  --help / -h             打印这份用法（任何命令后面都行，如 harness rsi --help）
   --root <目录>           工程根（缺省 cwd）
   --agent <名字>          指定 agents/ 里的哪个（有多个时必需）
   --json                  机器可读输出
@@ -136,6 +137,16 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
 
 async function main(): Promise<number> {
   const [cmd, ...rest] = process.argv.slice(2);
+  // `--help` / `-h` 是**所有**命令的全局请求：`harness rsi --help` 是最自然的写法，
+  // 而它以前会报「rsi 没有子命令 "--help"」—— 在「我想看用法」的时候给人一条用法错误，
+  // 是最刺人的一种。
+  //
+  // 扫原始 argv 而不是解析后的 flags：`--help revert` 会被 `parseArgs` 读成
+  // `flags.help = 'revert'`（它把后一个词当成值），那之后就再也看不出「有人想求助」了。
+  if (rest.includes('--help') || rest.includes('-h')) {
+    say(HELP);
+    return 0;
+  }
   const args = parseArgs(rest);
   const allowed = cmd === undefined ? undefined : COMMAND_FLAGS[cmd];
   if (cmd !== undefined && allowed !== undefined) {
