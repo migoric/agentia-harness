@@ -87,18 +87,30 @@ function nonEmpty(v: string | undefined): boolean {
  *
  * 为什么不等 401：第一次模型调用失败时，harness 报的是**上游**的错误（`stopReason:
  * error`），人会先去怀疑端点、模型名、网络 —— 而真正的病因是 `.env` 里少一行。
- * 这个检查只对**显式声明了 `endpoint.apiKeyEnv`** 的工程生效：只认环境变量的老工程
- * （含 `npm run e2e:offline` 里的假端点，它不需要 key）不受影响。
+ *
+ * **豁免的边界是「显式配了 baseURL」而不是「apiKeyEnv 是缺省值」**。这两条看着等价，
+ * 差别在新工程上：`harness init` 只写 `appName`，于是 `apiKeyEnv` 取缺省
+ * `ANTHROPIC_API_KEY`、`baseURL` 为空 ⇒ 请求发往官方端点，没有 key **必然**失败。
+ * 按「apiKeyEnv 是缺省值就放行」来写，这个最常见的新手路径会被直接放过去，
+ * 最后以 403 `Request not allowed` 的身份出现（上游的错误和本地缺配置长得不像）。
+ *
+ * 反过来，`baseURL` 给了、`apiKeyEnv` 没声明，正是假端点/自建端点的形态
+ * （`npm run e2e:offline` 用的就是它，那里不需要 key）—— 这条豁免保留。
  */
 export function assertEndpointKey(config: HarnessConfig): void {
-  if (config.apiKeyEnv === 'ANTHROPIC_API_KEY') return;
   if (keySource(config) !== null) return;
-  throw new HarnessError(
-    'config.invalid',
-    `缺少模型凭据：${config.apiKeyEnv} 没有值（也没有 ANTHROPIC_API_KEY 兜底）。` +
-      `在 ${config.root}/.env 里写一行 ${config.apiKeyEnv}=sk-... 即可 —— ` +
-      '真实环境变量优先，两者都没有才报这个错。',
-  );
+  if (config.baseURL !== undefined && config.apiKeyEnv === AGENTIA_API_KEY) return;
+  const missing =
+    config.apiKeyEnv === AGENTIA_API_KEY
+      ? `缺少模型凭据：${config.apiKeyEnv} 没有值。`
+      : `缺少模型凭据：${config.apiKeyEnv} 没有值（也没有 ANTHROPIC_API_KEY 兜底）。`;
+  const where =
+    config.apiKeyEnv === AGENTIA_API_KEY
+      ? `在 ${config.root}/.env 里写一行 ${config.apiKeyEnv}=sk-... 即可；` +
+        '要用别的模型或端点，在 harness.config.json 加 endpoint.baseURL 与 endpoint.apiKeyEnv。'
+      : `在 ${config.root}/.env 里写一行 ${config.apiKeyEnv}=sk-... 即可 —— ` +
+        '真实环境变量优先，两者都没有才报这个错。';
+  throw new HarnessError('config.invalid', `${missing}${where}`);
 }
 
 /**

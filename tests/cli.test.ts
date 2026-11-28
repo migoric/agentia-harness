@@ -243,6 +243,32 @@ describe('凭据缺失只拦「真会调模型」的命令', () => {
   /** 清掉继承来的 ANTHROPIC_* —— 否则本机真配过 key 时这两条会假阴性 */
   const BARE = { ANTHROPIC_API_KEY: undefined, ANTHROPIC_BASE_URL: undefined };
 
+  /**
+   * 闸从 `cli.ts` 挪进命令内部之后，这里负责**防漏**。
+   *
+   * 挪动的原因是顺序：闸排在命令自己的用法校验之前时，`rsi --rounds 0` 会先报
+   * 「缺少模型凭据」。代价是每个调模型的入口都得记着自己调一次 —— 漏掉的那个会
+   * 静默退回「403 一行空白红字」。所以逐条钉住。
+   */
+  it('每个会调模型的命令都自己把关（漏掉一个就退回 403 静默）', () => {
+    for (const argv of [['run', '说一句话'], ['eval'], ['serve'], ['rsi'], ['rsi', 'regress']]) {
+      const dir = tmp();
+      run(['init'], dir);
+      const r = run(argv, dir, BARE);
+      assert.equal(r.code, 2, `${argv.join(' ')} 缺 key 应退出 2：${r.out}`);
+      assert.match(r.out, /缺少模型凭据/, `${argv.join(' ')} 应说清缺什么：${r.out}`);
+    }
+  });
+
+  it('不调模型的命令一个都不拦（lock 不该因为没 key 就跑不了）', () => {
+    for (const argv of [['lock'], ['lock', '--check'], ['history'], ['trace', 'x']]) {
+      const dir = tmp();
+      run(['init'], dir);
+      const r = run(argv, dir, BARE);
+      assert.doesNotMatch(r.out, /缺少模型凭据/, `${argv.join(' ')} 不该要求凭据：${r.out}`);
+    }
+  });
+
   function projectWithEndpoint(): string {
     const dir = tmp();
     run(['init'], dir);
@@ -352,12 +378,15 @@ describe('CLI 参数严格化', () => {
 it('eval --keep-traces 是合法 flag（此前只在注释里存在）', () => {
   const dir = tmp();
   run(['init'], dir);
+  // 给一对**确定无效**的凭据 + 端点：要验证的是「flag 被接受了，于是走到了调用阶段」，
+  // 而不是「凭据闸放行了」。没有 key 时退出码也是 2，与「不认识这个 flag」撞在一起，
+  // 这条断言就失去区分能力了。
   const r = run(['eval', '--keep-traces'], dir, {
-    ANTHROPIC_API_KEY: undefined,
-    ANTHROPIC_BASE_URL: undefined,
+    ANTHROPIC_API_KEY: 'fake',
+    ANTHROPIC_BASE_URL: 'http://127.0.0.1:1',
   });
   assert.doesNotMatch(r.out, /不认识 --keep-traces/, r.out);
-  assert.notEqual(r.code, 2, r.out);
+  assert.equal(r.code, 1, `flag 被接受后应在调用阶段失败（退出码 1），实际 ${String(r.code)}`);
 });
 
 describe('rsi revert <id>', () => {

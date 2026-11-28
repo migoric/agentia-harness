@@ -96,6 +96,25 @@ export interface RunSuiteOptions extends SuiteTuning {
   readonly only?: readonly string[] | undefined;
 }
 
+/**
+ * 「有没有可跑的用例」—— 抽出来是因为它要**在凭据检查之前**回答。
+ *
+ * 一个工程里没用例、也没配 key，先报哪个决定了人接下来干什么：报「没有评测集」，
+ * 他去建用例；报「缺少模型凭据」，他去配一个永远用不上的 key。
+ */
+export function assertCasesExist(config: HarnessConfig, only?: readonly string[]): void {
+  const all = loadEvalCases(config.evalsDir);
+  if (all.length === 0) {
+    throw new HarnessError(
+      'eval.invalid',
+      `${config.evalsDir} 下没有用例 —— 没有评测集，RSI 的任何改动都无法被验证`,
+    );
+  }
+  if (only !== undefined && !all.some((c) => only.includes(c.name))) {
+    throw new HarnessError('eval.invalid', `--only 没有匹配到任何用例: ${only.join(', ')}`);
+  }
+}
+
 export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
   const all = loadEvalCases(opts.config.evalsDir);
   if (all.length === 0) {

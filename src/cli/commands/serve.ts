@@ -2,6 +2,7 @@ import { startServer } from '../../server/serve.js';
 import { numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { say } from '../output.js';
+import { requireModel } from '../require-model.js';
 
 /**
  * `harness serve` —— 让别的进程能调这个 agent。
@@ -14,6 +15,9 @@ export async function serveCommand(ctx: CliContext): Promise<number> {
   const port = numFlag(ctx.flags, 'port') ?? 8787;
   const host = strFlag(ctx.flags, 'host') ?? '127.0.0.1';
   const timeoutMs = numFlag(ctx.flags, 'timeout');
+  // 常驻进程尤其要在**起来之前**就发现没 key：否则服务看着健康，每个请求都以
+  // 上游 401 结束，而「服务起来了」这个事实会让人先去看调用方。
+  requireModel(ctx);
 
   const running = await startServer({
     config: ctx.config,

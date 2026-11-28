@@ -3,7 +3,7 @@ import { dirname, join as joinPath, relative as relativePath, resolve } from 'no
 import { type HarnessConfig, reportsDir } from '../../config.js';
 import { describeError, HarnessError } from '../../errors.js';
 import { appendRun } from '../../evals/history.js';
-import { runSuite, type SuiteTuning } from '../../evals/run.js';
+import { assertCasesExist, runSuite, type SuiteTuning } from '../../evals/run.js';
 import type { EvalReport } from '../../evals/types.js';
 import type { CaseRunner } from '../../run/case-runner.js';
 import { unpricedHint } from '../../run/endpoint.js';
@@ -13,6 +13,7 @@ import { boolFlag, csvFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { renderReport } from '../render.js';
+import { requireModel } from '../require-model.js';
 import { authHint, formatError } from '../run-diagnose.js';
 
 /** `harness run "<task>"` —— 跑一次，打印结果与 traceId */
@@ -20,6 +21,7 @@ export async function runCommand(ctx: CliContext, task: string): Promise<number>
   if (task.trim() === '') {
     throw new HarnessError('run.failed', 'run 需要任务描述：harness run "..."');
   }
+  requireModel(ctx);
   const runner = createRunner(ctx.config, assetsOf(ctx), ctx.agent);
   const out = await runner.run(task);
   if (boolFlag(ctx.flags, 'json')) {
@@ -94,6 +96,10 @@ export async function evalCommand(ctx: CliContext): Promise<number> {
   const tuning = tuningOf(ctx);
   const only = csvFlag(ctx.flags, 'only');
   const remote = remoteRunnerOf(ctx);
+  // 用例集为空是**工程的病**，先于「缺凭据」报：两者都要退出码 2，但一个人先看到
+  // 「没有评测集」才知道该去建用例，而不是去配 key。
+  assertCasesExist(ctx.config, only);
+  if (remote === undefined) requireModel(ctx);
   const report = await runSuite({
     config: ctx.config,
     assets: assetsOf(ctx),

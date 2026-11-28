@@ -80,7 +80,7 @@ async function accept(root: string): Promise<string> {
 }
 
 function ctxOf(root: string, flags: Record<string, string | true> = {}) {
-  return { root, config: loadConfig(root), flags, agent: undefined };
+  return { root, config: loadConfig(root), flags, agent: undefined, needsModel: true };
 }
 
 describe('rsi regress 的退出码', () => {
@@ -182,7 +182,7 @@ describe('手工采纳也能被监测', () => {
     );
 
     const accepted = await acceptFrom(
-      { root, config, flags: { from: proposalPath }, agent: undefined },
+      { root, config, flags: { from: proposalPath }, agent: undefined, needsModel: true },
       scriptedClient(Array.from({ length: 3 }, () => step(() => false))),
     );
     assert.equal(accepted, 0);

@@ -17,7 +17,6 @@ import { initCommand } from './cli/init.js';
 import { say, warn } from './cli/output.js';
 import { loadConfig } from './config.js';
 import { describeError, isHarnessError } from './errors.js';
-import { assertEndpointKey, ensureEndpointEnv } from './run/endpoint.js';
 
 /**
  * CLI —— 八个命令，每个对应闭环的一段。
@@ -191,26 +190,22 @@ async function main(): Promise<number> {
 
   // .env 从工程根读：真实环境变量优先（override=false 是 loadEnvFile 的缺省）
   loadEnvFile({ path: join(root, '.env') });
-  const ctx: CliContext = {
-    root,
-    config: loadConfig(root),
-    flags: args.flags,
-    agent: strFlag(args.flags, 'agent'),
-  };
-
   // 端点与凭据只在**真会调模型**的命令上校验：`lock` / `trace` / `report` /
   // `rsi status|revert` 一个模型都不调，没 key 时拦它们只会让人以为工具坏了
   // 带 `--remote` 的命令**要么把活交给服务**（eval），**要么被明确拒绝**（rsi，见
   // `rsiCommand` 的 `rejectRemote`）—— 两种都不需要本地模型凭据。
   //
-  // 这个判定必须排在凭据闸**之前**：否则 `rsi --remote` 的用户先看到「缺少模型凭据」，
-  // 于是去配 key，配完才被告知「这个组合不支持」。错误的提示不只是没用，它会消耗
-  // 一次真实的排查动作。
+  // 这里**只判定、不检查**：检查挪到各命令内部（`requireModel`），因为闸一旦排在
+  // 命令自己的校验之前，`rsi --rounds 0` 会先报「缺少模型凭据」，而真正的病因是
+  // 参数写错了 —— 人会去配 key，配完才发现参数还是错的。
   const delegatedRemote = args.flags.remote !== undefined;
-  if (needsModel(cmd, args._[0]) && !delegatedRemote) {
-    ensureEndpointEnv(ctx.config);
-    assertEndpointKey(ctx.config);
-  }
+  const ctx: CliContext = {
+    root,
+    config: loadConfig(root),
+    flags: args.flags,
+    agent: strFlag(args.flags, 'agent'),
+    needsModel: needsModel(cmd, args._[0]) && !delegatedRemote,
+  };
 
   switch (cmd) {
     case 'run':

@@ -95,6 +95,7 @@ describe('rsi accept --from 的留出集路径', () => {
       config: loadConfig(root),
       flags: { from: proposalPath } as const,
       agent: undefined,
+      needsModel: true,
     };
     const code = await acceptFrom(ctx, client(true));
     assert.equal(code, 1);
@@ -109,6 +110,7 @@ describe('rsi accept --from 的留出集路径', () => {
       config: loadConfig(root),
       flags: { from: proposalPath } as const,
       agent: undefined,
+      needsModel: true,
     };
     const code = await acceptFrom(ctx, client(false));
     assert.equal(code, 0);

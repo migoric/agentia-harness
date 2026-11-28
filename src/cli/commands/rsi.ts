@@ -11,6 +11,7 @@ import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { maybeRemoteStage, type RemoteStage } from '../remote-stage.js';
+import { requireModel } from '../require-model.js';
 import { journal, ledger, regress, status } from './rsi-inspect.js';
 import { acceptFrom, proposeFrom, revert } from './rsi-manual.js';
 import { watchCommand } from './rsi-watch.js';
@@ -35,6 +36,11 @@ export async function rsiCommand(
     );
   }
   if (sub === 'revert') return revert(ctx, argsId);
+  // 用法错误先于凭据错误。`--rounds 0` 与「没配 key」都是退出码 2，但先看到哪个
+  // 决定人下一步去改什么：报凭据 ⇒ 他去配一个用完才发现参数还是错的 key。
+  // 这三条与 `runRounds` 内部那份一致（那里是库 API 直调时的兜底），只是提前一次。
+  assertRsiUsage(ctx);
+  requireModel(ctx);
   if (sub === 'status') return status(ctx);
   if (sub === 'ledger') return ledger(ctx);
   if (sub === 'regress') {
@@ -168,6 +174,27 @@ function roundsFlag(ctx: CliContext): number {
     throw new HarnessError('config.invalid', `--rounds 必须是正整数（收到 ${raw}）`);
   }
   return raw;
+}
+
+/**
+ * 只看 flags 的用法校验 —— 不读磁盘、不发请求，所以能排在凭据检查之前。
+ *
+ * 与 `runRounds` 里那两条重复是**刻意的**：那边是库 API 的入口（绕过 CLI 也得拦），
+ * 这边是 CLI 的顺序保证（用法错要先于环境错被说出来）。文案保持一致，免得同一个
+ * 错误在两个入口有两套说法。
+ */
+function assertRsiUsage(ctx: CliContext): void {
+  const rounds = numFlag(ctx.flags, 'rounds');
+  if (rounds === undefined) return;
+  if (!Number.isInteger(rounds) || rounds < 1) {
+    throw new HarnessError('config.invalid', `--rounds 必须是正整数（收到 ${rounds}）`);
+  }
+  if (rounds > 1 && boolFlag(ctx.flags, 'dry-run')) {
+    throw new HarnessError(
+      'config.invalid',
+      'dryRun 与多轮不能同时用：dry-run 不落盘，资产没变，后面几轮只会重复第一轮',
+    );
+  }
 }
 
 function stopLabel(reason: RoundStopReason): string {
