@@ -3,6 +3,14 @@ name: ci
 on:
   push:
     branches: [main]
+    # 纯文档推送不跑全量（与 agentia 仓同口径）。这里没有读 docs/ 的检查项，而
+    # 一次文档提交会触发 check + 离线 e2e + lock 冒烟三件套。
+    #
+    # **只对 push 生效**：`pull_request` 上加 paths-ignore 会让「只改文档的 PR」
+    # 不产生任何 check run，而分支保护在等 required checks —— 那就成了合不进去的 PR。
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
   pull_request:
 
 # 连续推送时旧的那次跑完也没人看 —— 直接取消，省 runner 分钟也省噪音
