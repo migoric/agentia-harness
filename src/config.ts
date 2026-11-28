@@ -1,11 +1,13 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
+import { type BalanceSettings, readBalanceConfig } from './config-balance.js';
 import { type ModelPrice, readPricing } from './config-pricing.js';
 import type { RemoteConfig } from './config-remote.js';
 import { readRemote } from './config-remote.js';
 import { HarnessError } from './errors.js';
 import { type Fail, isPlainObject, objectAt, onlyKeys, readJsonObject } from './util/shape.js';
 
+export type { BalanceSettings } from './config-balance.js';
 export type { ModelPrice } from './config-pricing.js';
 export type { RemoteConfig } from './config-remote.js';
 
@@ -81,6 +83,15 @@ export interface ModelSettings {
    * 没有读数时明确说出来（见 `run/endpoint.ts` 的 `unpricedHint`）。
    */
   readonly pricing: Readonly<Record<string, ModelPrice>>;
+  /**
+   * 余额对账（`balance` 段）。`undefined` = 显式关掉（`"balance": false`）；
+   * 缺省（没写这段）时会自动按端点推导 —— 见 `run/balance.ts`。
+   *
+   * 它解决的是价格表的死角，而不是价格表的替代：**单价会因时段而变**（分时计价的
+   * 端点 peak 是 off-peak 的两倍），而余额差额是真实扣费。未定价的模型配上它，
+   * `--max-cost` 就从「完全失效」变成「每个阶段结束对账一次」。
+   */
+  readonly balance: BalanceSettings | undefined;
 }
 
 /**
@@ -146,6 +157,7 @@ interface RawConfig {
   code?: unknown;
   endpoint?: unknown;
   pricing?: unknown;
+  balance?: unknown;
   server?: unknown;
   remote?: unknown;
 }
@@ -163,6 +175,7 @@ const CONFIG_KEYS: readonly string[] = [
   'code',
   'endpoint',
   'pricing',
+  'balance',
   'server',
   'remote',
 ];
@@ -191,6 +204,7 @@ export function loadConfig(root: string): HarnessConfig {
     maxIterations: positiveNumber(raw.maxIterations, 'maxIterations'),
     maxCostUsd: positiveNumber(raw.maxCostUsd, 'maxCostUsd'),
     pricing: readPricing(raw.pricing),
+    balance: readBalanceConfig(raw.balance),
     ...readEndpoint(raw.endpoint),
     ...readCode(raw.code),
     ...readServer(raw.server),

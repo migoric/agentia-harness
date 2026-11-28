@@ -11,14 +11,17 @@
     "baseURL": "https://api.deepseek.com/anthropic",
     "apiKeyEnv": "DEEPSEEK_API_KEY"
   },
-  "pricing": { "deepseek-flash": { "in": 0.15, "out": 0.6, "cacheRead": 0.02 } }
+  "pricing": { "deepseek-flash": { "in": 0.3, "out": 1.2, "cacheRead": 0.147 } },
+  "balance": { "warnBelowUsd": 0.5 }
 }
 ```
 
 - `endpoint.baseURL` 是 `ANTHROPIC_BASE_URL` 的配置化写法；`apiKeyEnv` 只写**变量名**，key 放 `.env`（真实环境变量优先于文件）。密钥永远不进配置文件 —— 那个会被提交。
 - 声明了 `apiKeyEnv` 却没有 key ⇒ **开跑前**就报错（退出码 2），不花一轮 token 换一个 401。只拦真会调模型的命令（`run` / `eval` / `rsi` / `serve`），`lock` / `trace` / `report` 不受影响。
 - 不给非 Anthropic 模型定价，成本读数是「未知」而**不是 0**：报告里不出现 `$`、回归门的成本判据退回 token、`rsi --max-cost` 不生效。`run` 会在结尾说清病因是「没定价」（配置能修）还是「端点没报计量」（换端点才能修）。
-- `cacheRead` / `cacheWrite` 是相对 `in` 的**乘数**，不是绝对价：DeepSeek 缓存读 $0.003 / 输入 $0.15 ⇒ 写 `0.02`。价格表填的是 off-peak 价，高峰期实际是 2 倍。
+- `cacheRead` / `cacheWrite` 是相对 `in` 的**乘数**，不是绝对价：DeepSeek 缓存命中 $0.044 / 未命中输入 $0.30 ⇒ 写 `0.147`。
+- **单价填 `peak` 价**。DeepSeek 分时计价（UTC 01:00–04:00、06:00–10:00 按 2 倍）。价格表的作用是给预算闸一个**上界**：填 off-peak 价会让高峰期估算偏低一半，闸静默超支；填 peak 价只会让闸提前一点点停。便宜时多估一笔，是这里最划算的误差。
+- `balance` 让「真实扣了多少钱」有一个与单价无关的读数（`GET /user/balance`，端点是 DeepSeek 时自动识别）。它是**下界**——余额只有两位小数，小额花费读出来是 0 —— 所以它只上推 `costUsd`、不把 `costKnown` 改成 true。见 [`rsi.md`](./rsi.md) 的「未定价模型」一节。
 
 ## HTTP 面
 

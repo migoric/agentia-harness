@@ -40,8 +40,9 @@ export interface BudgetOptions {
  *
  * 1. **「没有读数」不是「免费」**：`charge(usd, known=false)` 会把成本标成不可信。
  * 2. **不可信 ≠ 放行**：旧实现里美元闸在不可信时直接返回「没超」，于是「给未定价
- *    模型设 `--max-cost`」看起来有保护、实际一分钱也没拦住。现在不可信时要么由
- *    token 闸接管，要么判 `blind` 停下来 —— 三种结局都写进报告，不允许「静默」。
+ *    模型设 `--max-cost`」看起来有保护、实际一分钱也没拦住。现在不可信时有两条出路：
+ *    余额对账给一个**下界**（`reconcile`），或者由 token 闸接管；两条都没有才判 `blind`
+ *    停下来 —— 所有结局都写进报告，不允许「静默」。
  * 3. **本轮花费与总花费是两个数**：`spentUsd` 只算这一轮（记录要看得出「第 3 轮
  *    特别贵」），`totalUsd` 含 `--rounds` 之前几轮（闸判的是整次运行）。
  * 4. **token 闸永远可信**：端点数出来的，不查价格表（见 `limitTokens`）。
@@ -52,6 +53,8 @@ export class Budget {
   private tokens = 0;
   /** 本轮所有参与比较的读数都可信 */
   private reliable = true;
+  /** 做过至少一次余额对账（哪怕差值是 0）—— 用来区分「有下界」与「什么都不知道」 */
+  private hasBill = false;
 
   constructor(private readonly o: BudgetOptions = {}) {
     const { limitUsd, limitTokens } = o;
@@ -74,6 +77,29 @@ export class Budget {
     if (usdAmount !== undefined) this.spent += usdAmount;
     if (tokens !== undefined) this.tokens += tokens;
     if (!known) this.reliable = false;
+  }
+
+  /**
+   * 用**余额差额**校准本轮花费 —— 余额对账的落点。
+   *
+   * 四条口径，全部来自真机：
+   *
+   * 1. **账单是下界，不是精确值**。两重截断：结算可能滞后几秒；余额只保留两位小数
+   *    （实测：7459 token 的一轮在 ¥2.94 账户上读出的差值是 0）。所以它只能证明
+   *    「至少花了这么多」，证明不了「正好花了这么多」。
+   * 2. **只上推、不下压**（`Math.max`）。覆盖会让一次「看起来 0 元」的读数把已知花费
+   *    抹掉 —— 那正是「把未知当 0」的变种，只是更难发现，因为报告里有个具体的数。
+   * 3. **不改 `reliable`**。下界不是可信读数，`costKnown` 必须继续为 false；否则
+   *    报告会印出一个**看起来可信的 0**。
+   * 4. **但它足以消掉 `blind`**：盲区的定义是「完全没有读数」，而下界也是读数 ——
+   *    下界已经超过上限时，真实花费只会更多。
+   */
+  reconcile(usdAmount: number): void {
+    // 负数/NaN 一律不采纳：余额上升只可能是充值，交给 `billedSince` 归零；
+    // 漏到这里的坏数如果生效，闸会往「永远不会超」的方向倒
+    if (!Number.isFinite(usdAmount) || usdAmount < 0) return;
+    this.hasBill = true;
+    if (usdAmount > this.spent) this.spent = usdAmount;
   }
 
   /** 本轮花了多少（报告里的 `costUsd`） */
@@ -110,16 +136,23 @@ export class Budget {
 
   /** 设了美元上限却读不出成本 —— 这个闸此刻是瞎的（有没有 token 兜底是另一件事） */
   get usdBlind(): boolean {
-    return this.o.limitUsd !== undefined && !this.reliable;
+    // 有账单就不算瞎：哪怕只是下界，也是一个能判「已超」的读数
+    return this.o.limitUsd !== undefined && !this.reliable && !this.hasBill;
+  }
+
+  /** 是否做过余额对账（报告里据此说明 `spentUsd` 是下界） */
+  get billed(): boolean {
+    return this.hasBill;
   }
 
   /**
    * 该不该停，以及为什么。
    *
    * 判定顺序就是安全性的顺序：
-   * 1. 美元闸**只在可信时**判超（拿偏低数字判超限只会误伤）；
+   * 1. 美元闸判超**不看读数可不可信**：`spent` 偏低都超了，真实只会更超 —— 这一条
+   *    无条件成立，是「已超」的充分条件；
    * 2. token 闸无条件判超（读数永远可信）；
-   * 3. 美元闸瞎了且没有 token 兜底 ⇒ `blind`，停。
+   * 3. 美元闸瞎了（既无可信估算、也没做过余额对账）且没有 token 兜底 ⇒ `blind`，停。
    *
    * 第 3 条与「给个 token 兜底就继续跑」的区别是刻意的：用户同时给了两个上限时，
    * 他知道自己在干什么（用 token 换成本估算），此时报 `blind` 停下来只是添乱；
@@ -127,9 +160,12 @@ export class Budget {
    */
   stopReason(): BudgetStop | undefined {
     const { limitUsd, limitTokens } = this.o;
-    if (limitUsd !== undefined && this.reliable && this.totalUsd > limitUsd) return 'usd';
+    // 偏低还超限 ⇒ 确实超了（`spent` 只会低于真实花费，见 `reconcile` 的口径）
+    if (limitUsd !== undefined && this.totalUsd > limitUsd) return 'usd';
     if (limitTokens !== undefined && this.totalTokens > limitTokens) return 'tokens';
-    if (limitUsd !== undefined && !this.reliable && limitTokens === undefined) return 'blind';
+    if (limitUsd !== undefined && !this.reliable && limitTokens === undefined && !this.hasBill) {
+      return 'blind';
+    }
     return undefined;
   }
 

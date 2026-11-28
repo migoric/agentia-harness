@@ -15,7 +15,12 @@ import { type Fail, isPlainObject, onlyKeys } from './util/shape.js';
  *
  * - `in` / `out`：$/1M token，**绝对价**；
  * - `cacheRead` / `cacheWrite`：相对 `in` 的**乘数**（不是绝对价！），缺省 0.1 / 1.25。
- *   这条最容易配错：DeepSeek 缓存读 $0.003/1M、输入 $0.15/1M ⇒ 乘数是 `0.02`，不是 `0.003`。
+ *   这条最容易配错：DeepSeek 缓存命中 $0.044/1M、未命中输入 $0.30/1M ⇒ 乘数是
+ *   `0.147`，不是 `0.044`。
+ *
+ * **填高档价（peak），不要填你此刻在付的价。** 分时计价的端点（DeepSeek 的高峰时段
+ * 是 2 倍）里，填低档价等于让闸在高峰期静默超支；填高档价只让闸提前一点点停。
+ * 价格表的用途是给预算闸一个**上界**，不是记账 —— 记账归 `balance`（余额差额）。
  */
 const fail: Fail = (message) => {
   throw new HarnessError('config.invalid', message);

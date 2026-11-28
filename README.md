@@ -178,12 +178,14 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
     "baseURL": "https://api.deepseek.com/anthropic",
     "apiKeyEnv": "DEEPSEEK_API_KEY"
   },
-  "pricing": { "deepseek-flash": { "in": 0.15, "out": 0.6, "cacheRead": 0.02 } }
+  "pricing": { "deepseek-flash": { "in": 0.3, "out": 1.2, "cacheRead": 0.147 } },
+  "balance": { "warnBelowUsd": 0.5 }
 }
 ```
 
 - `apiKeyEnv` 只写**变量名**，key 放 `.env`。密钥永远不进配置文件 —— 那个会被提交。声明了变量却没 key，开跑前就退出码 2，不花一轮 token 换一个 401。
-- **没定价的模型，成本读数是「未知」而不是 0**：报告里不出现 `$`、成本门退回 token、`--max-cost` 不生效。「不知道花了多少」与「一分没花」混成一个数，会让预算闸静默失效。
+- **单价填 `peak` 价**：分时计价的端点（DeepSeek 高峰期 2 倍）填低档价，等于让闸在高峰期静默超支。价格表是**上界**，不是发票。
+- **没定价的模型，成本读数是「未知」而不是 0**：报告里不出现 `$`、成本门退回 token、`--max-cost` 不生效。「不知道花了多少」与「一分没花」混成一个数，会让预算闸静默失效。补不上单价时用 `harness balance`（余额对账）—— 那是与单价无关的另一个读数。
 
 乘数口径、缓存价、拦截范围（哪些命令拦、哪些不拦）→ [运维面][doc-ops]
 

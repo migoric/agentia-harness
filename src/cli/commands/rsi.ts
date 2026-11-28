@@ -1,13 +1,16 @@
 import { resolve } from 'node:path';
 import type { ModelClient } from '@migor/agentia';
+import { DEFAULT_PER_USD } from '../../config-balance.js';
 import { describeError, HarnessError } from '../../errors.js';
 import { runSuite } from '../../evals/run.js';
 import { splitReport } from '../../evals/split.js';
+import { lowBalanceWarning } from '../../rsi/billing.js';
 import { assertBudgetEnforceable } from '../../rsi/budget-guard.js';
 import { makeCycleId, writeCycle } from '../../rsi/loop.js';
 import { LlmProposer } from '../../rsi/propose.js';
 import { type RoundStopReason, runRounds } from '../../rsi/rounds.js';
 import type { CycleReport, HoldoutResult, VerifyOutcome } from '../../rsi/types.js';
+import { readBalance } from '../../run/balance.js';
 import { usd } from '../../util/usd.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
@@ -79,6 +82,22 @@ async function cycle(ctx: CliContext, remote?: RemoteStage): Promise<number> {
     ...(remote !== undefined ? { remote: true } : {}),
   });
   if (guardNote !== undefined) warn(guardNote);
+
+  // 余额告警：只在配了 `balance.warnBelowUsd` 时多花一次 GET。它说的是**开跑前唯一
+  // 确定的事** —— 账户里还剩多少钱。而「跑到一半没钱」的后果很容易被误读成评测结论
+  // （一排 stopReason=error 的用例）。
+  const warnBelow = ctx.config.balance?.warnBelowUsd;
+  if (warnBelow !== undefined) {
+    const probe = await readBalance(ctx.config);
+    if (probe.ok) {
+      const low = lowBalanceWarning(
+        probe.snapshot,
+        ctx.config.balance?.perUsd ?? DEFAULT_PER_USD,
+        warnBelow,
+      );
+      if (low !== undefined) warn(low);
+    }
+  }
   const asJson = boolFlag(ctx.flags, 'json');
 
   const result = await runRounds({
@@ -192,9 +211,14 @@ function renderCycle(report: CycleReport): void {
     say(`  [${m.kind}] ${m.signature}  ×${m.count} → 偏向改 ${target}`);
   }
   say(
-    report.costKnown
-      ? `\n本轮成本 ${usd(report.costUsd)}`
-      : `\n本轮成本未知（模型不在价格表内或端点没报计量），token 只能当代理`,
+    report.billed !== undefined
+      ? // 有账单就以账单为主：它才是真的扣掉的钱，估算只是同一次花的另一种算法。
+        // 「下界」两个字不能省 —— 余额只有两位小数，小额花费读出来是 0
+        `\n本轮成本 ${usd(report.costUsd)}（账单下界 ${report.billed.amount.toFixed(2)} ${report.billed.currency}` +
+          `${report.billed.perUsd === undefined ? '' : `，按 1 USD = ${report.billed.perUsd} 折算`}）`
+      : report.costKnown
+        ? `\n本轮成本 ${usd(report.costUsd)}`
+        : `\n本轮成本未知（模型不在价格表内、端点也没报计量），token 只能当代理`,
   );
   if (report.budget !== undefined) {
     const b = report.budget;

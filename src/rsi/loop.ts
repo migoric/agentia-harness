@@ -9,8 +9,8 @@ export type { CycleOptions } from './cycle-options.js';
 import { splitReport, subsetReport } from '../evals/split.js';
 import { acceptProposal } from './accept.js';
 import { attribute, collectFailures } from './attribute.js';
-import { Budget } from './budget.js';
-import { makeCycleId, writeCycle } from './cycles.js';
+import { makeSink } from './cycle-sink.js';
+import { makeCycleId } from './cycles.js';
 import { validateHoldout } from './holdout.js';
 import { appendHoldoutUse, holdoutProgress, pickHoldoutBatch } from './holdout-batch.js';
 import { lessonsOf } from './ledger.js';
@@ -21,6 +21,8 @@ import {
   type ShrinkPolicy,
   shrinkState,
 } from './shrink.js';
+import { Spender } from './spender.js';
+import { filterTargets } from './target-filter.js';
 import type { CycleReport, Proposal, VerifyOutcome } from './types.js';
 import { isWorthAccepting, verifyProposal } from './verify.js';
 
@@ -46,21 +48,23 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
    * 写失败的策略是**让整轮失败**：一个「跑了但没记录」的 RSI 轮次比不跑更糟，
    * 因为它动过（或差点动过）资产，事后却无从复盘。
    */
-  // 成本账只有一个家（`Budget`）：`spent +=` / `costKnown &&` / `budgetStopped` 曾在
-  // 这个函数里各写四遍，新增一个花钱阶段就要同步改四处 —— 漏一处的症状是**闸静默偏低**，
-  // 不报错、只是多花钱。`--rounds` 的上限是整次运行的（prior 由调用方累加）。
+  // 成本账只有一个家（`Spender` → `Budget`）：`spent +=` / `costKnown &&` /
+  // `budgetStopped` 曾在这个函数里各写四遍，新增一个花钱阶段就要同步改四处 ——
+  // 漏一处的症状是**闸静默偏低**，不报错、只是多花钱。`--rounds` 的上限是整次运行
+  // 的（prior 由调用方累加）。
   //
-  // 放在 `emit` 之前：`tokens` 是本轮累计，而它唯一的真相就是这本账 —— 让每个 emit
-  // 调用点各自传一次，就会有人漏传（漏传读出来是 0，与「这轮没用 token」长得一样）。
-  const budget = new Budget({
+  // 余额窗口也开在这里，因为窗口的边界就是「一轮」；放在 CLI，`--rounds` 得在循环
+  // 里再开一次，`--watch` 又是一处。拿不到余额就退回旧行为（估算 + `blind` 停机）：
+  // **退化路径必须是旧的正确行为**，不是新的错行为。
+  const spending = await Spender.open(opts.config, {
     ...(opts.maxCostUsd !== undefined ? { limitUsd: opts.maxCostUsd } : {}),
     ...(opts.maxTokens !== undefined ? { limitTokens: opts.maxTokens } : {}),
     ...(opts.priorSpentUsd !== undefined ? { priorUsd: opts.priorSpentUsd } : {}),
     ...(opts.priorTokens !== undefined ? { priorTokens: opts.priorTokens } : {}),
+    ...(opts.meter !== undefined ? { meter: opts.meter } : {}),
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
   });
-
-  const emit = (body: Omit<CycleReport, 'cycleId' | 'path' | 'at' | 'tokens'>): CycleReport =>
-    writeCycle(opts.config, { ...body, tokens: budget.spentTokens }, cycleId);
+  const { finish } = makeSink(opts.config, cycleId, spending);
 
   /**
    * 这一轮是普通的「修失败」轮，还是**简化轮**。
@@ -107,7 +111,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   const baseline = views.train;
   const holdoutBaseline = views.holdout;
 
-  budget.charge(fullBaseline.costUsd, fullBaseline.costKnown, fullBaseline.tokens);
+  await spending.charge(fullBaseline.costUsd, fullBaseline.costKnown, fullBaseline.tokens);
 
   // 预算闸：基线就跑完闸就关了，直接收工。此时连提案都不提 —— 提案那一步要再调一次
   // 模型，在「已经超预算」的前提下继续花钱是最没道理的。
@@ -115,8 +119,12 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   // 这里同时覆盖 `blind`（设了美元上限但成本读不出、又没给 token 兜底）：那种情况下
   // 闸是瞎的，继续跑等于在一个看不见的账上烧钱。停下来并把原因写进报告（`stoppedBy`），
   // 比事后从账单上发现「--max-cost 从来没生效过」便宜得多。
-  if (budget.exceeded()) {
-    return emit({
+  //
+  // 但「瞎」有两种，只有一种是绝境：**能读余额的端点**上，刚才那一步已经用真实扣费
+  // 对过账了（`reconcile`），`blind` 自然消失，闸按账单判 —— 这才是 `--max-cost`
+  // 对未定价模型应有的行为。读不到余额时才退回停机。
+  if (spending.exceeded()) {
+    return finish(() => ({
       modes: [],
       proposals: [],
       verified: [],
@@ -124,17 +132,17 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       rejected: [],
       baseline: fullBaseline,
       dryRun,
-      costUsd: budget.spentUsd,
-      costKnown: budget.costKnown,
-      budget: budget.snapshot(true),
+      costUsd: spending.spentUsd,
+      costKnown: spending.costKnown,
+      budget: spending.snapshot(true),
       shrink: shrinkFacts,
       // 没有 historyConsulted：这条路径根本没走到提案那一步（见 CycleReport 的三态说明）
-    });
+    }));
   }
 
   const samples = collectFailures(baseline);
   if (samples.length === 0) {
-    return emit({
+    return finish(() => ({
       modes: [],
       proposals: [],
       verified: [],
@@ -142,12 +150,12 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       rejected: [],
       baseline: fullBaseline,
       dryRun,
-      costUsd: budget.spentUsd,
-      costKnown: budget.costKnown,
-      budget: budget.snapshot(false),
+      costUsd: spending.spentUsd,
+      costKnown: spending.costKnown,
+      budget: spending.snapshot(false),
       shrink: shrinkFacts,
       // 同上：没有失败模式就没有提案，也就没有「参考了几条历史」
-    });
+    }));
   }
 
   const modes = attribute(samples);
@@ -169,7 +177,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   // 提案也烧钱，且发生在预算闸第一次检查之前 —— 只记基线与候选时 `--max-cost`
   // 是系统性偏低的（真模型上一轮提案器可能比一条用例还贵）。成本与产出同一次返回，
   // 不再有「必须先 propose 再读属性」的时序契约。
-  budget.charge(proposed.cost.usd, proposed.cost.known);
+  await spending.charge(proposed.cost.usd, proposed.cost.known);
 
   const maxVerify = opts.maxVerify ?? 3;
   const verified: VerifyOutcome[] = [];
@@ -179,33 +187,23 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   let budgetStopped = false;
 
   // 简化轮：先筛再验（规则在 `shrink.ts`，这里是"用了它"而不是"又写一遍"）。
-  // 顺序有成本含义：变胖的提案一条都不跑评测，而简化轮恰好是最缺钱的那一轮
-  // 远程只能改「有文件映射」的目标：服务端目前只外置了 agent 的系统提示词。
-  // 归因现在能精确到技能（服务报 `toolCalls`），于是提案会自然地指向 skill —— 那些提案
-  // 在 stage 阶段一定会抛「remote.prompts 没为它指定文件」。在这里提前拒掉，
-  // 比花完一轮评测再报错便宜得多，而且理由能写进记录。
-  const stageable: Proposal[] = [];
-  for (const p of proposals) {
-    if (opts.allowedTargets === undefined || opts.allowedTargets(p.patch.target)) {
-      stageable.push(p);
-    } else {
-      rejected.push({
-        proposal: p,
-        reason:
-          `目标 ${p.patch.target} 在远端没有对应文件（remote.prompts 只映射了 agent 提示词），` +
-          '本地验证它会验一份远端根本不会读的提示词，因此不验证',
-      });
-    }
-  }
-  const { allowed: candidates, blocked } = partitionForShrink(stageable, shrink, minReduction);
+  // 顺序有成本含义：变胖的提案一条都不跑评测，而简化轮恰好是最缺钱的那一轮。
+  // 目标过滤（远程只能改有文件映射的目标）的判据在 `target-filter.ts`，这里只收结果。
+  const filtered = filterTargets(proposals, opts.allowedTargets);
+  rejected.push(...filtered.rejected);
+  const { allowed: candidates, blocked } = partitionForShrink(
+    filtered.stageable,
+    shrink,
+    minReduction,
+  );
   rejected.push(...blocked);
 
   for (const proposal of candidates.slice(0, maxVerify)) {
-    if (budget.exceeded()) {
+    if (spending.exceeded()) {
       budgetStopped = true;
       rejected.push({
         proposal,
-        reason: `预算已用完（${budget.describe()}），本次不验证`,
+        reason: `预算已用完（${spending.describe()}），本次不验证`,
       });
       continue;
     }
@@ -238,7 +236,11 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       continue;
     }
     verified.push(outcome);
-    budget.charge(outcome.candidate.costUsd, outcome.candidate.costKnown, outcome.candidate.tokens);
+    await spending.charge(
+      outcome.candidate.costUsd,
+      outcome.candidate.costKnown,
+      outcome.candidate.tokens,
+    );
 
     if (!outcome.gate.ok) {
       rejected.push({ proposal, reason: outcome.gate.reason });
@@ -270,11 +272,11 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   // 30 轮 × 每轮 5% 的累积假阳性约 78% —— 每一轮的门都"合法地"放过一点噪声。
   let holdoutBatch: CycleReport['holdoutBatch'];
   if (winner !== undefined && holdoutBaseline !== undefined) {
-    if (budget.exceeded()) {
+    if (spending.exceeded()) {
       budgetStopped = true;
       rejected.push({
         proposal: winner.proposal,
-        reason: `train 已选出候选，但预算不足以做留出集验证（${budget.describe()}），拒绝采纳`,
+        reason: `train 已选出候选，但预算不足以做留出集验证（${spending.describe()}），拒绝采纳`,
       });
       winner = undefined;
     } else {
@@ -302,7 +304,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
             ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
             ...pickTuning(opts),
           });
-          budget.charge(
+          await spending.charge(
             holdout.candidate.costUsd,
             holdout.candidate.costKnown,
             holdout.candidate.tokens,
@@ -368,7 +370,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     accepted.push(winner.proposal);
   }
 
-  return emit({
+  return finish(() => ({
     modes,
     proposals,
     verified,
@@ -376,16 +378,16 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     rejected,
     baseline: fullBaseline,
     dryRun,
-    costUsd: budget.spentUsd,
-    costKnown: budget.costKnown,
+    costUsd: spending.spentUsd,
+    costKnown: spending.costKnown,
     // 跑完才发现超限也算「预算用完」：`--rounds` 若不据此收工，下一轮会先跑一遍
     // 基线才意识到已经没钱了 —— 那一遍基线是纯粹的浪费，而且会让记录里多出一条
     // 「预算已用完」的轮次，看起来像闸失灵
-    budget: budget.snapshot(budgetStopped || budget.exceeded()),
+    budget: spending.snapshot(budgetStopped || spending.exceeded()),
     historyConsulted: lessons.length,
     shrink: shrinkFacts,
     ...(holdoutBatch === undefined ? {} : { holdoutBatch }),
-  });
+  }));
 }
 
 // 轮次记录的读写都在 `cycles.ts`（那一侧是「记录长什么样」的唯一定义处，

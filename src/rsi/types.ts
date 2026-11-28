@@ -277,6 +277,33 @@ export interface CycleReport {
    * 时它是唯一不依赖价格表的读数）。旧记录没有这个字段（读侧按 0 取）。
    */
   readonly tokens?: number | undefined;
+  /**
+   * 本轮**余额差额**（跑前余额 − 跑后余额）—— 与单价无关的那本账。
+   *
+   * 与 `costUsd` 并存的理由，是它们回答的不是同一个问题：
+   * - `costUsd` 是**估算**（单价 × token），单价是外部事实且分时变动；
+   * - `billed` 是**账单**，账户里真的少掉多少。
+   *
+   * ⚠️ 它是**下界**，不是精确值，两重截断：结算可能滞后；余额只保留两位小数
+   * （实测：7459 token 的一轮在 ¥2.94 的账户上读出差值 0）。所以：
+   * - 它有值**不**代表 `costKnown` 变 true（仍未确认精确金额）；
+   * - 它只用于两件事：判断「累计下界是否已超上限」（充分条件），以及事后对账；
+   * - `costUsd` 会被它上推（`Math.max`），不会被它下压。
+   *
+   * 缺席 = 这一轮没做余额对账（端点不支持 / 接口失败 / 显式关闭）。
+   */
+  readonly billed?:
+    | {
+        /** 账户币种（`CNY` / `USD`） */
+        readonly currency: string;
+        /** 原币金额，**没被汇率污染**（审计看这个） */
+        readonly amount: number;
+        /** 折算成美元后的金额 */
+        readonly usd: number;
+        /** 折算率；币种是 USD 时缺席 */
+        readonly perUsd?: number | undefined;
+      }
+    | undefined;
   /** 所有参与比较的报告都有成本读数；false 时 `costUsd` 偏低，预算闸不可用 */
   readonly costKnown: boolean;
   /** 预算闸的结论；没设上限时为 undefined */

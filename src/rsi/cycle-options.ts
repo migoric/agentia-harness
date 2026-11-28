@@ -11,6 +11,7 @@ import type { HarnessConfig } from '../config.js';
 import type { GateOptions } from '../evals/gate.js';
 import type { SuiteTuning } from '../evals/run.js';
 import type { CaseRunner } from '../run/case-runner.js';
+import type { CostMeter } from './billing.js';
 import type { Proposer } from './propose.js';
 import type { ShrinkPolicy } from './shrink.js';
 import type { StageHook } from './types.js';
@@ -58,6 +59,19 @@ export interface CycleOptions extends SuiteTuning {
   readonly priorSpentUsd?: number | undefined;
   /** 本轮之前已经用掉的 token（与 `priorSpentUsd` 同一条口径） */
   readonly priorTokens?: number | undefined;
+  /**
+   * 成本计量器（余额对账）。
+   *
+   * 三态，与 `historyConsulted` 同一套写法：
+   * - 缺省 ⇒ `runCycle` 自己开一个（端点支持余额查询时才有，见 `run/balance.ts`）；
+   * - `null` ⇒ 明确不用（测试、离线、或用户不想要这次网络往返）；
+   * - 给了对象 ⇒ 用调用方的（`--rounds` 想跨轮共用一个窗口时）。
+   *
+   * 为什么默认自动开而不是让 CLI 传：**真正需要它的人不会去配它** —— 模型没定价、
+   * 用户设了 `--max-cost`，他并不知道自己的闸是瞎的。而端点是 DeepSeek 时开一个
+   * 余额窗口的成本只是一次 GET。
+   */
+  readonly meter?: CostMeter | null | undefined;
   /**
    * 采纳成功后把**新的资产集**交回调用方。
    *
