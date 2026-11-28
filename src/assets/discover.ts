@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { HarnessError } from '../errors.js';
-import { list, parseFrontmatter, scalar } from '../util/frontmatter.js';
+import { type Frontmatter, list, parseFrontmatter, scalar } from '../util/frontmatter.js';
 import { fingerprint } from '../util/hash.js';
 import type { AgentAsset, AssetKind, AssetSet, SkillAsset } from './types.js';
 
@@ -79,6 +79,9 @@ function parse(path: string, kind: AssetKind): SkillAsset | AgentAsset {
     tools: list(fm, 'tools'),
     toolsDeclared: fm.data.tools !== undefined,
     maxIterations: positiveInt(scalar(fm, 'maxIterations', path), path, 'maxIterations'),
+    // 声明式策略字段的原始字符串；值校验与转译在 buildApp（policy-fields.ts），
+    // 这里保持 assets 层不反向依赖 rsi。缺席的键不落进对象。
+    policyFields: policyRaw(fm),
   };
 
   if (kind === 'skill') return { ...base, kind: 'skill' };
@@ -125,6 +128,16 @@ export function setFingerprint(
     ...agents.map((a) => `agent:${a.name}=${a.fingerprint}`),
   ].sort();
   return fingerprint(parts.join('\n'));
+}
+
+/** 抽取声明式策略字段的原始字符串（键白名单在 policy-fields.ts，这里只做机械读取） */
+function policyRaw(fm: Frontmatter): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of ['contextBudgetTokens', 'retryMaxAttempts']) {
+    const v = fm.data[key];
+    if (typeof v === 'string') out[key] = v;
+  }
+  return out;
 }
 
 function positiveInt(v: string | undefined, path: string, key: string): number | undefined {

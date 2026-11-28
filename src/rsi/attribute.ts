@@ -22,6 +22,11 @@ export function collectFailures(report: EvalReport): FailureSample[] {
       stopReason: c.stopReason,
       tokens: c.tokens,
       iterations: c.iterations,
+      // 行为摘要四读数（来自 agentia runSummary）—— 归因从 1 维扩到 4 维。
+      // 条件展开：字段缺席（老报告 / 无 trace）就保持缺席，别写成 0。
+      ...(c.peakContextTokens !== undefined ? { peakContextTokens: c.peakContextTokens } : {}),
+      ...(c.compactions !== undefined ? { compactions: c.compactions } : {}),
+      ...(c.toolCalls !== undefined ? { toolCalls: c.toolCalls } : {}),
       excerpt: c.excerpt,
       ...(c.traceId !== undefined ? { traceId: c.traceId } : {}),
       skills: c.skills,
@@ -111,7 +116,7 @@ export function classify(s: FailureSample): { kind: FailureKind; signature: stri
   const pats = s.failures.map(normalizeFailure);
   const joined = [...new Set(pats)].sort().join(' | ');
 
-  const kind: FailureKind = (() => {
+  let kind: FailureKind = (() => {
     if (pats.some((p) => p === 'token 超预算')) return 'budget';
     if (pats.some((p) => p === '工具序列不符')) return 'tool_misuse';
     if (pats.some((p) => p.startsWith('run 抛出'))) return 'tool_error';
@@ -123,7 +128,39 @@ export function classify(s: FailureSample): { kind: FailureKind; signature: stri
     return 'unknown';
   })();
 
-  return { kind, signature: joined === '' ? `${s.stopReason}` : joined };
+  // 四维归因：只在「结果不对」这一类里用行为读数细分，不抢上面更硬的分类
+  // （budget / 工具错 / 抛错 / 绕圈 / 非正常收尾各有明确修法，不该被读数改写）。
+  // 两条证据都要求字段**有值**（缺席 = 没 trace = 不知道，绝不当 0 用）：
+  // - 反复压缩（compactions >= 2）：上下文撑了又撑，典型的「上下文管理」病；
+  // - 峰值上下文远超输出（> 8× 且输出过小）：大部分 token 花在喂历史，不是短答。
+  // 命中即升级为 context_overflow —— 提案会据此去改上下文策略，而不是继续加措辞。
+  if (
+    kind === 'wrong_answer' &&
+    ((s.compactions !== undefined && s.compactions >= 2) ||
+      (s.peakContextTokens !== undefined &&
+        s.peakContextTokens > 8 * Math.max(1, s.tokens) &&
+        s.tokens < 200))
+  ) {
+    kind = 'context_overflow';
+  }
+
+  // 签名加行为档位：让「同样是答错，但一条 20 轮绕圈、一条 2 轮直答」分成两个模式，
+  // 因为它们的提案方向不同（前者改停止/收敛，后者改结论内容）。缺席的维度不进签名，
+  // 老报告与带 trace 的报告不会因「有没有读数」被拆成不同模式。
+  const dims: string[] = [];
+  if (s.peakContextTokens !== undefined) dims.push(`ctx≥${bucket(s.peakContextTokens)}`);
+  if (s.compactions !== undefined && s.compactions > 0) dims.push(`compact${s.compactions}`);
+  if (s.toolCalls !== undefined && s.toolCalls > 0) dims.push(`tools${s.toolCalls}`);
+  if (s.iterations >= 5) dims.push(`iter${bucket(s.iterations)}`);
+  const tag = dims.length === 0 ? '' : ` [${dims.join(' ')}]`;
+  const base = joined === '' ? `${s.stopReason}` : joined;
+  return { kind, signature: base + tag };
+}
+
+/** 数量级档（1/10/100/1000…）—— 避免精确值让「同样坏法」永远聚不起来 */
+function bucket(n: number): number {
+  if (n <= 0) return 0;
+  return 10 ** Math.floor(Math.log10(n));
 }
 
 /**

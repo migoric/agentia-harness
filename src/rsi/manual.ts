@@ -44,7 +44,7 @@ function validate(raw: unknown, source: string): Proposal {
   const p = objectAt(raw, `${source}: 提案`, fail);
   onlyKeys(p, source, ['id', 'modeId', 'kind', 'rationale', 'layer', 'patch', 'manifest'], fail);
   const q = objectAt(p.patch, `${source}: patch`, fail);
-  onlyKeys(q, `${source}.patch`, ['target', 'before', 'after'], fail);
+  onlyKeys(q, `${source}.patch`, ['target', 'before', 'after', 'settings'], fail);
 
   const id = requiredText(p.id, `${source}.id`, fail);
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(id)) {
@@ -78,6 +78,19 @@ function validate(raw: unknown, source: string): Proposal {
       `${source}.layer 只能是 "L1"（改代码走 harness patch，不走这里）`,
     );
   }
+  // settings 是外部不可信输入：这里只校验形状（字符串字典），白名单归属与值合法性
+  // 由 applyPatch 统一判定（单一判据，手写提案与 LLM 提案走同一条路）。
+  let settings: Record<string, string> | undefined;
+  if (q.settings !== undefined) {
+    const so = objectAt(q.settings, `${source}.patch.settings`, fail);
+    settings = {};
+    for (const [k, v] of Object.entries(so)) {
+      if (typeof v !== 'string') {
+        throw new HarnessError('config.invalid', `${source}.patch.settings.${k} 必须是字符串`);
+      }
+      settings[k] = v;
+    }
+  }
   return {
     id,
     modeId: requiredText(p.modeId, `${source}.modeId`, fail),
@@ -87,6 +100,6 @@ function validate(raw: unknown, source: string): Proposal {
       ? { manifest: validateManifest(p.manifest, `${source}.manifest`) }
       : {}),
     layer: 'L1',
-    patch: { target, before, after },
+    patch: { target, before, after, ...(settings !== undefined ? { settings } : {}) },
   };
 }

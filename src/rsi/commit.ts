@@ -5,6 +5,7 @@ import { buildLock, writeLock } from '../assets/lockfile.js';
 import { type AssetSet, findAsset } from '../assets/types.js';
 import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { parseFrontmatter } from '../util/frontmatter.js';
 import { appendJournal, atomicWrite, readJournal } from './journal.js';
 import type { ChangeManifest, JournalEntry, Proposal } from './types.js';
 import { renderFile } from './verify.js';
@@ -40,6 +41,10 @@ export interface AcceptIntent {
   /** 采纳前 / 采纳后的正文（含 frontmatter 之外的 body） */
   readonly before: string;
   readonly after: string;
+  /** 采纳携带的白名单 frontmatter 覆盖（可空 —— 旧意图没有这个字段） */
+  readonly settings?: Readonly<Record<string, string>> | undefined;
+  /** 采纳前这些字段的原值（回滚据此恢复，只记 settings 涉及的键） */
+  readonly settingsBefore?: Readonly<Record<string, string>> | undefined;
   readonly reason: string;
   readonly manifest?: ChangeManifest | undefined;
   readonly assetsBefore: string;
@@ -81,6 +86,11 @@ export function commitAccept(
     );
   }
 
+  // 采纳前这些字段的原值 —— 回滚要据此把 frontmatter 恢复到采纳前。
+  // 只记 settings 涉及的键；老资产没写某个键时值为 undefined，回滚会删掉那一行。
+  const settings = proposal.patch.settings;
+  const settingsBefore = settings === undefined ? undefined : oldSettings(current, settings);
+
   const intent: AcceptIntent = {
     schema: 1,
     at: Date.now(),
@@ -88,6 +98,8 @@ export function commitAccept(
     target: proposal.patch.target,
     before: proposal.patch.before,
     after: proposal.patch.after,
+    ...(settings !== undefined ? { settings } : {}),
+    ...(settingsBefore !== undefined ? { settingsBefore } : {}),
     reason,
     ...(proposal.manifest !== undefined ? { manifest: proposal.manifest } : {}),
     assetsBefore: assets.fingerprint,
@@ -97,8 +109,8 @@ export function commitAccept(
   const intentPath = acceptIntentPath(p);
   mkdirSync(dirname(intentPath), { recursive: true });
   atomicWrite(intentPath, `${JSON.stringify(intent, null, 2)}\n`);
-  // ② 资产
-  atomicWrite(asset.path, renderFile(asset.path, proposal.patch.after));
+  // ② 资产（正文 + 白名单 frontmatter 覆盖一起落盘）
+  atomicWrite(asset.path, renderFile(asset.path, proposal.patch.after, proposal.patch.settings));
   // ③ lock 与 journal：lock 是「磁盘现状」的派生数据，journal 才是审计依据
   const after = discoverAssets({ skills: p.skillsDir, agents: p.agentsDir });
   writeLock(join(p.root, 'harness.lock.json'), buildLock(after));
@@ -118,6 +130,8 @@ function entryOf(intent: AcceptIntent, assetsAfter: string): JournalEntry {
     target: intent.target,
     before: intent.before,
     after: intent.after,
+    ...(intent.settings !== undefined ? { settings: intent.settings } : {}),
+    ...(intent.settingsBefore !== undefined ? { settingsBefore: intent.settingsBefore } : {}),
     reason: intent.reason,
     ...(intent.manifest !== undefined ? { manifest: intent.manifest } : {}),
     assetsBefore: intent.assetsBefore,
@@ -127,6 +141,23 @@ function entryOf(intent: AcceptIntent, assetsAfter: string): JournalEntry {
 
 function clearIntent(p: WorkspacePaths): void {
   rmSync(acceptIntentPath(p), { force: true });
+}
+
+/**
+ * 采纳前磁盘上这些白名单键的原值（只取 settings 涉及的键）。
+ * 值为字符串 = 原来写过；缺席 = 原来没写（回滚时 renderFile 会不覆盖，恢复成没有该行）。
+ */
+function oldSettings(
+  text: string,
+  settings: Readonly<Record<string, string>>,
+): Readonly<Record<string, string>> {
+  const fm = parseFrontmatter(text, 'asset');
+  const out: Record<string, string> = {};
+  for (const key of Object.keys(settings)) {
+    const v = fm.data[key];
+    if (typeof v === 'string') out[key] = v;
+  }
+  return out;
 }
 
 /**
@@ -163,6 +194,14 @@ export function readAcceptIntent(p: WorkspacePaths): AcceptIntent | undefined {
     target: o.target,
     before: o.before,
     after: o.after,
+    ...(o.settings !== undefined && typeof o.settings === 'object' && o.settings !== null
+      ? { settings: o.settings as Readonly<Record<string, string>> }
+      : {}),
+    ...(o.settingsBefore !== undefined &&
+    typeof o.settingsBefore === 'object' &&
+    o.settingsBefore !== null
+      ? { settingsBefore: o.settingsBefore as Readonly<Record<string, string>> }
+      : {}),
     reason: typeof o.reason === 'string' ? o.reason : '',
     ...(o.manifest !== undefined ? { manifest: o.manifest } : {}),
     assetsBefore: typeof o.assetsBefore === 'string' ? o.assetsBefore : '',
@@ -207,7 +246,8 @@ export function classifyAcceptRecovery(p: WorkspacePaths): AcceptRecoveryState {
     };
   }
   const text = readFileSync(asset.path, 'utf8');
-  if (text === renderFile(asset.path, intent.after)) return { kind: 'after', intent };
+  if (text === renderFile(asset.path, intent.after, intent.settings))
+    return { kind: 'after', intent };
   if (text === renderFile(asset.path, intent.before)) return { kind: 'before', intent };
   return {
     kind: 'unknown',

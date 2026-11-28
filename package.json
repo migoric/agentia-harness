@@ -1,6 +1,6 @@
 {
   "name": "@migor/agentia-harness",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Agent harness 工程基座：Markdown 资产库 + 评测台 + RSI 闭环，构建在 @migor/agentia 之上",
   "type": "module",
   "license": "MIT",
@@ -36,7 +36,7 @@
     "bump": "node scripts/version.mjs --bump"
   },
   "dependencies": {
-    "@migor/agentia": "^0.10.16"
+    "@migor/agentia": "^0.10.17"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.2.0",

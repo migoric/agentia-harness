@@ -1,4 +1,4 @@
-import { InMemoryMemoryStore, type ModelClient } from '@migor/agentia';
+import { InMemoryMemoryStore, type ModelClient, runSummary } from '@migor/agentia';
 import type { CaseRunner } from '../run/case-runner.js';
 import { costOf } from '../run/cost.js';
 import { menuFacts } from '../run/menu-read.js';
@@ -138,6 +138,8 @@ export async function runOne(
     // 前几轮真跑过，菜单与资产版本也得留下：这一条虽然崩了，它的菜单仍是「本轮用过什么」
     // 的证据；漏掉它会让整批变成「至少一条没记 ⇒ 不知道」，而这批本来是可以确认的
     const mf = spent === undefined ? {} : menuFacts(spent);
+    // 行为摘要同理：前几轮的 trace 里压缩/工具/上下文读数仍是真账，崩了不等于没发生
+    const bs = spent === undefined ? undefined : runSummary(spent);
     return {
       name: c.name,
       task: c.task,
@@ -159,6 +161,14 @@ export async function runOne(
       subagents: [],
       ...(mu === undefined ? {} : { models: mu.models, fallbackUsed: mu.fallbacks }),
       ...mf,
+      // 行为摘要四读数（iterations 已在上面用 partial 求和）—— 无 trace 则整体缺席
+      ...(bs === undefined
+        ? {}
+        : {
+            peakContextTokens: bs.peakContextTokens,
+            compactions: bs.compactions,
+            toolCalls: bs.toolCalls,
+          }),
       ...(plannedTurns === undefined ? {} : { turns: plannedTurns }),
       ...(failedTurn === undefined ? {} : { failedTurn }),
       // 期望路由随结果落盘（见 `CaseResult.expectRoute`）：基线报告可能是上一版用例写的，
@@ -172,6 +182,7 @@ export async function runOne(
 
   const failures = check(c, out);
   if (timedOut) failures.unshift(`用例超时（${opts.timeoutMs}ms）`);
+  const bs = runSummary(out.trace);
   return {
     name: c.name,
     task: c.task,
@@ -182,6 +193,10 @@ export async function runOne(
     tokens: out.tokens,
     costUsd: out.costUsd,
     iterations: out.iterations,
+    // 行为摘要四读数（iterations 就是上面那个）—— 归因从 1 维扩到 4 维
+    peakContextTokens: bs.peakContextTokens,
+    compactions: bs.compactions,
+    toolCalls: bs.toolCalls,
     durationMs: out.durationMs,
     stopReason: out.stopReason,
     excerpt: out.text.slice(0, 400),

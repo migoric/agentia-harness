@@ -182,7 +182,13 @@ export function revertLast(config: WorkspacePaths, id?: string): RevertResult {
   if (asset === undefined) {
     throw new HarnessError('asset.missing', `回滚目标 "${last.target}" 已不存在`);
   }
-  atomicWrite(asset.path, renderFile(asset.path, last.before));
+  // 回滚同时恢复 frontmatter：把采纳前的原值写回，删掉采纳时新增的字段行。
+  const settingsBefore = last.settingsBefore ?? {};
+  const removeKeys =
+    last.settings === undefined
+      ? []
+      : Object.keys(last.settings).filter((k) => !(k in settingsBefore));
+  atomicWrite(asset.path, renderFile(asset.path, last.before, settingsBefore, removeKeys));
 
   const restored = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
   writeLock(join(config.root, 'harness.lock.json'), buildLock(restored));

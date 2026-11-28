@@ -38,6 +38,11 @@ export interface AssetBase {
    */
   readonly toolsDeclared: boolean;
   readonly maxIterations: number | undefined;
+  /**
+   * 声明式策略字段的原始值（contextBudgetTokens / retryMaxAttempts）。
+   * 由 buildApp 转成 agentia 策略对象；缺席 = 没写（用 agentia 缺省）。
+   */
+  readonly policyFields: Readonly<Record<string, string>>;
 }
 
 export interface SkillAsset extends AssetBase {
