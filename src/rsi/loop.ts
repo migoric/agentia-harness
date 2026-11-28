@@ -46,13 +46,21 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
    * 写失败的策略是**让整轮失败**：一个「跑了但没记录」的 RSI 轮次比不跑更糟，
    * 因为它动过（或差点动过）资产，事后却无从复盘。
    */
-  const emit = (body: Omit<CycleReport, 'cycleId' | 'path' | 'at'>): CycleReport =>
-    writeCycle(opts.config, body, cycleId);
-
   // 成本账只有一个家（`Budget`）：`spent +=` / `costKnown &&` / `budgetStopped` 曾在
   // 这个函数里各写四遍，新增一个花钱阶段就要同步改四处 —— 漏一处的症状是**闸静默偏低**，
   // 不报错、只是多花钱。`--rounds` 的上限是整次运行的（prior 由调用方累加）。
-  const budget = new Budget(opts.maxCostUsd, opts.priorSpentUsd ?? 0);
+  //
+  // 放在 `emit` 之前：`tokens` 是本轮累计，而它唯一的真相就是这本账 —— 让每个 emit
+  // 调用点各自传一次，就会有人漏传（漏传读出来是 0，与「这轮没用 token」长得一样）。
+  const budget = new Budget({
+    ...(opts.maxCostUsd !== undefined ? { limitUsd: opts.maxCostUsd } : {}),
+    ...(opts.maxTokens !== undefined ? { limitTokens: opts.maxTokens } : {}),
+    ...(opts.priorSpentUsd !== undefined ? { priorUsd: opts.priorSpentUsd } : {}),
+    ...(opts.priorTokens !== undefined ? { priorTokens: opts.priorTokens } : {}),
+  });
+
+  const emit = (body: Omit<CycleReport, 'cycleId' | 'path' | 'at' | 'tokens'>): CycleReport =>
+    writeCycle(opts.config, { ...body, tokens: budget.spentTokens }, cycleId);
 
   /**
    * 这一轮是普通的「修失败」轮，还是**简化轮**。
@@ -99,10 +107,14 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   const baseline = views.train;
   const holdoutBaseline = views.holdout;
 
-  budget.charge(fullBaseline.costUsd, fullBaseline.costKnown);
+  budget.charge(fullBaseline.costUsd, fullBaseline.costKnown, fullBaseline.tokens);
 
-  // 预算闸：基线就超了就直接收工。此时连提案都不提 —— 提案那一步要再调一次模型，
-  // 在「已经超预算」的前提下继续花钱是最没道理的
+  // 预算闸：基线就跑完闸就关了，直接收工。此时连提案都不提 —— 提案那一步要再调一次
+  // 模型，在「已经超预算」的前提下继续花钱是最没道理的。
+  //
+  // 这里同时覆盖 `blind`（设了美元上限但成本读不出、又没给 token 兜底）：那种情况下
+  // 闸是瞎的，继续跑等于在一个看不见的账上烧钱。停下来并把原因写进报告（`stoppedBy`），
+  // 比事后从账单上发现「--max-cost 从来没生效过」便宜得多。
   if (budget.exceeded()) {
     return emit({
       modes: [],
@@ -209,7 +221,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
       continue;
     }
     verified.push(outcome);
-    budget.charge(outcome.candidate.costUsd, outcome.candidate.costKnown);
+    budget.charge(outcome.candidate.costUsd, outcome.candidate.costKnown, outcome.candidate.tokens);
 
     if (!outcome.gate.ok) {
       rejected.push({ proposal, reason: outcome.gate.reason });
@@ -273,7 +285,11 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
             ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
             ...pickTuning(opts),
           });
-          budget.charge(holdout.candidate.costUsd, holdout.candidate.costKnown);
+          budget.charge(
+            holdout.candidate.costUsd,
+            holdout.candidate.costKnown,
+            holdout.candidate.tokens,
+          );
           winner = { ...winner, holdout };
           const i = verified.findIndex((v) => v.proposal.id === winner?.proposal.id);
           if (i >= 0) verified[i] = winner;

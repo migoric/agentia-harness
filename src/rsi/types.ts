@@ -211,14 +211,31 @@ export interface JournalEntry {
  * 存在理由很具体：一轮闭环要跑**两遍以上**评测（基线 + 每个候选各一遍），而在真模型
  * 上这是最贵的一步。没有上限时，「这轮花了 $12 结果什么都没采纳」是很容易发生的。
  *
- * `spentUsd` 只累加**已知**成本：模型没定价时它是偏低的，所以 `costKnown=false` 时
- * 闸不生效（并如实记下来），而不是拿着偏低的数字假装闸住了。
+ * `spentUsd` 只累加**已知**成本：模型没定价时它是偏低的。旧实现因此让美元闸在
+ * `costKnown=false` 时**不生效**，结果是「给未定价模型设 `--max-cost`」看起来有保护、
+ * 实际一分钱也没拦住。现在这条路被堵成两种明确结局（见 `stoppedBy`）：
+ * token 闸接管，或者 `blind` 停下来。
  */
 export interface CycleBudget {
-  readonly limitUsd: number;
+  /** 美元上限；只设了 token 上限时缺席（旧记录一定有它） */
+  readonly limitUsd?: number | undefined;
+  /** token 上限（`--max-tokens`）；不设时缺席 */
+  readonly limitTokens?: number | undefined;
   readonly spentUsd: number;
+  /** 用了多少 token；旧记录没有这个字段（按 0 读） */
+  readonly spentTokens?: number | undefined;
   /** true = 这一轮结束时预算已经用完（提前收工，或者跑完才发现超了）—— 调用方据此决定还开不开下一轮 */
   readonly stopped: boolean;
+  /**
+   * 为什么停。缺省（旧记录）时按 `stopped` 理解成美元闸。
+   *
+   * `blind` 是**配置错误**而不是「钱花完了」：模型没定价、又没有 token 兜底，
+   * 美元闸读不出数。两者的下一步完全不同（一个是加预算，一个是补 pricing 或
+   * 加 `--max-tokens`），所以必须分得开。
+   */
+  readonly stoppedBy?: 'usd' | 'tokens' | 'blind' | undefined;
+  /** 设了美元上限但成本读数不可信（此时靠 token 闸兜底，或者已按 `blind` 停下） */
+  readonly usdBlind?: boolean | undefined;
 }
 
 export interface CycleReport {
@@ -252,6 +269,14 @@ export interface CycleReport {
   readonly dryRun: boolean;
   /** 本轮累计美元成本（提案 + 基线 + 已验证的候选） */
   readonly costUsd: number;
+  /**
+   * 本轮累计 token（提案 + 基线 + 已验证的候选）。
+   *
+   * 与 `costUsd` 并列而不是塞进 `budget` 的理由：`budget` 只在设了上限时存在，
+   * 而 token 数是**每一轮都想知道**的（`--rounds` 下累加、判断「第 3 轮突然变贵」
+   * 时它是唯一不依赖价格表的读数）。旧记录没有这个字段（读侧按 0 取）。
+   */
+  readonly tokens?: number | undefined;
   /** 所有参与比较的报告都有成本读数；false 时 `costUsd` 偏低，预算闸不可用 */
   readonly costKnown: boolean;
   /** 预算闸的结论；没设上限时为 undefined */

@@ -136,11 +136,15 @@ export async function acceptFrom(
   const dryRun = boolFlag(ctx.flags, 'dry-run');
   // 成本口径与自动 RSI 一致：基线 + 候选（+ 留出集候选）。走同一个 `Budget` 而不是
   // 在这里再写一遍累加 —— 「花费怎么算」只能有一处定义，否则两条路径迟早对不上
-  const budget = new Budget(undefined, 0);
-  budget.charge(fullBaseline.costUsd, fullBaseline.costKnown);
-  budget.charge(outcome.candidate.costUsd, outcome.candidate.costKnown);
+  const budget = new Budget();
+  budget.charge(fullBaseline.costUsd, fullBaseline.costKnown, fullBaseline.tokens);
+  budget.charge(outcome.candidate.costUsd, outcome.candidate.costKnown, outcome.candidate.tokens);
   if (outcome.holdout !== undefined) {
-    budget.charge(outcome.holdout.candidate.costUsd, outcome.holdout.candidate.costKnown);
+    budget.charge(
+      outcome.holdout.candidate.costUsd,
+      outcome.holdout.candidate.costKnown,
+      outcome.holdout.candidate.tokens,
+    );
   }
   if (dryRun) {
     say(`dry-run：${proposal.id} 过了门，未落盘（${outcome.gate.reason}）`);
@@ -170,6 +174,7 @@ export async function acceptFrom(
         dryRun,
         costUsd: budget.spentUsd,
         costKnown: budget.costKnown,
+        tokens: budget.spentTokens,
         budget: undefined,
         ...(holdoutBatch === undefined ? {} : { holdoutBatch }),
       },

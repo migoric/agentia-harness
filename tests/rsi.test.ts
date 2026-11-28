@@ -442,7 +442,7 @@ describe('runCycle —— 五步编排', () => {
     assert.equal(report.modes.length, 0);
   });
 
-  it('成本不可比时预算闸不生效，但记录里必须写明（不拿偏低数字假装闸住了）', async () => {
+  it('模型没定价时美元闸读不出数 ⇒ 判 blind 停下（不再静默放行）', async () => {
     const root = project();
     writeFileSync(
       join(root, 'harness.config.json'),
@@ -461,11 +461,11 @@ describe('runCycle —— 五步编排', () => {
     });
 
     assert.equal(report.costKnown, false);
-    assert.equal(
-      report.budget?.stopped,
-      false,
-      '不知道花了多少时不能声称「没超」也不能声称「超了」',
-    );
+    // 旧行为是「不可信 ⇒ 判没超」，于是 --max-cost 一分钱也拦不住（静默失效）。
+    // 现在：既没有可信美元读数、也没有 token 兜底 ⇒ 停下，并把原因写清楚。
+    assert.equal(report.budget?.stopped, true, '闸瞎了必须停，不能判「没超」');
+    assert.equal(report.budget?.stoppedBy, 'blind');
+    assert.equal(report.budget?.usdBlind, true);
     assert.equal(report.costUsd, 0);
   });
 

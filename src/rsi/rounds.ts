@@ -46,6 +46,8 @@ export interface RunRoundsOptions {
   readonly makeProposer: (round: number) => Proposer;
   readonly maxVerify?: number | undefined;
   readonly maxCostUsd?: number | undefined;
+  /** token 上限（美元闸读不出成本时的兜底），见 `CycleOptions.maxTokens` */
+  readonly maxTokens?: number | undefined;
   readonly dryRun?: boolean | undefined;
   readonly gateOptions?: GateOptions | undefined;
   readonly timeoutMs?: number | undefined;
@@ -88,6 +90,8 @@ export interface RoundsReport {
    * 没定价时是偏低的，读起来却像确切账单。成本未知不是免费。
    */
   readonly costKnown: boolean;
+  /** 所有轮次用掉的 token 总和 */
+  readonly tokens: number;
 }
 
 export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
@@ -103,6 +107,7 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
 
   const reports: CycleReport[] = [];
   let priorSpent = 0;
+  let priorTokens = 0;
   let stopReason: RoundStopReason = 'rounds';
 
   // 资产快照跟着「上一轮的采纳结果」走：复用旧快照会让第 2 轮的基线仍用改前的
@@ -126,7 +131,9 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
       ...(opts.maxVerify !== undefined ? { maxVerify: opts.maxVerify } : {}),
       ...(opts.maxCostUsd !== undefined ? { maxCostUsd: opts.maxCostUsd } : {}),
+      ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
       ...(priorSpent > 0 ? { priorSpentUsd: priorSpent } : {}),
+      ...(priorTokens > 0 ? { priorTokens } : {}),
       ...(opts.dryRun !== undefined ? { dryRun: opts.dryRun } : {}),
       ...(opts.gateOptions !== undefined ? { gateOptions: opts.gateOptions } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
@@ -138,6 +145,8 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
     });
     reports.push(report);
     priorSpent += report.costUsd;
+    priorTokens += report.tokens ?? 0;
+
     opts.onRound?.(report, i);
 
     if (report.budget?.stopped === true) {
@@ -164,5 +173,6 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
     stopReason,
     costUsd: reports.reduce((sum, r) => sum + r.costUsd, 0),
     costKnown: reports.every((r) => r.costKnown),
+    tokens: reports.reduce((sum, r) => sum + (r.tokens ?? 0), 0),
   };
 }

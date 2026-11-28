@@ -39,6 +39,16 @@ export interface CycleOptions extends SuiteTuning {
    */
   readonly maxCostUsd?: number | undefined;
   /**
+   * token 上限（`--max-tokens`）。美元闸在读不出成本时是瞎的，这是那个死角里的兜底。
+   *
+   * 为什么需要它：`maxCostUsd` 只在成本**可信**时生效（模型不在价格表里 ⇒ 读数不可信），
+   * 于是「给 DeepSeek 设 `--max-cost`」曾经什么也拦不住。token 数不查价格表，
+   * 永远可信。口径同样是整次运行（`priorTokens` 累加）。
+   *
+   * 只设美元闸、又读不出成本 ⇒ 直接判 `blind` 停下（见 `budget.ts`），不允许静默放行。
+   */
+  readonly maxTokens?: number | undefined;
+  /**
    * 本轮之前已经花掉的钱（`--rounds` 连续跑时由调用方累加）。
    *
    * 只影响预算闸与 `budget.spentUsd` 的口径；本轮 `costUsd` 仍然只算这一轮 ——
@@ -46,6 +56,8 @@ export interface CycleOptions extends SuiteTuning {
    * 「第 3 轮是不是特别贵」。
    */
   readonly priorSpentUsd?: number | undefined;
+  /** 本轮之前已经用掉的 token（与 `priorSpentUsd` 同一条口径） */
+  readonly priorTokens?: number | undefined;
   /**
    * 采纳成功后把**新的资产集**交回调用方。
    *

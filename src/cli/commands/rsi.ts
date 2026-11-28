@@ -3,8 +3,8 @@ import type { ModelClient } from '@migor/agentia';
 import { describeError, HarnessError } from '../../errors.js';
 import { runSuite } from '../../evals/run.js';
 import { splitReport } from '../../evals/split.js';
+import { assertBudgetEnforceable } from '../../rsi/budget-guard.js';
 import { makeCycleId, writeCycle } from '../../rsi/loop.js';
-
 import { LlmProposer } from '../../rsi/propose.js';
 import { type RoundStopReason, runRounds } from '../../rsi/rounds.js';
 import type { CycleReport, HoldoutResult, VerifyOutcome } from '../../rsi/types.js';
@@ -67,6 +67,18 @@ async function cycle(ctx: CliContext, remote?: RemoteStage): Promise<number> {
   const dryRun = boolFlag(ctx.flags, 'dry-run');
   // `--max-cost` 覆盖配置：CI 里想临时收紧预算不必改文件
   const maxCost = numFlag(ctx.flags, 'max-cost') ?? ctx.config.maxCostUsd;
+  // 美元闸在「模型没定价」时读不出数（见 `budget.ts`）—— 开跑前就确认它到底有没有闸，
+  // 而不是等花完一圈才发现报告里少了个 $ 号
+  const maxTokens = numFlag(ctx.flags, 'max-tokens');
+  const guardNote = assertBudgetEnforceable({
+    config: ctx.config,
+    assets: assetsOf(ctx),
+    ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
+    ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(remote !== undefined ? { remote: true } : {}),
+  });
+  if (guardNote !== undefined) warn(guardNote);
   const asJson = boolFlag(ctx.flags, 'json');
 
   const result = await runRounds({
@@ -83,6 +95,7 @@ async function cycle(ctx: CliContext, remote?: RemoteStage): Promise<number> {
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...(maxVerify !== undefined ? { maxVerify } : {}),
     ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
     ...(shrinkEvery !== undefined ? { shrinkPolicy: { every: shrinkEvery } } : {}),
     ...(dryRun ? { dryRun: true } : {}),
     ...(remote !== undefined
@@ -119,6 +132,10 @@ async function cycle(ctx: CliContext, remote?: RemoteStage): Promise<number> {
           ? `累计成本 ${usd(result.costUsd)} / ${usd(maxCost)}`
           : `累计成本未知（已知下限 ${usd(result.costUsd)} / ${usd(maxCost)}）—— 有轮次没定价或端点没报计量`,
       );
+    }
+    if (maxTokens !== undefined) {
+      // token 闸与美元闸并行印：读不出成本时它是唯一有意义的那个数
+      say(`累计 token ${result.tokens} / ${maxTokens}`);
     }
   }
 
@@ -180,10 +197,11 @@ function renderCycle(report: CycleReport): void {
     const b = report.budget;
     // spentUsd 是**跨轮累计**（`--rounds` 下上限只在整次运行上生效），措辞必须跟着变，
     // 否则第 3 轮会显示「预算 12.4 / 5 —— 本轮提前收工」，读起来像闸每轮都失灵
-    say(
-      `预算：累计已花 ${usd(b.spentUsd)} / 上限 ${usd(b.limitUsd)}` +
-        (b.stopped ? ' —— 已用完，不再开下一轮' : ''),
-    );
+    const usdPart =
+      b.limitUsd !== undefined ? `累计已花 ${usd(b.spentUsd)} / 上限 ${usd(b.limitUsd)}` : '';
+    const tokenPart =
+      b.limitTokens !== undefined ? `${b.spentTokens ?? 0} / ${b.limitTokens} token` : '';
+    say(`预算：${[usdPart, tokenPart].filter((x) => x !== '').join('，')}${stopNote(b)}`);
   }
   say(`\n提出 ${report.proposals.length} 个提案，验证 ${report.verified.length} 个：`);
   for (const v of report.verified) {
@@ -230,4 +248,23 @@ function diffHint(v: VerifyOutcome): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * 预算闸的收工说明。
+ *
+ * `blind` 与「钱花完了」必须分开说：前者的下一步是去配 pricing 或加 `--max-tokens`，
+ * 后者是加预算。混成一句「预算用完」，人会以为加钱就能继续 —— 而加多少都不管用。
+ */
+function stopNote(b: NonNullable<CycleReport['budget']>): string {
+  if (!b.stopped) return '';
+  switch (b.stoppedBy) {
+    case 'tokens':
+      return ' —— token 闸已到，不再开下一轮';
+    case 'blind':
+      return ' —— 美元闸读不出成本（模型未定价且没给 --max-tokens），停下以免继续花看不见的钱';
+    case 'usd':
+    case undefined:
+      return ' —— 已用完，不再开下一轮';
+  }
 }

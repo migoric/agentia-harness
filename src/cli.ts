@@ -64,6 +64,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --max-modes <n>       最多给几个失败模式提方案（缺省 3）
     --max-verify <n>      最多验证几个提案（缺省 3）
     --max-cost <usd>      整次运行的成本上限（--rounds 下跨轮共享；覆盖配置 maxCostUsd）
+    --max-tokens <n>      整次运行的 token 上限（模型没定价时美元闸读不出数，靠它兜底）
     --shrink-every <n>    连续 n 条改动没让资产变小，就强制下一轮只接受净简化提案（缺省 5）
     --watch               常驻推进：一轮一改、串行、有节流与停手条件（D9：写权限只在进程里）
     --every <s>           轮与轮之间的间隔秒数（缺省 900）
@@ -111,6 +112,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'max-modes',
     'max-verify',
     'max-cost',
+    'max-tokens',
     'rounds',
     'shrink-every',
     'revert',

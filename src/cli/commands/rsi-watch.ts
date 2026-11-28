@@ -1,4 +1,5 @@
 import { HarnessError } from '../../errors.js';
+import { assertBudgetEnforceable } from '../../rsi/budget-guard.js';
 import { LlmProposer } from '../../rsi/propose.js';
 import { runRounds } from '../../rsi/rounds.js';
 import type { CycleReport } from '../../rsi/types.js';
@@ -35,8 +36,25 @@ export async function watchCommand(ctx: CliContext, remote?: RemoteStage): Promi
   const maxRounds = numFlag(ctx.flags, 'max-rounds');
   const until = untilMs(strFlag(ctx.flags, 'until'));
   const maxCost = numFlag(ctx.flags, 'max-cost') ?? ctx.config.maxCostUsd;
+  const maxTokens = numFlag(ctx.flags, 'max-tokens');
   const maxVerify = numFlag(ctx.flags, 'max-verify');
   const maxModes = numFlag(ctx.flags, 'max-modes');
+
+  // 常驻形态下「整次运行」= 这个进程活着的全部时间。少了这两行累加，
+  // `--watch --max-cost 5` 会**每轮**各花 5 美元（每轮都是新的 Budget，prior=0），
+  // 而参数语义明明写着跨轮共享 —— 一晚上能把一个月预算烧掉，且没有任何报错。
+  let priorCost = 0;
+  let priorTokens = 0;
+
+  const guardNote = assertBudgetEnforceable({
+    config: ctx.config,
+    assets: assetsOf(ctx),
+    ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
+    ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+    ...(remote !== undefined ? { remote: true } : {}),
+  });
+  if (guardNote !== undefined) warn(guardNote);
 
   const controller = new AbortController();
   const stop = (sig: string): void => {
@@ -89,12 +107,18 @@ export async function watchCommand(ctx: CliContext, remote?: RemoteStage): Promi
         ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
         ...(maxVerify !== undefined ? { maxVerify } : {}),
         ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
+        ...(maxTokens !== undefined ? { maxTokens } : {}),
+        ...(priorCost > 0 ? { priorSpentUsd: priorCost } : {}),
+        ...(priorTokens > 0 ? { priorTokens } : {}),
         ...tuningOf(ctx),
       });
       const first = result.rounds[0];
       if (first === undefined) {
         throw new HarnessError('rsi.no_signal', '这一轮跑完了却没有产出记录（不该发生）');
       }
+      // 先累加再返回 tick：下一轮的 prior 必须包含这一轮（含被闸拦下的那部分）
+      priorCost += first.costUsd;
+      priorTokens += first.tokens ?? 0;
       const tick: RoundTick = {
         accepted: first.accepted.length,
         costUsd: first.costUsd,
