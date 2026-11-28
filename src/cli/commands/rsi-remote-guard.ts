@@ -32,8 +32,11 @@ export function rejectRemote(ctx: CliContext): void {
       '偶尔某条用例因噪声翻绿被当成「修好了」写进磁盘——而那个改动从没被真正验证。',
       '',
       '想测远程服务用 `harness eval --remote <url>`（它只测、不改资产，语义是对的）。',
-      '要让 RSI 也能改远程，前提是 service 侧把提示词改成来自文件并与 harness 共用同一个卷',
-      '（见 docs/rsi.md「为什么 rsi 没有 --remote」）。',
+      '',
+      'service 侧的前提已经具备（提示词来自文件 + prompts 挂卷 + /admin/reload 原子换表，',
+      '2026-11-28）。剩下的是 harness 侧的两阶段提交：候选必须先写盘才可能被远程看见，',
+      '于是需要 pending 记录、拒绝时还原、以及「写盘后被杀」的崩溃回收。',
+      '见 docs/rsi.md「为什么 rsi 还没有 --remote」。',
     ].join('\n'),
   );
 }
