@@ -448,3 +448,54 @@ describe('harness evidence', () => {
     assert.match(typo.out, /不认识 --oops/);
   });
 });
+
+describe('harness rsi --remote', () => {
+  it('明确拒绝并说明理由（不是「不认识这个 flag」）', () => {
+    const dir = tmp();
+    run(['init'], dir);
+    // 把 apiKeyEnv 指向一个没有值的变量：否则 `assertEndpointKey` 会在
+    // `ANTHROPIC_API_KEY` 上直接放行，这条断言就永远绿（空跑过一轮才发现）
+    const cfgPath = join(dir, 'harness.config.json');
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      cfgPath,
+      JSON.stringify(
+        { ...cfg, endpoint: { ...(cfg.endpoint as object), apiKeyEnv: 'PROBE_MODEL_KEY' } },
+        null,
+        2,
+      ),
+    );
+
+    const r = run(['rsi', '--remote', 'http://127.0.0.1:18080'], dir, {
+      PROBE_MODEL_KEY: undefined,
+    });
+    assert.equal(r.code, 2);
+    // 「不认识 --remote」会让人以为只是没接线，去提 issue 或自己 hack；
+    // 真实原因是结构性的：改本地资产对远程零影响
+    assert.doesNotMatch(r.out, /不认识 --remote/);
+    assert.match(r.out, /改资产/);
+    assert.match(r.out, /harness eval --remote/, '要给一条语义正确的替代路径');
+    // 凭据闸必须排在它后面：否则用户先被叫去配 key，配完才被告知「这个组合不支持」
+    assert.doesNotMatch(r.out, /缺少模型凭据/);
+  });
+});
+
+describe('--remote 与本地凭据闸', () => {
+  it('远程评测不需要本地模型 key（本地一次都不调）', async () => {
+    const dir = tmp();
+    run(['init'], dir);
+    // 指向一个一定连不上的地址：要验的是「没有 key 也不该在凭据闸上停下」，
+    // 而不是「它能连上」—— 报错文案里出现「缺少模型凭据」就是顺序错了
+    const r = run(
+      ['eval', '--remote', 'http://127.0.0.1:1', '--token-env', 'HARNESS_PROBE_TOKEN'],
+      dir,
+      {
+        // 显式抹掉继承来的 key：不抹的话这条测试在有 key 的机器上永远绿，等于没测
+        DEEPSEEK_API_KEY: undefined,
+        ANTHROPIC_API_KEY: undefined,
+        HARNESS_PROBE_TOKEN: 'dummy',
+      },
+    );
+    assert.doesNotMatch(r.out, /缺少模型凭据/);
+  });
+});

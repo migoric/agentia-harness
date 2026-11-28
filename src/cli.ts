@@ -123,6 +123,10 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'every',
     'max-rounds',
     'until',
+    // 只为给出**明确理由**而收进来：`rsi` 不能用远程 runner（见 `rsiCommand`）。
+    // 放在白名单外会让它报「不认识 --remote」，而那读起来像「还没接线」——
+    // 实际是结构上不可能，两个结论对用户的下一步完全不同
+    'remote',
   ],
   patch: ['yes', 'verify', 'timeout', 'revert'],
   serve: ['port', 'host', 'timeout'],
@@ -157,10 +161,14 @@ async function main(): Promise<number> {
 
   // 端点与凭据只在**真会调模型**的命令上校验：`lock` / `trace` / `report` /
   // `rsi status|revert` 一个模型都不调，没 key 时拦它们只会让人以为工具坏了
-  // `--remote` 的评测把活交给服务，本地一次模型都不调 —— 这时要求本地有 key
-  // 是纯误伤（远程那边有自己的凭据）。
-  const remoteEval = cmd === 'eval' && args.flags.remote !== undefined;
-  if (needsModel(cmd, args._[0]) && !remoteEval) {
+  // 带 `--remote` 的命令**要么把活交给服务**（eval），**要么被明确拒绝**（rsi，见
+  // `rsiCommand` 的 `rejectRemote`）—— 两种都不需要本地模型凭据。
+  //
+  // 这个判定必须排在凭据闸**之前**：否则 `rsi --remote` 的用户先看到「缺少模型凭据」，
+  // 于是去配 key，配完才被告知「这个组合不支持」。错误的提示不只是没用，它会消耗
+  // 一次真实的排查动作。
+  const delegatedRemote = args.flags.remote !== undefined;
+  if (needsModel(cmd, args._[0]) && !delegatedRemote) {
     ensureEndpointEnv(ctx.config);
     assertEndpointKey(ctx.config);
   }

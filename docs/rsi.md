@@ -217,3 +217,42 @@ RRSI 的对照组就是这么长成 3.80M tokens / 更低 OOD 的。
 对照用的用例用 `expect_ok: true` + `expect_max_tokens` 才稳；要卡措辞就用 `expect_matches`
 写清可接受的正则，别指望模型用你脑子里那个词。
 
+## 为什么 `rsi` 没有 `--remote`（2026-11-28 定）
+
+这是个**结构性**结论，不是还没接线。
+
+RSI 的一轮是「改资产 → 用改过的资产重跑 → 比较」。补丁的唯一生效路径是
+`verifyProposal` 把 patch 打进内存里的 `AssetSet`，再交给 `runSuite({ assets: patched })`。
+换成远程 runner 之后，`assets` 对远程**毫无作用**：对方的提示词属于它自己
+（`agentia-service` 里各 agent 在 `src/agents/*.ts` 的 `build()` 里给出 `system`，
+随后被烤进镜像）。
+
+于是候选跑与基线跑测的是同一份东西，差别只剩模型随机性。两种结局都坏：
+
+- 通常：`passRateDelta = 0`、`fixedCases = []` ⇒ 每个提案都被判「没改善」，RSI 空转烧钱；
+- 偶尔：某条用例因噪声翻绿 ⇒ 被当成「修好了」写进磁盘，而那个改动**从没被验证过**。
+  这是最坏的形状 —— RSI 退化成提示词随机搜索，账本里还留着看起来很正规的记录。
+
+所以 `harness rsi --remote` 会被明确拒绝（`rejectRemote`），并指出语义正确的替代：
+`harness eval --remote <url>`（它只测、不改资产，是对的）。
+
+**要真正打通，前提在 service 侧**：agent 的提示词来自**文件**而不是代码里的 `system`，
+与 harness 的资产目录共用同一个卷，改完能触发重载（新增一个受鉴权的 reload 入口）。
+那之后才谈得上 `rsi --remote` —— 届时把 `rejectRemote` 换成「检查目标服务是否声明了
+资产目录」，不要直接删掉。
+
+### 路由判据在真远程数据上的验证（判据 27）
+
+`isWorthAccepting` 里那条「通过率涨了但路由塌缩也不采纳」此前只有单测覆盖。
+2026-11-28 用 NAS 上真模型服务的两份报告验了：同一套用例跑两次，**只改 frontmatter
+的 `route:`**，其余不动。
+
+| | 通过 | 路由准确率 | token |
+|---|---|---|---|
+| A（声明 `report`，服务真派 report） | 1/2 | **100%** | 8795 |
+| B（声明 `billing`，服务仍派 report） | 1/2 | **0%** | 8364 |
+
+`gate(A, B)` 自己判 **ok=true**（通过率持平、token 还降了 4.9%）—— 也就是说
+**单靠回归门会放行**；`isWorthAccepting` 因为 `routeAccuracy` 掉了而拒绝。
+这条判据不是冗余的：通过率看不见「所有请求都被派给同一个 agent」这种塌缩。
+
