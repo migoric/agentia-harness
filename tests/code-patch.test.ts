@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { evalCommand } from '../src/cli/commands/patch.ts';
 import { loadConfig } from '../src/config.ts';
 import { isHarnessError } from '../src/errors.js';
 import { applyCodePatch, revertLastCode } from '../src/rsi/code/apply.ts';
@@ -324,5 +325,36 @@ describe('落盘与回滚', () => {
 
     revertLastCode(config);
     assert.throws(() => readFileSync(join(dir, 'extra.ts'), 'utf8'), /ENOENT/);
+  });
+});
+
+describe('L2 的评测门（patch --eval）', () => {
+  /**
+   * 这一条补的是 L2 与闭环之间缺的那一环：`patch` 原来只跑单测，于是
+   * 「这个代码补丁值得采纳吗」与 harness 的评测集**毫无关系**。
+   * 单测保证「没弄坏代码」，评测保证「agent 在真实用例上没变差」—— 两件事。
+   */
+  it('验证命令跑的是沙箱里这棵树的 harness eval，报告写到沙箱外', () => {
+    const cmd = evalCommand('/tmp/l2/report.json');
+    assert.equal(cmd[0], process.execPath, '必须用当前这个 node：别的版本会让失败无法归因');
+    assert.equal(cmd[1], '--import');
+    assert.ok(
+      cmd[2]?.startsWith('file://') === true || cmd[2] === 'tsx',
+      'tsx 必须按绝对 URL 解析：裸名会按 cwd（= 沙箱）解析，那里没有 node_modules',
+    );
+    assert.ok(
+      cmd[3]?.startsWith('/') === true,
+      '入口必须是**当前这份** harness 的绝对路径：沙箱是被打补丁的仓库，它不一定有 src/cli.ts',
+    );
+    assert.ok(
+      cmd[3]?.endsWith(join('src', 'cli.ts')) === true,
+      '源码优先：跑 dist 会让「改完源码再验证」验到一份过期的构建产物',
+    );
+    assert.deepEqual(cmd.slice(4), ['eval', '--save', '/tmp/l2/report.json']);
+    const report = cmd.at(-1) ?? '';
+    assert.ok(
+      report.startsWith('/') && !report.includes('.workspace'),
+      '报告必须写在沙箱外：沙箱验证完会整体删除',
+    );
   });
 });

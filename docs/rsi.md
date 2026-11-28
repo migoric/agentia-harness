@@ -371,3 +371,40 @@ verify 与 holdout 各 stage 一次，所以一个提案最多两次「写盘 �
 **单靠回归门会放行**；`isWorthAccepting` 因为 `routeAccuracy` 掉了而拒绝。
 这条判据不是冗余的：通过率看不见「所有请求都被派给同一个 agent」这种塌缩。
 
+
+## L2（代码补丁）的评测门：`patch --eval`
+
+L2 之前是**独立通道**：`harness patch x.diff` 只跑配置里的验证命令（通常是 `npm test`），
+于是「这个代码补丁值得采纳吗」与 harness 的评测集毫无关系。单测保证「没弄坏代码」，
+评测保证「agent 在真实用例上没变差」—— 这两件事不能互相代表。
+
+`--eval` 把评测集接成验证门：
+
+```bash
+harness patch fix.diff --eval            # 只验证
+harness patch fix.diff --eval --yes      # 验证通过后落盘（仍需人工签字）
+```
+
+三条设计取舍：
+
+1. **跑的是「当前这份 harness」，不是沙箱里那份**。沙箱是被打补丁的仓库，它不一定有
+   `src/cli.ts`（业务工程就没有）。用被打补丁的代码去验证被打补丁的代码，结论没有意义。
+   所以入口取 `import.meta.url` 的绝对路径；**源码优先、`dist/cli.js` 兜底** ——
+   反过来会让「改完源码再验证」验到一份过期的构建产物（这个坑踩过三次）。
+2. **报告写到沙箱外**。沙箱验证结束会整体删除，写里面等于没写。摘要（total/passed/
+   passRate/tokens/cost）从文件读回来，进 journal 的 `code.verify.eval`：
+   `rsi status` 于是能显示 `评测门通过（1/1，100.0%，$0.0001，145ms）`。
+3. **不放宽 `--yes`**。L2 与 L1 的最大区别：改提示词坏了大不了回滚，改代码能弄坏构建。
+   RSI 不该有「自己决定改代码」的权力 —— 提案仍由人或外部 agent 交进来。
+
+真机验证（2026-11-28，假 Anthropic 端点，零成本）：
+
+| 场景 | 结果 |
+|---|---|
+| 评测全绿 | `验证：PASS`，`评测：1/1（100.0%），13 token，0.0001 USD`，`--yes` 后 journal 带 `eval` 摘要 |
+| `expect_contains` 改成不可能满足 | `验证：BLOCK`，退出码 **1**，尾部打 `有 1 条用例没过 —— 代码补丁不许降低通过率` |
+| 落盘后 `patch --revert` | 文件被删回，`rsi status` 里多一条 `rejected`（回滚不改原采纳行） |
+| L1/L2 同账本 | `rsi status` 同时列出 `code:helper.ts` 与资产采纳 —— 这才是「同一闭环」 |
+
+一条诚实的限制：沙箱的 root 是沙箱目录，`loadEnvFile` 找不到主仓的 `.env` ——
+凭据必须在**真实环境变量**里，否则评测会在沙箱里报「缺少凭据」。

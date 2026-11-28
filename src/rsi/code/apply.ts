@@ -75,7 +75,9 @@ export function applyCodePatch(opts: ApplyOptions): JournalEntry {
     // 代码补丁没有「一段正文」—— 留空而不是塞 diff（那是 code.diff 的职责）
     before: '',
     after: '',
-    reason: `沙箱验证通过（${opts.verify.command.join(' ')}，${opts.verify.durationMs}ms）`,
+    // 账本里的理由要**读得懂**：完整命令在 `code.verify.command` 里已经有了，
+    // 把一条带临时路径的长命令抄进 reason，只会让 `rsi status` 的输出没法扫
+    reason: verifyReason(opts.verify),
     assetsBefore: '',
     assetsAfter: '',
     kind: 'code',
@@ -190,4 +192,17 @@ function applyDiff(repo: string, diff: string, reverse = false): void {
 function describeVerify(v: CodeVerify): string {
   if (v.timedOut) return `超时，${v.durationMs}ms`;
   return v.exitCode === null ? '进程被信号终止' : `退出码 ${v.exitCode}`;
+}
+
+/** 一句话说清「凭什么采纳这条代码补丁」 */
+function verifyReason(verify: CodeVerify): string {
+  const e = verify.eval;
+  if (e === undefined) {
+    return `沙箱验证通过（${verify.command.join(' ')}，${verify.durationMs}ms）`;
+  }
+  const cost = e.costUsd !== undefined ? `，$${e.costUsd.toFixed(4)}` : '，成本未知';
+  return (
+    `评测门通过（${e.passed}/${e.total}，${(e.passRate * 100).toFixed(1)}%${cost}，` +
+    `${verify.durationMs}ms）`
+  );
 }

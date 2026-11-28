@@ -34,6 +34,26 @@ export interface CodeVerify {
   readonly command: readonly string[];
   /** 输出尾部（最后 40 行 / 4000 字），失败时人要看的就是这一段 */
   readonly outputTail: string;
+  /**
+   * `--eval` 时带上的评测摘要 —— L2 的评测证据。
+   *
+   * 存在理由：`patch` 原来只跑单测，于是「这个代码补丁值得采纳吗」与 harness 的评测集
+   * **毫无关系**。单测与评测测的不是一件事：单测保证「没弄坏代码」，评测保证
+   * 「agent 在真实用例上没变差」。L2 进入闭环的最低要求，是它的采纳记录里得有后者。
+   *
+   * 缺席（而不是全 0）表示「这次没跑评测」（用的是 `--verify` 或配置里的命令）。
+   */
+  readonly eval?: EvalSummary;
+}
+
+/** 沙箱里 `harness eval` 的结论摘要（只留判据需要的四个数，不含逐用例明细） */
+export interface EvalSummary {
+  readonly total: number;
+  readonly passed: number;
+  readonly passRate: number;
+  readonly tokens: number;
+  /** `undefined` = 模型没定价（不是 0 元） */
+  readonly costUsd?: number;
 }
 
 /** journal 里属于代码补丁的那一半 */

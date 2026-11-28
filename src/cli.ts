@@ -80,6 +80,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
   rsi propose --from <json>  登记手写 L1 提案（不调模型）
   rsi accept --from <json>   手写提案也要过完整验证门才能采纳
   patch <diff>             验证一个代码补丁（在 git worktree 沙箱里跑验证命令）
+    --eval                用评测集当验证门（跑沙箱里这棵树的 harness eval，摘要进 journal）
     --yes                 验证通过后落盘（代码补丁必须人工确认）
     --verify "npm test"   覆盖配置里的验证命令
     --timeout <ms>        验证命令超时（缺省 10 分钟）
@@ -131,7 +132,7 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     // 预检发现「本地与远端不一致」时，显式用本地覆盖远端
     'sync-remote',
   ],
-  patch: ['yes', 'verify', 'timeout', 'revert'],
+  patch: ['yes', 'verify', 'eval', 'timeout', 'revert'],
   serve: ['port', 'host', 'timeout'],
 };
 
