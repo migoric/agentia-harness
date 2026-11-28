@@ -125,12 +125,17 @@ export async function regress(
     ...tuningOf(ctx),
   });
   const assetsChanged = report.assetsNow !== report.assetsAtAccept;
-  const regressed = report.regressed.length > 0;
+  // 已知抖动的那些不算失败（与回归门 `case_regression_flaky` 同一口径）：
+  // 单次观测挂掉不能证明「采纳让它变差了」，而按它回滚会冤枉一条真修好东西的改动
+  const flaky = new Set(report.flaky);
+  const realRegressions = report.regressed.filter((r) => !flaky.has(r.case));
+  const regressed = realRegressions.length > 0;
   // 用例被删/改名同样「监测不到」—— 不能因为「找不到失败」就报绿
   const bad = regressed || report.missingCases.length > 0;
 
   // 回滚**在输出之后**做（但错误要捕获）：资产被人手改过时 revertLast 会拒绝，
-  // 而那正是最需要看回归报告的场景 —— 先回滚再打印会把报告整个吞掉
+  // 而那正是最需要看回归报告的场景 —— 先回滚再打印会把报告整个吞掉。
+  // 只有抖动迹象时不回滚：那是把噪声当判决。
   let reverted: string | undefined;
   let revertError: string | undefined;
   if (regressed && boolFlag(ctx.flags, 'revert')) {
@@ -148,6 +153,7 @@ export async function regress(
       expected: report.expected,
       actual: report.actual,
       regressed: report.regressed,
+      flaky: report.flaky,
       missingCases: report.missingCases,
       assetsAtAccept: report.assetsAtAccept,
       assetsNow: report.assetsNow,
@@ -165,13 +171,20 @@ export async function regress(
       warn('采纳之后资产又被改过：这次退步可能来自那次改动，不是这次采纳');
     }
     for (const r of report.regressed) {
-      say(`  回归 ${r.case}：${r.failures.join('；')}`);
+      // 抖动与真回归分开说：混在一句里，人会去查一个并不存在的退步
+      const tag = flaky.has(r.case) ? '（已知抖动）' : '';
+      say(`  回归${tag} ${r.case}：${r.failures.join('；')}`);
     }
     for (const name of report.missingCases) {
       say(`  缺失 ${name}：采纳时通过，但现在没有这条用例（被删或改名）`);
     }
-    if (!bad) say('没有回归');
-    else if (reverted !== undefined) {
+    if (!bad) {
+      say(
+        report.flaky.length === 0
+          ? '没有回归'
+          : '没有回归（上面挂掉的那几条是已知抖动，先重跑一次再判断）',
+      );
+    } else if (reverted !== undefined) {
       say(`已回滚 ${reverted} —— 回滚依据是 journal 里的 before`);
     } else if (revertError !== undefined) {
       warn(`回滚失败：${revertError}（回归仍然存在，请手动处理）`);

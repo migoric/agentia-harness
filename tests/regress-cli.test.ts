@@ -8,6 +8,9 @@ import { discoverAssets } from '../src/assets/discover.ts';
 import { regress } from '../src/cli/commands/rsi-inspect.ts';
 import { acceptFrom } from '../src/cli/commands/rsi-manual.ts';
 import { loadConfig } from '../src/config.ts';
+import { appendRun } from '../src/evals/history.ts';
+import { summarize } from '../src/evals/report.ts';
+import type { CaseResult } from '../src/evals/types.ts';
 import { readJournal } from '../src/rsi/accept.ts';
 import { runCycle } from '../src/rsi/loop.ts';
 import { LlmProposer } from '../src/rsi/propose.ts';
@@ -105,6 +108,56 @@ describe('rsi regress 的退出码', () => {
       '不加 --revert 不许改资产',
     );
     assert.equal(readJournal(loadConfig(root)).length, 1, '没有回滚记录');
+  });
+});
+
+describe('抖动降级：单次失败不等于回归', () => {
+  function res(name: string, passed: boolean): CaseResult {
+    return {
+      name,
+      task: name,
+      passed,
+      failures: passed ? [] : ['正文缺少 "结论"'],
+      tokens: 10,
+      costUsd: 0.01,
+      iterations: 1,
+      durationMs: 1,
+      stopReason: 'end_turn',
+      excerpt: '',
+      skills: [],
+      subagents: [],
+    };
+  }
+
+  /** 写两条**同资产同用例集**但结论相反的账本记录 ⇒ 这条用例被判为抖动 */
+  function markFlaky(root: string): void {
+    const config = loadConfig(root);
+    appendRun(config, summarize([res('a', true)], 'fp1', 'main@1'));
+    appendRun(config, summarize([res('a', false)], 'fp1', 'main@1'));
+  }
+
+  it('已知抖动的用例挂了 ⇒ 退出码 0，且 --revert 也不回滚', async () => {
+    const root = project();
+    const after = await accept(root);
+    markFlaky(root);
+    const code = await regress(
+      ctxOf(root, { revert: true }),
+      scriptedClient([() => endTurn('不合格')]),
+    );
+    assert.equal(code, 0, '同一条件下时通时挂，单次失败不能当判决');
+    assert.equal(
+      readFileSync(join(root, 'agents', 'main.md'), 'utf8'),
+      after,
+      '把噪声当判决会回滚掉一条真修好东西的改动',
+    );
+    assert.equal(readJournal(loadConfig(root)).length, 1, '不该产生回滚记录');
+  });
+
+  it('没有抖动记录时同一条失败仍然是回归（降级只对已知抖动的用例生效）', async () => {
+    const root = project();
+    await accept(root);
+    const code = await regress(ctxOf(root), scriptedClient([() => endTurn('不合格')]));
+    assert.equal(code, 1);
   });
 });
 

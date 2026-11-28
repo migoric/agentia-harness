@@ -3,13 +3,14 @@ import type { CycleOptions } from './cycle-options.js';
 
 export type { CycleOptions } from './cycle-options.js';
 
-import { splitReport, subsetReport } from '../evals/split.js';
+import { splitReport } from '../evals/split.js';
 import { acceptProposal } from './accept.js';
+import { proposeAlternate } from './alternate.js';
 import { attribute, collectFailures } from './attribute.js';
+import { audienceFrom } from './audience.js';
 import { makeSink } from './cycle-sink.js';
 import { makeCycleId } from './cycles.js';
-import { validateHoldout } from './holdout.js';
-import { appendHoldoutUse, holdoutProgress, pickHoldoutBatch } from './holdout-batch.js';
+import { runHoldoutStage } from './holdout-stage.js';
 import { lessonsOf } from './ledger.js';
 import { DEFAULT_SHRINK_POLICY, partitionForShrink, shrinkState } from './shrink.js';
 import { Spender } from './spender.js';
@@ -150,6 +151,9 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   }
 
   const modes = attribute(samples);
+  // 「这个资产还被哪些用例用着」—— 让提案者提前知道回归门会拿哪一批用例比。
+  // 不给它，模型只会盯着失败的那一条改，然后弄坏另一条（真机上连续两轮都是这样）
+  const audience = audienceFrom(baseline);
   const proposed = await opts.proposer.propose({
     modes,
     assets: opts.assets,
@@ -158,13 +162,15 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
     history: lessons,
+    audience,
     // 只说"请简化"不够 —— 必须给出目标字数（`renderShrink`），否则模型交出的
     // 是措辞层面的微调，长度几乎不变，然后被配额判据一条条拒掉
     ...(shrink.required && shrink.reason !== undefined
       ? { shrink: { reason: shrink.reason, minReduction } }
       : {}),
   });
-  const proposals = proposed.proposals;
+  // 可变：备用目标会往里追加一条（见下面的「备用目标」段），记录里要能看见它
+  const proposals: Proposal[] = [...proposed.proposals];
   // 提案也烧钱，且发生在预算闸第一次检查之前 —— 只记基线与候选时 `--max-cost`
   // 是系统性偏低的（真模型上一轮提案器可能比一条用例还贵）。成本与产出同一次返回，
   // 不再有「必须先 propose 再读属性」的时序契约。
@@ -189,18 +195,25 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
   );
   rejected.push(...blocked);
 
-  for (const proposal of candidates.slice(0, maxVerify)) {
+  /**
+   * 验一个提案；通过就记成赢家。
+   *
+   * 抽成闭包是为了**备用目标能走同一套判定**（它也要过预算闸、回归门、变好判据），
+   * 而不是在下面再抄一份 —— 抄一份的代价是两处判定迟早不一致，而不一致的那一侧
+   * 通常少一道闸。
+   */
+  const consider = async (proposal: Proposal): Promise<void> => {
     if (spending.exceeded()) {
       budgetStopped = true;
       rejected.push({
         proposal,
         reason: `预算已用完（${spending.describe()}），本次不验证`,
       });
-      continue;
+      return;
     }
     if (winner !== undefined) {
       rejected.push({ proposal, reason: '本轮已选定另一个提案（单变量原则），本次不验证' });
-      continue;
+      return;
     }
     let outcome: VerifyOutcome;
     try {
@@ -224,7 +237,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
         proposal,
         reason: `验证失败: ${e instanceof Error ? e.message : String(e)}`,
       });
-      continue;
+      return;
     }
     verified.push(outcome);
     await spending.charge(
@@ -235,7 +248,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
 
     if (!outcome.gate.ok) {
       rejected.push({ proposal, reason: outcome.gate.reason });
-      continue;
+      return;
     }
     if (!isWorthAccepting(outcome, { shrink: shrink.required, minReduction })) {
       // 门放行但没有任何用例变好：这只是「没变坏」，不值得落盘（会污染 git 历史）。
@@ -246,92 +259,82 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
           ? '没有用例变好，且补丁没有真正变小（简化轮要求净减少）'
           : '没有任何用例变好（仅"没变差"，不值得改动资产）',
       });
-      continue;
+      return;
     }
     // 只记住赢家，不在这里落盘：留出集验证还没做，落了就没法拒了
     winner = outcome;
+  };
+
+  for (const proposal of candidates.slice(0, maxVerify)) {
+    await consider(proposal);
   }
 
   for (const proposal of candidates.slice(maxVerify)) {
     rejected.push({ proposal, reason: `超过本轮验证上限（${maxVerify}），本次不验证` });
   }
 
-  // 留出集只在赢家身上跑一次。跑完即使发现过拟合，也不回头试第二候选 ——
-  // 否则留出集就成了第二个调参集，这一整层验证的意义会归零。
-  //
-  // 「一次」是**每一批**一次（`holdout-batch.ts`）：留出集不变而轮次无限时，
-  // 30 轮 × 每轮 5% 的累积假阳性约 78% —— 每一轮的门都"合法地"放过一点噪声。
+  /**
+   * 备用目标 —— 首选全被否之后，换另一个资产再提一次案。
+   *
+   * 决策全在 `alternate.ts`（换谁、还能不能换、不遵守排除列表时怎么办），这里只负责
+   * 记账、把它交给同一套判定。三条边界（简化轮不做 / 每轮一次 / 不占 maxVerify）
+   * 也写在那里 —— 编排读起来该像流水线，而不是一份判据清单。
+   *
+   * `proposals.length > 0` 是必要前提：一条提案都没有说明模型自己说了「改不出来」，
+   * 这时换目标再问一遍，`avoidTargets` 是空的、它会选同一个目标、给出同一个答案 ——
+   * 花一次调用买一个已知结果。
+   */
+  let alternate: CycleReport['alternate'];
+  if (winner === undefined && !shrink.required && !spending.exceeded() && proposals.length > 0) {
+    const attempt = await proposeAlternate({
+      modes,
+      assets: opts.assets,
+      config: opts.config,
+      proposer: opts.proposer,
+      avoided: proposals.map((p) => p.patch.target),
+      history: lessons,
+      audience,
+      ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+      ...(opts.client !== undefined ? { client: opts.client } : {}),
+      ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      ...(opts.allowedTargets !== undefined ? { allowedTargets: opts.allowedTargets } : {}),
+    });
+    if (attempt !== undefined) {
+      // 这一次提案也花钱，且发生在预算闸之后 —— 不记它，`--max-cost` 会偏低
+      await spending.charge(attempt.cost.usd, attempt.cost.known);
+      if (attempt.proposal !== undefined) {
+        proposals.push(attempt.proposal);
+        alternate = {
+          modeId: attempt.modeId,
+          avoided: attempt.avoided,
+          target: attempt.proposal.patch.target,
+        };
+        await consider(attempt.proposal);
+      }
+    }
+  }
+
+  // 留出集只在赢家身上跑一次（规则与三条失败分支都在 `holdout-stage.ts`）。
+  // 这里只做接线与合并：赢家要被替换成带 `holdout` 读数的那份，`verified` 里同一
+  // 条提案也要跟着更新 —— 否则报告里「验证通过」与「留出集没通过」会同时出现。
   let holdoutBatch: CycleReport['holdoutBatch'];
   if (winner !== undefined && holdoutBaseline !== undefined) {
-    if (spending.exceeded()) {
-      budgetStopped = true;
-      rejected.push({
-        proposal: winner.proposal,
-        reason: `train 已选出候选，但预算不足以做留出集验证（${spending.describe()}），拒绝采纳`,
-      });
-      winner = undefined;
-    } else {
-      const progress = holdoutProgress(opts.config, holdoutBaseline.cases);
-      const pick = pickHoldoutBatch(progress);
-      if (!pick.ok) {
-        // 用完就停，不"退回第一批发重新用"：同一批第二次被用来验候选时，
-        // 它已经被候选挑选过一遍，事实上已经是第二个 train
-        rejected.push({ proposal: winner.proposal, reason: `留出集不可用：${pick.reason}` });
-        winner = undefined;
-      } else {
-        try {
-          const holdout = await validateHoldout({
-            config: opts.config,
-            assets: opts.assets,
-            proposal: winner.proposal,
-            ...(opts.stage !== undefined ? { stage: opts.stage } : {}),
-            ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
-            // 基线跟着批次一起收窄：候选只跑这一批，拿整份留出集当基线会被门判成
-            // 「用例集不一致」—— 那不是判定标准变了，是两边比的不是同一批
-            baseline: subsetReport(holdoutBaseline, pick.batch.cases),
-            cases: pick.batch.cases,
-            ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
-            ...(opts.client !== undefined ? { client: opts.client } : {}),
-            ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-            ...pickTuning(opts),
-          });
-          await spending.charge(
-            holdout.candidate.costUsd,
-            holdout.candidate.costKnown,
-            holdout.candidate.tokens,
-          );
-          winner = { ...winner, holdout };
-          const i = verified.findIndex((v) => v.proposal.id === winner?.proposal.id);
-          if (i >= 0) verified[i] = winner;
-          // 消耗记账：**与结果无关**。通过也消耗、否决也消耗 —— 只在"通过"时记账，
-          // 等于把没通过的尝试变成免费的重复抽样，而那正是假阳性的来源。
-          //
-          // dry-run 也消耗：验一眼就是看一眼，资产没动不代表数据没被看过。
-          appendHoldoutUse(opts.config, {
-            at: Date.now(),
-            cycleId,
-            proposalId: winner.proposal.id,
-            phase: pick.batch.phase,
-            cases: pick.batch.cases,
-            passed: holdout.gate.ok,
-            reason: holdout.gate.reason,
-          });
-          holdoutBatch = {
-            phase: pick.batch.phase,
-            cases: pick.batch.cases,
-            priorUses: pick.batch.used,
-            enforced: progress.enforced,
-          };
-        } catch (e) {
-          // 验证本身崩掉（补丁过期、装配错）**不消耗批次**：那不是一次观测。
-          // 这条缝的代价是「重试一次坏掉的验证」，收益是「配置错误不会烧掉一整批留出集」
-          rejected.push({
-            proposal: winner.proposal,
-            reason: `留出集验证失败: ${e instanceof Error ? e.message : String(e)}`,
-          });
-          winner = undefined;
-        }
-      }
+    const staged = await runHoldoutStage({
+      opts,
+      cycleId,
+      winner,
+      baseline: holdoutBaseline,
+      budgetExceeded: spending.exceeded(),
+      describeBudget: () => spending.describe(),
+      charge: (usd, known, tokens) => spending.charge(usd, known, tokens),
+    });
+    if (staged.budgetStopped) budgetStopped = true;
+    if (staged.rejection !== undefined) rejected.push(staged.rejection);
+    holdoutBatch = staged.batch;
+    winner = staged.winner;
+    if (winner !== undefined) {
+      const i = verified.findIndex((v) => v.proposal.id === winner?.proposal.id);
+      if (i >= 0) verified[i] = winner;
     }
   }
   if (
@@ -378,6 +381,7 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
     historyConsulted: lessons.length,
     shrink: shrinkFacts,
     ...(holdoutBatch === undefined ? {} : { holdoutBatch }),
+    ...(alternate === undefined ? {} : { alternate }),
   }));
 }
 

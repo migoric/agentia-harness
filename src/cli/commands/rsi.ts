@@ -253,6 +253,13 @@ function renderCycle(report: CycleReport): void {
     say(`预算：${[usdPart, tokenPart].filter((x) => x !== '').join('，')}${stopNote(b)}`);
   }
   say(`\n提出 ${report.proposals.length} 个提案，验证 ${report.verified.length} 个：`);
+  if (report.alternate !== undefined) {
+    // 不说这一句，人只看到「提了 2 个」—— 会以为模型自己给了两个方案，
+    // 于是下次调模型参数试图「让它多提几个」，而真正的机制是换目标重试
+    say(
+      `  首选目标被否，换目标再试一次：${report.alternate.avoided.join(', ')} → ${report.alternate.target}`,
+    );
+  }
   for (const v of report.verified) {
     say(
       `  ${v.gate.ok ? 'PASS ' : 'BLOCK'}  ${v.proposal.id} → ${v.proposal.patch.target}：${v.gate.reason}`,

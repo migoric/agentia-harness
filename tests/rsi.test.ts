@@ -640,8 +640,13 @@ describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () 
       modes: [noisy, good],
       assets,
       config,
-      // 第一条是 30 倍膨胀（assertSane 会拒），第二条正常
-      client: scriptedClient([endTurn('啰'.repeat(3000)), endTurn('你审稿。先给结论，再给依据。')]),
+      // 第一条是 30 倍膨胀：第一稿超限 ⇒ 会有一次压缩机会，所以它要**两次**都超；
+      // 第二条正常
+      client: scriptedClient([
+        endTurn('啰'.repeat(3000)),
+        endTurn('啰'.repeat(3000)),
+        endTurn('你审稿。先给结论，再给依据。'),
+      ]),
     });
 
     assert.equal(proposals.length, 1, '坏提案被跳过，好提案还在');

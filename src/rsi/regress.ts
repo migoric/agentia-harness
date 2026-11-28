@@ -3,6 +3,7 @@ import type { ModelClient } from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { flakyCases } from '../evals/history.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
 import type { CaseRunner } from '../run/case-runner.js';
@@ -43,6 +44,18 @@ export interface RegressReport {
   readonly actual: readonly string[];
   /** 采纳时通过、现在挂了的用例 */
   readonly regressed: readonly Regression[];
+  /**
+   * `regressed` 里**已知抖动**的那些用例名（历史账本判过「同条件时通时挂」）。
+   *
+   * 存在的理由是 2026-11-28 真机实测：一条采纳刚通过留出集，三分钟后 `rsi regress`
+   * 就报 `draft-refund` 回归 —— 而那条用例同一条件下几分钟前刚通过。单次观测的
+   * 抖动被读成回归时，`--revert` 会把一条**真的修好了东西**的采纳回滚掉。
+   *
+   * 只降级、不隐藏：这些名字仍然出现在 `regressed` 里，输出会单独标出「已知抖动」，
+   * 退出码不算失败 —— 与回归门 `case_regression_flaky` 同一口径（放过一次真退步
+   * 的代价，比每次都冤枉一条好改动小）。
+   */
+  readonly flaky: readonly string[];
   /** 采纳时通过、但现在连用例都不存在的（被删/改名）—— 监测覆盖不到，不能算绿 */
   readonly missingCases: readonly string[];
   readonly current: EvalReport;
@@ -110,12 +123,18 @@ export async function checkRegression(opts: RegressOptions): Promise<RegressRepo
   const present = new Set(current.cases.map((c) => c.name));
   const missingCases = expected.filter((n) => !present.has(n));
 
+  // 抖动降级：账本判过「同条件时通时挂」的用例，单独一次失败不足以判回归。
+  // 读不到账本就当没有抖动记录（宁可多报一次，也不要静默放过真退步）
+  const flakySet = flakyCases(opts.config);
+  const flaky = regressed.map((r) => r.case).filter((n) => flakySet.has(n));
+
   return {
     proposalId: last.proposalId,
     cycleId: cycle.cycleId,
     expected,
     actual: current.cases.filter((c) => c.passed).map((c) => c.name),
     regressed,
+    flaky,
     missingCases,
     current,
     assetsAtAccept: last.assetsAfter,

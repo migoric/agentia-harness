@@ -129,7 +129,17 @@ L1 改的是提示词，能修的是「模型理解错了」。有些失败改�
 - **超时与配额只管单进程**：请求串行、队列有上限、单请求有超时；没有跨进程调度与分布式限流。多副本请在前面加一层网关，或按副本数自行分摊。
 - **评测默认不落 trace**：`harness eval --keep-traces` 才落盘，同时把 `traceId` 写进报告（失败用例会打印出来）。缺省不落是纪律 —— 评测反复跑会把 `traces.jsonl` 撑成垃圾场。
 - **`.workspace/` 可整体删除**：`traces.jsonl`、`rsi/`（journal、cycles、proposals）、`evidence/`、`sandbox/` 全是运行时产物，删掉不影响下次运行。代价是丢掉审计历史 —— 预测对账、采纳记录、回归基准都从这里读，删了就只能从 git 里看资产改了什么。目前没有轮转策略，长期跑要自己看着点。
-- **真模型验证只跑了 `run` / `eval`，没跑完整 `rsi` 采纳**：DeepSeek 官方端点上的实测数字见 [`../examples/starter/README.md`](../examples/starter/README.md)。提示词质量、工具选择这类问题只有真模型答得了，本仓的脚本测试答不了；离线 e2e 覆盖的是 fetch / SSE / 重试 / 成本换算那一层。
+- **真模型验证**：`run` / `eval` 的实测数字见 [`../examples/starter/README.md`](../examples/starter/README.md)。`rsi` 的完整采纳（采集 → 归因 → 提案 → 验证 → 落盘）已在 2026-11-28 真跑通，5 次尝试 2 次采纳、用例通过率 1/3 → 3/3，数据见 [`rsi.md`](rsi.md#真机数据2026-11-28deepseek)。提示词质量、工具选择这类问题只有真模型答得了，本仓的脚本测试答不了；离线 e2e 覆盖的是 fetch / SSE / 重试 / 成本换算那一层。
+- **没人替你排期**：`rsi --watch` 的锁、心跳、节流、四条停止条件都在进程里，但**触发**要自己挂 —— `launchd`（macOS）或 `cron`：
+
+  ```ini
+  # 每小时一次，跑到预算或没有失败样本就停；只用一条，别再套 supervisor（两个会互相抢锁）
+  0 * * * *  cd /path/to/project && harness rsi --max-cost 0.5 --max-rounds 3 >> .workspace/rsi/cron.log 2>&1
+  ```
+
+  没有失败样本时它只花一遍基线的钱（约 $0.001）然后退出 0 —— 这是**正常状态**，不是没工作。
+  `rsi --watch` 是常驻形态（自己管间隔与停止条件），适合放在一台常开的机器上；上面这条
+  cron 适合「一天试几次」。
 
 ## 开发与测试
 

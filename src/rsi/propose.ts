@@ -1,13 +1,36 @@
-import { AgentApp, type ModelClient, resolveDefaultModel, SystemPrompt } from '@migor/agentia';
+import {
+  AgentApp,
+  type MessageParam,
+  type ModelClient,
+  resolveDefaultModel,
+  SystemPrompt,
+} from '@migor/agentia';
 import type { AssetSet } from '../assets/types.js';
-import { findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { effectiveModel } from '../run/app.js';
 import { costOf } from '../run/cost.js';
 import { ensureEndpointEnv } from '../run/endpoint.js';
 import { manifestFor } from './manifest.js';
+import {
+  type Audience,
+  type AudienceOf,
+  maxAfterChars,
+  PROPOSER_SYSTEM,
+  renderPrompt,
+  tightenPrompt,
+} from './propose-prompt.js';
+import { targetCandidates } from './targets.js';
 import type { FailureMode, LessonEntry, Proposal } from './types.js';
+
+/**
+ * 提示词与长度上限的实现在 `propose-prompt.ts`。
+ *
+ * 这里 re-export 是因为它们是**对外契约的一部分**：`maxAfterChars` 是守卫与提示词
+ * 共用的那个数（测试要钉住它），`renderShrink` 是简化轮那句指令（测试要断言它真的
+ * 进了提示词）。换文件不该让调用方改 import。
+ */
+export { maxAfterChars, renderShrink } from './propose-prompt.js';
 
 /**
  * 提案 —— RSI 里唯一「需要创造力」的一步，因此也是唯一用 LLM 的一步。
@@ -53,6 +76,22 @@ export interface ProposeContext {
    * 才有机会真的拿到一条可用的简化。
    */
   readonly shrink?: { readonly reason: string; readonly minReduction: number } | undefined;
+  /**
+   * 本轮**已经试过、不要再选**的目标。
+   *
+   * 由轮次编排在「首选目标被门否决」之后传入，配合 `modes` 只给一个模式，就得到
+   * 「换个资产再试一次」。刻意做成排除列表而不是「强制目标」：提案器的目标排序是
+   * 数据驱动的，排除法让它继续按数据往下走，而强制法要求调用方先想清楚下一个是谁
+   * —— 那份知识已经在 `targets.ts` 里了，不该在调用方再写一遍。
+   */
+  readonly avoidTargets?: readonly string[] | undefined;
+  /**
+   * 「这个资产还被哪些用例用着」—— 由编排层提供（它才有 baseline 报告）。
+   *
+   * 不给时提示词里就不出现那一节：不知道就说不知道，别让模型拿「大概是这些」去
+   * 推理 —— 它会据此删掉自己以为没人用的要求，而那句话往往正是回归门要抓的。
+   */
+  readonly audience?: AudienceOf | undefined;
 }
 
 /** 提案这一步的产出与它自己的花费（两个都要，缺一个就得靠「先调再读属性」的时序约定） */
@@ -76,19 +115,6 @@ export interface Proposer {
    */
   propose(ctx: ProposeContext): Promise<ProposeResult>;
 }
-
-const PROPOSER_SYSTEM = `你是一个 agent 提示词工程师。你的唯一工作：读失败证据，改写**一个** Markdown 资产的正文，让失败消失，同时不破坏它已经做对的事。
-
-硬约束（违反任意一条，你的输出会被直接丢弃）：
-1. 只输出**正文全文**。不要输出 frontmatter（--- 之间那段），不要输出 diff，不要输出解释性前后缀。
-2. 不许假设有新的工具、新的技能、新的文件可读。你只能改措辞、结构、检查清单、输出格式要求。
-3. 不许删掉原文里已有的关键要求。默认的改动方向是**增补或收紧**，而不是缩减。
-   唯一的例外是「简化轮」：那时正文里会明确写出来，按那一节的指令做。
-4. 正文必须自包含：它会被单独当作一次子运行的 system prompt 使用，看不到对话历史。
-
-判断依据：如果失败是「该调的工具没调」，就在正文里写清触发条件与调用顺序；如果是「结论不对」，就在正文里固定输出格式与必须覆盖的要点；如果是「太贵/太长」，就收紧步骤数与输出长度。
-
-先想清楚「这条改动为什么能让这条用例从失败变通过」，再动笔。改不出有把握的方案时，输出单个词 NONE。`;
 
 export class LlmProposer implements Proposer {
   private spentUsd = 0;
@@ -125,8 +151,24 @@ export class LlmProposer implements Proposer {
       // 后面还有别的失败模式等着被修，而一次崩溃会把已经花掉的评测成本一起浪费。
       try {
         const target = this.pickTarget(ctx, mode);
-        const after = await this.ask(mode, target.body, ctx, model, lessons);
+        const ask = {
+          mode,
+          current: target.body,
+          ctx,
+          model,
+          lessons,
+          audience: ctx.audience?.(target.key),
+        };
+        let after = await this.ask(ask);
         if (after === null) continue; // 模型明确说改不出
+        // 超长不该一次机会都不给。真机实测（2026-11-28）：提示词里已明确写了上限，
+        // 模型仍有 2/5 次写到上限的 1.2–1.8 倍 —— 直接丢弃等于白花一次调用，
+        // 而它往往只差「把三段合并成一段」。给一次带着具体数字的压缩机会，
+        // 机器判据不动（上限还是那个上限），只是让失败可恢复。
+        if (after.trim().length > maxAfterChars(target.body)) {
+          const tighter = await this.ask({ ...ask, prev: after });
+          if (tighter !== null) after = tighter;
+        }
         this.assertSane(mode, target.body, after, target.key);
 
         out.push({
@@ -150,38 +192,32 @@ export class LlmProposer implements Proposer {
   }
 
   /**
-   * 选改谁 —— **按数据选**。
+   * 选改谁 —— **按数据选**，并且可以被排除列表推着往下走。
    *
-   * 优先取归因给出的 `targets`（「哪些资产被这些失败用例走过」）。只有在没有任何
-   * 资产被调用过时才回退到主 agent 的 system：那时候确实没别的可改，但这也说明
-   * 失败是「模型压根没用技能」，改主 system 的调用指引正好对路。
+   * 候选表由 `targets.ts` 给出（技能/子 agent 在前，主 agent 在最后）。这里只做
+   * 「取第一个没被排除的」这一步，顺序语义全部留在那一处 —— 两处各排一次序，迟早
+   * 会有一处先改而另一处不改。
    */
   private pickTarget(
     ctx: ProposeContext,
     mode: FailureMode,
   ): { key: string; body: string; why: string } {
-    for (const hint of mode.targets) {
-      const asset = findAsset(ctx.assets, hint.target);
-      if (asset !== undefined) {
-        return {
-          key: hint.target,
-          body: asset.body,
-          why: `${hint.cases.length} 条失败用例走过它：${hint.cases.join(', ')}`,
-        };
-      }
-    }
-    const agent =
-      ctx.agent !== undefined
-        ? ctx.assets.agents.find((a) => a.name === ctx.agent)
-        : ctx.assets.agents[0];
-    if (agent === undefined) {
+    const avoid = new Set(ctx.avoidTargets ?? []);
+    const candidates = targetCandidates({
+      mode,
+      assets: ctx.assets,
+      ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
+    });
+    const hit = candidates.find((c) => !avoid.has(c.key));
+    if (hit !== undefined) return { key: hit.key, body: hit.body, why: hit.why };
+    if (candidates.length === 0) {
       throw new HarnessError('asset.missing', '没有任何 agent 资产可改');
     }
-    return {
-      key: `agent:${agent.name}`,
-      body: agent.body,
-      why: '没有任何资产被调用过，只能改主 system',
-    };
+    // 有候选但全在排除列表里：这是调用方的编排问题，不该静默产出一个重复提案
+    throw new HarnessError(
+      'rsi.no_signal',
+      `可改的目标都已试过（${[...avoid].join(', ')}），这个模式没有别的可改`,
+    );
   }
 
   /**
@@ -200,13 +236,22 @@ export class LlmProposer implements Proposer {
       : effectiveModel(this.config, agent);
   }
 
-  private async ask(
-    mode: FailureMode,
-    current: string,
-    ctx: ProposeContext,
-    model: string,
-    lessons: readonly LessonEntry[],
-  ): Promise<string | null> {
+  /**
+   * 一次改写请求。
+   *
+   * `prev` 有值时不是「重来一遍」，而是让模型**看着自己上一稿**改：多一轮对话比
+   * 重新发一遍原提示便宜，也更可能真的压缩（它知道要删哪几段，不用重新推理）。
+   */
+  private async ask(req: {
+    mode: FailureMode;
+    current: string;
+    ctx: ProposeContext;
+    model: string;
+    lessons: readonly LessonEntry[];
+    audience?: Audience | undefined;
+    prev?: string | undefined;
+  }): Promise<string | null> {
+    const { mode, current, ctx, model, lessons, prev, audience } = req;
     const app = new AgentApp({
       name: 'harness-proposer',
       system: new SystemPrompt().add('role', PROPOSER_SYSTEM),
@@ -216,8 +261,22 @@ export class LlmProposer implements Proposer {
         : {}),
       ...(this.config.maxCostUsd !== undefined ? { maxCostUsd: this.config.maxCostUsd } : {}),
     });
-    const prompt = renderPrompt(mode, current, lessons, ctx.shrink);
-    const { result } = await app.run([{ role: 'user', content: prompt }], {
+    const prompt = renderPrompt({
+      mode,
+      current,
+      lessons,
+      shrink: ctx.shrink,
+      ...(audience !== undefined ? { audience } : {}),
+    });
+    const messages: MessageParam[] =
+      prev === undefined
+        ? [{ role: 'user', content: prompt }]
+        : [
+            { role: 'user', content: prompt },
+            { role: 'assistant', content: prev },
+            { role: 'user', content: tightenPrompt(current, prev) },
+          ];
+    const { result } = await app.run(messages, {
       ...(ctx.client !== undefined ? { client: ctx.client } : {}),
       ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
     });
@@ -249,113 +308,6 @@ export class LlmProposer implements Proposer {
       throw new HarnessError('rsi.no_signal', `提案把 frontmatter 一起输出了（${target}）`);
     }
   }
-}
-
-function renderPrompt(
-  mode: FailureMode,
-  current: string,
-  lessons: readonly LessonEntry[],
-  shrink: ProposeContext['shrink'],
-): string {
-  const evidence = mode.samples
-    .map(
-      (s, i) =>
-        `### 例 ${i + 1}（用例 ${s.case}，stopReason=${s.stopReason}，${s.iterations} 轮，${s.tokens} token）\n` +
-        `断言失败：\n${s.failures.map((f) => `- ${f}`).join('\n')}\n` +
-        (s.excerpt === '' ? '' : `实际输出开头：\n"""\n${s.excerpt}\n"""\n`),
-    )
-    .join('\n');
-
-  return `## 失败模式
-类型：${mode.kind}
-形态：${mode.signature}
-影响：${mode.count} 次失败，涉及用例 ${mode.cases.join(', ')}
-
-## 失败证据
-${evidence}
-${renderLessons(lessons)}${renderShrink(shrink, current)}
-## 当前正文（你的输出将完整替换它）
-"""
-${current}
-"""
-
-## 长度上限
-改写后的正文不得超过 ${maxAfterChars(current)} 字（现在是 ${current.trim().length} 字）。
-超过会被**直接丢弃**，连验证都不会跑 —— 这是机器判据，不是风格建议。
-短正文（几百字以内）允许比原稿长很多，但别把用例的任务描述抄进来。
-
-## 你的任务
-${shrink === undefined ? '改写上面这段正文，使这类失败不再发生。直接输出新正文。改不出有把握的方案就输出 NONE。' : '在满足简化轮要求的前提下改写上面这段正文（能顺手修掉这次失败更好，但**变小**是硬要求）。直接输出新正文；这段正文确实没有可删的冗余就输出 NONE。'}`;
-}
-
-/**
- * 简化轮指令。
- *
- * 为什么要给出具体字数上限：只说「请简化」，模型会做措辞层面的微调（把"应该"改成"须"），
- * 长度几乎不变，而配额判据是硬性的 —— 于是每一轮都产出"看起来简化了、其实没变短"的
- * 提案，全部被拒。给出目标字数，模型才有可能真的合并段落。
- *
- * 也刻意说清「简化 ≠ 删要求」：这一段提示词最容易被删掉的是文件格式与工具约束，
- * 而它们恰恰是回归门与留出集会抓的东西 —— 让人读的时候知道这是有代价的。
- */
-export function renderShrink(shrink: ProposeContext['shrink'], current: string): string {
-  if (shrink === undefined) return '';
-  const before = current.trim().length;
-  const limit = Math.floor(before * (1 - shrink.minReduction));
-  return `
-## 本轮是简化轮（优先级高于上面所有「增补」类要求）
-${shrink.reason}
-
-这一轮**只接受净简化**：删掉重复的、合并同义的、去掉没起作用的步骤与检查项。
-- 不许新增段落、不许新增检查项、不许把同一件事换个说法再讲一遍；
-- 改动后正文必须比现在**至少短 ${(shrink.minReduction * 100).toFixed(0)}%**
-  （现在 ${before} 字 ⇒ 目标不超过 ${limit} 字）。这是硬门槛，不达标会被直接丢弃；
-- 简化不等于删要求：输出格式、必须调用的工具、必须覆盖的要点这些硬约束要保留。
-  该删的是复述、堆叠的举例、以及同一件事说两遍。
-`;
-}
-
-/**
- * 「试过但没成立」的历史。
- *
- * 写成**约束而不是参考**：不加这一段时，提案器会把刚被门否掉的改法再提一遍 ——
- * 模型看不到上一轮，它以为自己在第一次尝试。这段话的作用是让它知道自己在一段
- * 有记忆的历史里工作。
- *
- * 刻意不给它「上次的完整正文」：那会把上下文撑大，也会诱导它做「在旧稿上微调」
- * 这类最容易过拟合的改动。只给目标、预测、被否的原因。
- */
-function renderLessons(lessons: readonly LessonEntry[]): string {
-  if (lessons.length === 0) return '';
-  const lines = lessons.map((l) => {
-    const why = l.outcome === 'reverted' ? '采纳后又被回滚' : '验证后没兑现预测';
-    const prediction = l.prediction === undefined ? '（当时没写预测）' : l.prediction;
-    const reason = l.reason === undefined ? '无门结论记录' : l.reason;
-    return `- 改 ${l.target}，预测「${prediction}」→ ${why}：${reason}`;
-  });
-  return `## 已经试过、但没成立的方向
-${lines.join('\n')}
-
-这些方向被真实验证否定过。如果你的方案与其中某条本质相同（同一个目标 + 同一种改法），
-换个不同的改法；如果你认为上次失败另有原因，不要解释，直接给出**不同**的写法。
-`;
-}
-
-/**
- * 提案正文的长度上限 —— 守卫与提示词**共用这一个数**。
- *
- * 3 倍是给长正文的：一份 2000 字的提示词被扩到 6000 字，几乎一定是在复述任务。
- * 但短正文按 3 倍卡会把**合理的增补**判死：87 字的摘要器技能要加上「日期格式」「输出
- * 示例」两段就过 300 字，而模型完全是在按指令做事 —— `PROPOSER_SYSTEM` 第 3 条明确
- * 写着「默认的改动方向是增补或收紧」。400 字是给这种情况的底板。
- *
- * 这个数还必须**写进提案提示词**（见 `renderPrompt`）：机器约束不告诉模型，它只能猜，
- * 而猜错的代价是一整轮验证的钱。2026-11-28 用真模型跑 RSI 时实测到：87 字的技能被
- * 扩到 739 字、提案直接被丢，RSI 一轮提出 0 个提案 —— 而 mock 模型永远只追加一句，
- * 所以这条冲突在此之前从未暴露。
- */
-export function maxAfterChars(before: string): number {
-  return Math.max(before.trim().length * 3, 400);
 }
 
 /** 模型习惯包 ``` 围栏；剥掉它，否则正文里会混进 Markdown 代码块标记 */

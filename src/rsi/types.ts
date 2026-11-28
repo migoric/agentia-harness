@@ -77,6 +77,14 @@ export interface FailureSample {
   /** 这条用例实际走过的技能 —— 归因据此判断「该改哪个文件」 */
   readonly skills: readonly string[];
   readonly subagents: readonly string[];
+  /**
+   * 实际回答了这条用例的 agent（`CaseResult.routedTo`）。
+   *
+   * 它是「主 system 是哪一份」的唯一运行期证据：多 agent 工程里 `assets.agents[0]`
+   * 经常不是答题的那个，改到别人头上等于白花一轮验证。可选是因为老报告没有这个
+   * 字段（也有工程只跑单 agent，那时它与配置项同值）。
+   */
+  readonly routedTo?: string | undefined;
 }
 
 /**
@@ -102,7 +110,10 @@ export interface FailureMode {
   readonly count: number;
   readonly cases: readonly string[];
   readonly samples: readonly FailureSample[];
-  /** 该改的资产候选（空 = 没有任何资产被调用过，只能改主 agent 的 system） */
+  /**
+   * 该改的资产候选（**不含主 agent**）：空 = 没有技能或子 agent 被调用过。
+   * 主 agent 由 `targets.ts` 追加在候选表末尾，见那里的顺序说明。
+   */
   readonly targets: readonly TargetHint[];
 }
 
@@ -360,4 +371,20 @@ export interface CycleReport {
     | undefined;
   /** 本轮记录的落盘路径（dryRun 也写：人审需要证据） */
   readonly path: string;
+  /**
+   * 本轮的**备用尝试**：首选目标被否之后，换了一个目标再提一次案。
+   *
+   * 缺席 = 没发生（首选就通过了，或者根本没有可换的目标）。它必须落盘，否则
+   * 「这轮为什么比上轮贵一倍 / 为什么多了一条提案」在记录里看不出因果 ——
+   * `proposals` 里只是多了一条，读的人会以为是模型自己提了两个。
+   */
+  readonly alternate?:
+    | {
+        readonly modeId: string;
+        /** 已经试过、本轮被排除的目标（按提及顺序） */
+        readonly avoided: readonly string[];
+        /** 这次换上的目标 */
+        readonly target: string;
+      }
+    | undefined;
 }

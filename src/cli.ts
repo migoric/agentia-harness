@@ -67,10 +67,12 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --check               有抖动用例就退出码 1（CI 用：判定集里不该有不可信的成员）
     --json                机器可读输出
   rsi                     跑一轮 RSI：采集→归因→提案→验证→采纳
+                          改谁按数据选（技能/子 agent 在前，主 agent 在最后）；
+                          首选被否会换一个目标再提一次（每轮至多一次）
     --rounds <n>          连续跑 n 轮（每轮最多采纳一个；预算跨轮共享）
     --dry-run             只验证不落盘（人审模式；不能与 --rounds 同用）
     --max-modes <n>       最多给几个失败模式提方案（缺省 3）
-    --max-verify <n>      最多验证几个提案（缺省 3）
+    --max-verify <n>      最多验证几个提案（缺省 3；不含上面那次换目标的备用尝试）
     --max-cost <usd>      整次运行的成本上限（--rounds 下跨轮共享；覆盖配置 maxCostUsd）
     --max-tokens <n>      整次运行的 token 上限（模型没定价时美元闸读不出数，靠它兜底）
     --shrink-every <n>    连续 n 条改动没让资产变小，就强制下一轮只接受净简化提案（缺省 5）

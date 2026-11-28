@@ -26,6 +26,8 @@ export function collectFailures(report: EvalReport): FailureSample[] {
       ...(c.traceId !== undefined ? { traceId: c.traceId } : {}),
       skills: c.skills,
       subagents: c.subagents,
+      // 谁答的 —— 提案的「主 system」候选靠它，而不是靠 assets.agents[0]
+      ...(c.routedTo !== undefined ? { routedTo: c.routedTo } : {}),
     }));
 }
 
@@ -73,6 +75,11 @@ export function attribute(samples: readonly FailureSample[]): FailureMode[] {
  * 排序里有一条额外的偏好：**同样多的用例时技能优先于 agent**。理由是精确性 ——
  * 一个被调用的技能出错，改技能正文比改整个 agent 的 system 影响面小得多，而
  * 影响面小正是 RSI 敢动的前提。
+ *
+ * **主 agent 刻意不在这张表里**（哪怕 `routedTo` 告诉我们是谁答的）：它几乎覆盖
+ * 全部失败用例，按数量排必然第一，于是每一次提案都会去改最宽的那份提示词 ——
+ * 上一条偏好就名存实亡了。它由 `targets.ts` 作为**候选表末尾**的兜底，只在前面
+ * 那些目标试不出来时才轮到。
  */
 function targetsOf(samples: readonly FailureSample[]): TargetHint[] {
   const byTarget = new Map<string, Set<string>>();
