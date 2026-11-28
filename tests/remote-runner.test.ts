@@ -294,3 +294,76 @@ test('非 completed 一律按非正常收尾（input-required 是挂起，不是
     assert.ok(out.error !== undefined);
   }
 });
+
+test('服务报了 toolCalls ⇒ skills / subagents 落到位，归因才有工具粒度', async () => {
+  const runner = createRemoteRunner({
+    baseUrl: 'http://svc:18080',
+    token: 'k',
+    fetchImpl: fakeFetch({
+      result: {
+        kind: 'task',
+        id: 'task-3',
+        status: { state: 'completed' },
+        artifacts: [{ parts: [{ text: 'ok' }] }],
+        metadata: {
+          dispatch: { status: 'done', agentId: 'billing' },
+          toolCalls: [
+            { name: 'draft_report', calls: 2 },
+            { name: 'refund_policy', calls: 1 },
+            { name: 'researcher', calls: 1, subagent: true },
+            { name: 'some_mcp_tool', calls: 1 },
+          ],
+        },
+      },
+    }),
+    // 本地资产里有 draft_report / refund_policy；some_mcp_tool 不在名单里 ⇒ 不记成技能
+    skillNames: new Set(['draft_report', 'refund_policy']),
+  });
+
+  const out = await runner.run('任务丙');
+  assert.deepEqual(out.skills, ['draft_report', 'refund_policy']);
+  assert.deepEqual(out.subagents, ['researcher'], '有 toolCalls 时用它判子 agent');
+});
+
+test('服务没报 toolCalls ⇒ subagents 退回 dispatch.agentId（老服务兼容）', async () => {
+  const runner = createRemoteRunner({
+    baseUrl: 'http://svc:18080',
+    token: 'k',
+    fetchImpl: fakeFetch({
+      result: {
+        kind: 'task',
+        id: 'task-4',
+        status: { state: 'completed' },
+        artifacts: [{ parts: [{ text: 'ok' }] }],
+        metadata: { dispatch: { status: 'done', agentId: 'report' } },
+      },
+    }),
+    skillNames: new Set(['draft_report']),
+  });
+
+  const out = await runner.run('任务丁');
+  assert.deepEqual(out.skills, [], '没读数就是空，不编');
+  assert.deepEqual(out.subagents, ['report']);
+});
+
+test('多轮的 skills 合并去重（同一技能调 5 次不该出现 5 个名字）', async () => {
+  const runner = createRemoteRunner({
+    baseUrl: 'http://svc:18080',
+    token: 'k',
+    fetchImpl: fakeFetch({
+      result: {
+        kind: 'task',
+        id: 'task-5',
+        status: { state: 'completed' },
+        artifacts: [{ parts: [{ text: 'ok' }] }],
+        metadata: { toolCalls: [{ name: 'draft_report', calls: 1 }] },
+      },
+    }),
+    skillNames: new Set(['draft_report']),
+  });
+
+  const turns = runner.runTurns;
+  assert.ok(turns !== undefined, '远程 runner 必须提供多轮（静默按单轮跑会让多轮用例只测第一轮）');
+  const out = await turns(['第一句', '第二句', '第三句']);
+  assert.deepEqual(out.skills, ['draft_report']);
+});

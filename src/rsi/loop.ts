@@ -180,7 +180,24 @@ export async function runCycle(opts: CycleOptions): Promise<CycleReport> {
 
   // 简化轮：先筛再验（规则在 `shrink.ts`，这里是"用了它"而不是"又写一遍"）。
   // 顺序有成本含义：变胖的提案一条都不跑评测，而简化轮恰好是最缺钱的那一轮
-  const { allowed: candidates, blocked } = partitionForShrink(proposals, shrink, minReduction);
+  // 远程只能改「有文件映射」的目标：服务端目前只外置了 agent 的系统提示词。
+  // 归因现在能精确到技能（服务报 `toolCalls`），于是提案会自然地指向 skill —— 那些提案
+  // 在 stage 阶段一定会抛「remote.prompts 没为它指定文件」。在这里提前拒掉，
+  // 比花完一轮评测再报错便宜得多，而且理由能写进记录。
+  const stageable: Proposal[] = [];
+  for (const p of proposals) {
+    if (opts.allowedTargets === undefined || opts.allowedTargets(p.patch.target)) {
+      stageable.push(p);
+    } else {
+      rejected.push({
+        proposal: p,
+        reason:
+          `目标 ${p.patch.target} 在远端没有对应文件（remote.prompts 只映射了 agent 提示词），` +
+          '本地验证它会验一份远端根本不会读的提示词，因此不验证',
+      });
+    }
+  }
+  const { allowed: candidates, blocked } = partitionForShrink(stageable, shrink, minReduction);
   rejected.push(...blocked);
 
   for (const proposal of candidates.slice(0, maxVerify)) {

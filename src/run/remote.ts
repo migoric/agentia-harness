@@ -2,6 +2,7 @@ import type { Trace } from '@migor/agentia';
 import { HarnessError } from '../errors.js';
 import type { CaseRunner } from './case-runner.js';
 import { costOf } from './cost.js';
+import { type A2AResult, capabilitiesOf } from './remote-metadata.js';
 import type { CostNote, RunOutcome } from './runner.js';
 import { mergeTraces } from './trace-merge.js';
 
@@ -34,46 +35,17 @@ export interface RemoteRunnerOptions {
    * - 给了 ⇒ `<base>/agents/<id>/a2a`（直连那个 agent）
    */
   readonly agentId?: string | undefined;
+  /**
+   * 本地资产里的技能名，用来把服务报的 `toolCalls` 分成「技能」与「子 agent」。
+   *
+   * 引擎的 capability span 只标「是不是子 agent」，不区分技能与 MCP 工具 ——
+   * 名字归属只有持有资产清单的这一侧说得清。不给时全部按技能记（见 `capabilitiesOf`）。
+   */
+  readonly skillNames?: ReadonlySet<string> | undefined;
   /** 单请求超时（毫秒），缺省 5 分钟 */
   readonly timeoutMs?: number | undefined;
   /** 测试注入 */
   readonly fetchImpl?: typeof fetch | undefined;
-}
-
-interface A2AMetadata {
-  readonly routedTo?: string;
-  readonly model?: string;
-  readonly usage?: {
-    readonly inputTokens?: number;
-    readonly outputTokens?: number;
-    readonly cacheReadTokens?: number;
-    readonly cacheCreationTokens?: number;
-    readonly totalTokens?: number;
-    readonly costUsd?: number;
-  };
-  readonly iterations?: number;
-  /**
-   * 意图层的派单三态。**这是判成败的权威来源**：
-   * `done` = 子任务跑完了、`needs_input` = 等人补信息、`accepted` = 还在跑、`failed` = 失败。
-   * 没有它时只能靠正文猜（那是模型措辞），或者把「意图层正常收尾」误当成「任务成功」。
-   */
-  readonly dispatch?: {
-    readonly status?: string;
-    readonly agentId?: string;
-    readonly taskId?: string;
-    readonly reason?: string;
-  };
-}
-
-interface A2AResult {
-  readonly kind?: string;
-  readonly id?: string;
-  readonly status?: { readonly state?: string };
-  readonly parts?: ReadonlyArray<{ readonly text?: string }>;
-  readonly artifacts?: ReadonlyArray<{
-    readonly parts?: ReadonlyArray<{ readonly text?: string }>;
-  }>;
-  readonly metadata?: A2AMetadata;
 }
 
 const EMPTY_TRACE: Trace = {
@@ -218,8 +190,10 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
         costNote: parts.length === 0 ? 'unreported' : (last?.costNote ?? undefined),
         durationMs: parts.reduce((sum, p) => sum + p.durationMs, 0),
         error: thrown ?? parts.find((p) => p.error !== undefined)?.error,
-        skills: [],
-        subagents: [],
+        // 多轮：每轮各报一份，合并去重。去重是必须的 —— 同一技能在 5 轮里被调 5 次，
+        // 报告里「用过哪些技能」不该是同一个名字出现 5 次
+        skills: [...new Set(parts.flatMap((p) => p.skills))],
+        subagents: [...new Set(parts.flatMap((p) => p.subagents))],
         ...(seen.model !== undefined ? { model: seen.model } : {}),
         ...(last?.agent !== undefined ? { agent: last.agent } : {}),
         turns: turns.length,
@@ -284,6 +258,8 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
       const md = r.metadata ?? {};
       if (md.model !== undefined) seen.model = md.model;
 
+      const caps = capabilitiesOf(md, opts.skillNames);
+
       const u = md.usage;
       const total =
         u?.totalTokens ??
@@ -341,11 +317,17 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
          * 只在**意图层**路径上报（那里 router 是编排者、agent 是被委派者，与本地 subagent
          * 同构）。直连模式（`--agent`）下对方就是主 agent，报成 subagent 会让归因绕一圈。
          *
-         * `skills` 仍然留空：远端确实没报「调了哪些技能/工具」。要报得在 service 侧从 trace
-         * 里摘工具事件（`metadata.toolCalls`），那是另一件事，不在这里编。
+         * 技能这一层来自服务报的 `toolCalls`（服务从 trace 的 capability span 摘的）。
+         * 老服务不报它时是空数组 —— 那与「报了但一个都没调」在报告里长得一样，
+         * 但至少不会编：真读数缺失时宁可少说。
          */
-        skills: [],
-        subagents: md.dispatch?.agentId !== undefined ? [md.dispatch.agentId] : [],
+        skills: caps.skills,
+        subagents:
+          caps.subagents.length > 0
+            ? caps.subagents
+            : md.dispatch?.agentId !== undefined
+              ? [md.dispatch.agentId]
+              : [],
       };
     }
   }

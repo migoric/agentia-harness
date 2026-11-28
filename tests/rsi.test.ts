@@ -469,6 +469,43 @@ describe('runCycle —— 五步编排', () => {
     assert.equal(report.costUsd, 0);
   });
 
+  it('allowedTargets 拒绝的提案不验证、不花评测钱，理由写进记录', async () => {
+    const root = project();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+
+    const report = await runCycle({
+      config,
+      assets,
+      // 基线答非所问 ⇒ 有失败样本，才会走到提案
+      client: scriptedClient([endTurn('不合格答案')]),
+      proposer: {
+        propose: async () => ({
+          proposals: [
+            {
+              id: 'p-skill',
+              modeId: 'm',
+              kind: 'wrong_answer',
+              rationale: '改技能正文',
+              layer: 'L1',
+              patch: { target: 'skill:review', before: '旧的', after: '新的' },
+            },
+          ],
+          cost: { usd: 0, known: true },
+        }),
+      },
+      // 远端只把 agent 提示词外置了：skill 目标没有文件可写
+      allowedTargets: (t) => t === 'agent:main',
+    });
+
+    assert.equal(report.verified.length, 0, '没有文件映射的目标不能去验证（验了也是假的）');
+    assert.equal(report.proposals.length, 1);
+    const rejected = report.rejected.find((r) => r.proposal.id === 'p-skill');
+    assert.ok(rejected !== undefined);
+    assert.match(rejected.reason, /remote\.prompts/);
+    assert.match(rejected.reason, /remote\.prompts|远端没有对应文件/);
+  });
+
   it('dry-run 只验证不落盘', async () => {
     const root = project();
     const config = loadConfig(root);

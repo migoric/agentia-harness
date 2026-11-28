@@ -29,7 +29,7 @@ function project(model: string): {
     writeFileSync(p, text, 'utf8');
   };
   w('agents/main.md', '---\nname: main\nversion: 1\ndescription: 主 agent\n---\n你是执行者。\n');
-  w('harness.config.json', JSON.stringify({ model }), 'utf8');
+  w('harness.config.json', JSON.stringify({ model }));
   const config = loadConfig(root);
   return { config, assets: discoverAssets({ skills: config.skillsDir, agents: config.agentsDir }) };
 }

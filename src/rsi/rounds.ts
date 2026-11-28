@@ -60,6 +60,8 @@ export interface RunRoundsOptions {
   /** 远程 stage 钩子（本地不传），见 `CycleOptions.stage` */
   readonly stage?: StageHook | undefined;
   readonly runner?: CaseRunner | undefined;
+  /** 见 `CycleOptions.allowedTargets`（远程：只验证有文件映射的目标） */
+  readonly allowedTargets?: ((target: string) => boolean) | undefined;
   /**
    * 采纳之后把新资产交回调用方（远程模式用它把新提示词推到服务）。
    *
@@ -142,6 +144,7 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
       ...(opts.shrinkPolicy !== undefined ? { shrinkPolicy: opts.shrinkPolicy } : {}),
       ...(opts.stage !== undefined ? { stage: opts.stage } : {}),
       ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+      ...(opts.allowedTargets !== undefined ? { allowedTargets: opts.allowedTargets } : {}),
     });
     reports.push(report);
     priorSpent += report.costUsd;

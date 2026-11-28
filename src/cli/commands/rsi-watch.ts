@@ -87,6 +87,7 @@ export async function watchCommand(ctx: CliContext, remote?: RemoteStage): Promi
           ? {
               stage: remote.stage,
               runner: remote.runner,
+              allowedTargets: (t: string) => remote.canStage(t),
               onAcceptedAssets: async (a: Parameters<RemoteStage['push']>[0]) => {
                 await remote.push(a);
               },

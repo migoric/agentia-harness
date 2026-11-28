@@ -82,4 +82,12 @@ export interface CycleOptions extends SuiteTuning {
    */
   readonly stage?: StageHook | undefined;
   readonly runner?: CaseRunner | undefined;
+  /**
+   * 这个目标能不能被「真正验证」—— 不传 = 都能（本地跑）。
+   *
+   * 远程模式传「`remote.prompts` 里有映射」：服务只有一份活提示词，改一个没有文件映射的
+   * 目标等于**验证一份远端不会读的提示词**，通过率再好看也是假的。拒绝要发生在花钱之前，
+   * 所以它是一道提案过滤器，而不是 stage 阶段的报错（那时评测已经跑完了）。
+   */
+  readonly allowedTargets?: ((target: string) => boolean) | undefined;
 }

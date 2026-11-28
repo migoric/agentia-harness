@@ -141,10 +141,14 @@ function remoteRunnerOf(ctx: CliContext): CaseRunner | undefined {
       `远程评测需要凭据：设置环境变量 ${envName}（服务端的 api key），或用 --token-env 指定别的变量名`,
     );
   }
+  // 本地资产名单用来把服务报的 capability 分成技能与子 agent（`eval --remote` 也带资产，
+  // 没有理由让它比 rsi 少一栏读数）
+  const skillNames = new Set(assetsOf(ctx).skills.map((s) => s.name));
   return createRemoteRunner({
     baseUrl,
     token: token.trim(),
     ...(ctx.agent !== undefined ? { agentId: ctx.agent } : {}),
+    skillNames,
   });
 }
 

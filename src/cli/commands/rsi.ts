@@ -102,6 +102,9 @@ async function cycle(ctx: CliContext, remote?: RemoteStage): Promise<number> {
       ? {
           stage: remote.stage,
           runner: remote.runner,
+          // 远端只有 agent 提示词有文件可写：指向 skill 的提案在这里就拒掉（见 canStage），
+          // 而不是等评测跑完再在 stage 阶段抛错
+          allowedTargets: (t: string) => remote.canStage(t),
           // 采纳后推远端：不推的话服务还跑旧提示词，而下一轮预检立刻报漂移
           onAcceptedAssets: async (a: Parameters<RemoteStage['push']>[0]) => {
             await remote.push(a);

@@ -27,6 +27,14 @@ export interface RemoteStage {
   readonly stage: StageHook;
   /** 采纳之后把资产推到远端（否则服务还跑着旧提示词） */
   push(assets: AssetSet): Promise<void>;
+  /**
+   * 这个目标在远端有没有文件可写。
+   *
+   * 归因一旦能精确到技能（服务报 `toolCalls`），提案就会指向 skill —— 而服务端目前
+   * 只外置了 agent 的系统提示词。这类提案必须在**跑评测之前**拒掉：否则验完一轮
+   * 才发现 stage 抛「没为它指定文件」，钱已经花了，而通过率是假的。
+   */
+  canStage(target: string): boolean;
 }
 
 /**
@@ -90,15 +98,20 @@ export async function maybeRemoteStage(
   }
 
   const token = remoteToken(remote);
+  const localAssets = assetsOf(ctx);
   const runner = createRemoteRunner({
     baseUrl: remote.url,
     token,
     ...(remote.agent !== undefined ? { agentId: remote.agent } : {}),
+    // 服务只报「调了哪些 capability」，技能与 MCP 工具在 span 上同形：
+    // 拿本地资产名单分栏，远程归因才能落到具体的技能文件上
+    skillNames: new Set(localAssets.skills.map((s) => s.name)),
   });
 
   return {
     runner,
     stage: async ({ proposal, patched }) => (await stager.stage(proposal, patched)).restore,
     push: (assets) => stager.push(assets),
+    canStage: (target) => remote.prompts[target] !== undefined,
   };
 }
