@@ -3,12 +3,15 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
+  unlinkSync,
   writeSync,
 } from 'node:fs';
 import { hostname } from 'node:os';
@@ -235,47 +238,77 @@ function blocked(path: string, existing: LockState): HarnessError {
 }
 
 /**
- * `O_CREAT|O_EXCL` 独占创建 —— 整个互斥的**唯一**判定点。
+ * 原子发布一把**完整**的锁 —— 整个互斥的唯一判定点。
  *
- * 不能用「临时文件 + rename」代替：rename 会覆盖已存在的目标，两个进程都能成功，
- * 于是两个都以为自己持锁。`wx` 的失败是原子的、由内核仲裁的。
+ * 不用 `open(path,'wx')` 然后往里写：那条路有一个真实存在的窗口 —— 文件已经被
+ * 创建、内容还没写进去。另一个进程在窗口里读到空文件，`readWorkerLock` 会按
+ * 「写到一半被杀」判成陈旧锁并改名让路，于是**两个进程同时持锁**（真子进程并发
+ * 测试里 5%~10% 会命中）。
+ *
+ * 改成：先在唯一临时文件里写完整内容并 fsync，再用 `linkSync` 建立硬链接。
+ * `link` 与 `open('wx')` 一样由内核仲裁（目标已存在就 EEXIST），但被创建的那个
+ * 名字从出现的**第一刻**起就是完整内容 —— 观察者在任何时点都不会看到空锁。
+ *
+ * 硬链接而非 `rename`：rename 会覆盖已有目标，两个进程都能成功，那正是要防的错。
  */
 function claim(path: string, lock: WorkerLock): boolean {
+  const tmp = `${path}.claim-${process.pid}-${randomBytes(4).toString('hex')}`;
   let fd: number;
   try {
-    fd = openSync(path, 'wx', 0o600);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false;
-    throw e;
-  }
-  try {
-    writeSync(fd, `${JSON.stringify(lock)}\n`);
-    // 落盘：抢到锁之后立刻被 kill 时，盘上必须已经有这把锁，否则下一个进程
-    // 会认为「没人持有」并再抢一次 —— 那正是这个文件要防的事
-    fsyncSync(fd);
+    fd = openSync(tmp, 'wx', 0o600);
+    try {
+      writeSync(fd, `${JSON.stringify(lock)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      linkSync(tmp, path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false;
+      throw e;
+    }
+    return true;
   } finally {
-    closeSync(fd);
+    // link 成功时删的是临时名字，硬链接指向的锁文件仍在；失败时清掉半成品
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 已经被清掉了，或路径本来就没建成
+    }
   }
-  return true;
 }
 
 /** 只留最近几份 `.stale-*`：它们是给人查的，不是账本 */
 function sweepStaleLocks(path: string): void {
   const dir = dirname(path);
   const prefix = `${basename(path)}.stale-`;
+  const claimPrefix = `${basename(path)}.claim-`;
   let names: string[];
   try {
-    names = readdirSync(dir)
-      .filter((n) => n.startsWith(prefix))
-      .sort();
+    names = readdirSync(dir);
   } catch {
     return;
   }
-  for (const name of names.slice(0, Math.max(0, names.length - STALE_KEEP))) {
+  const stale = names.filter((n) => n.startsWith(prefix)).sort();
+  for (const name of stale.slice(0, Math.max(0, stale.length - STALE_KEEP))) {
     try {
       rmSync(join(dir, name), { force: true });
     } catch {
       // 清理失败不影响正确性
+    }
+  }
+  // 崩在 link 之前的半成品。一分钟的门槛远大于「写几十字节并 fsync」的耗时，
+  // 不会碰到另一个进程正在写的那一份；它只是垃圾，不是需要保留的审计痕迹。
+  const cutoff = Date.now() - 60_000;
+  for (const name of names) {
+    if (!name.startsWith(claimPrefix)) continue;
+    try {
+      if (statSync(join(dir, name)).mtimeMs < cutoff) {
+        rmSync(join(dir, name), { force: true });
+      }
+    } catch {
+      // 同上
     }
   }
 }
