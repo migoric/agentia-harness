@@ -294,6 +294,17 @@ RSI 的一轮是「改资产 → 用改过的资产重跑 → 比较」。本地
 | 漂移拒绝 | 改文件不重载 ⇒ 报「本地 a1743d33afbd / 远端 4c8dfb0f0857」并拒绝开跑 |
 | `--sync-remote` | 用本地覆盖远端 + 重载，两端 digest 回到一致 |
 
+`--watch` 与 `regress` 也各跑了一条真机：
+
+| 检查 | 结果 |
+|---|---|
+| `rsi --watch --remote --max-rounds 1` | 「worker 启动」→ 1 轮采纳 1 条 → 「跑满上限轮数」；锁释放、pending 清空 |
+| watch 之后本地/远端 | `diff` 一致；服务回答里真的出现了新加的「置信度：」 |
+| `rsi regress --remote` | 「采纳时通过 1 条，现在通过 1 条 · 没有回归」 |
+| 把服务停掉再跑 regress | `连不上 .../admin/prompts` ⇒ 证明它确实走远端，没有偷偷退回本地 |
+
+`regress` 是**只读**的，所以它不受 `allowStaging` 约束（那道门是给「写」签字的）。
+
 过程中修掉一个真 bug：`POST /admin/reload` 带 `content-type: application/json` 却没有 body
 时，Fastify 直接 400（"Body cannot be empty…"）—— 于是所有 stage 都在重载这一步失败。
 

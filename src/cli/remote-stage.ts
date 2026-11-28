@@ -29,7 +29,14 @@ export interface RemoteStage {
   push(assets: AssetSet): Promise<void>;
 }
 
-export async function maybeRemoteStage(ctx: CliContext): Promise<RemoteStage | undefined> {
+/**
+ * @param opts.needsStaging 是否需要「把候选写进服务」。回归检查（`rsi regress`）只读，
+ *   关掉这一项就不该被 `allowStaging` 挡住 —— 那道门是给「写」签字的，不是给「读」。
+ */
+export async function maybeRemoteStage(
+  ctx: CliContext,
+  opts: { needsStaging?: boolean } = {},
+): Promise<RemoteStage | undefined> {
   const cliUrl = strFlag(ctx.flags, 'remote');
   if (cliUrl === undefined) return undefined;
 
@@ -50,7 +57,7 @@ export async function maybeRemoteStage(ctx: CliContext): Promise<RemoteStage | u
   const recovered = await stager.recoverPending();
   if (recovered !== undefined) warn(recovered);
 
-  if (!remote.allowStaging) {
+  if ((opts.needsStaging ?? true) && !remote.allowStaging) {
     throw new HarnessError(
       'config.invalid',
       '远程验证会把**候选提示词写进服务并在验证期间对外提供** —— 这是机制固有的暴露面，' +

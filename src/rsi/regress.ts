@@ -5,6 +5,7 @@ import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
+import type { CaseRunner } from '../run/case-runner.js';
 import { type CycleRecord, readCycles } from './cycles.js';
 import { liveAccepted, readJournal } from './journal.js';
 import { cyclesDir } from './paths.js';
@@ -57,6 +58,14 @@ export interface RegressOptions extends SuiteTuning {
   readonly agent?: string | undefined;
   readonly client?: ModelClient | undefined;
   readonly signal?: AbortSignal | undefined;
+  /**
+   * 换一个「谁来跑」的实现（远程服务）。
+   *
+   * 回归检查的意义是「采纳之后那条用例还过不过」——所以它必须评测**真正在服务的那份**。
+   * 不接 runner 的话，远程模式下它会退回本地装配：那样得到的是本地资产的成绩，而线上
+   * 到底怎么样没人知道，报告却是一份绿。
+   */
+  readonly runner?: CaseRunner | undefined;
 }
 
 export async function checkRegression(opts: RegressOptions): Promise<RegressReport> {
@@ -66,6 +75,7 @@ export async function checkRegression(opts: RegressOptions): Promise<RegressRepo
   const current = await runSuite({
     config: opts.config,
     assets: opts.assets,
+    ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
     ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
     ...(opts.client !== undefined ? { client: opts.client } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),

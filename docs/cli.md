@@ -63,6 +63,8 @@ harness rsi --watch     常驻推进轮次（单实例锁 + 心跳 + 节流；�
   --max-rounds <n>      最多跑几轮
   --until <时间>        到这个时刻就停（ISO 或 2026-11-29T08:00）
 harness rsi regress     采纳之后那些用例还通过吗（有回归退出码 1）
+  --remote <url>        对**服务**做回归检查（远程模式下必须带：否则测的是本地那份，
+                        而线上到底怎么样没人知道，报告却是一份绿）
   --revert              检测到回归就自动回滚（仍过指纹校验）
 harness rsi revert [id] 回滚最近一次采纳；给 id 可防期间插入了新采纳
 harness rsi propose --from <json>  登记手写 L1 提案（不调模型）
@@ -77,6 +79,10 @@ harness rsi accept --from <json>   手写提案也过完整验证门才采纳
   --remote <url>        远程跑轮次（覆盖配置里的 remote.url）
   --sync-remote         预检发现「本地与远端不一致」时，用本地覆盖远端（写文件 + 重载）
 ```
+
+`--remote` 也适用于 `rsi regress`（只读，不需要 `allowStaging`）与 `rsi accept`（要跑同一套门，
+所以需要）。`rsi revert` 只改本地：配了 `remote` 的工程会额外提醒「远端还在跑回滚前的版本」，
+要同步得显式 `--sync-remote`。
 
 ### 跨服务评测（`--remote`）
 

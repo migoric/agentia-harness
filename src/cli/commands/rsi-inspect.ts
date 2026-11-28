@@ -14,6 +14,7 @@ import { checkRegression } from '../../rsi/regress.js';
 import { boolFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
+import type { RemoteStage } from '../remote-stage.js';
 import { tuningOf } from './run.js';
 
 /**
@@ -109,11 +110,16 @@ export function journal(ctx: CliContext): number {
  * 默认**只报告不动手**：检测到回归返回退出码 1，回滚要显式 `--revert`。
  * 这不是保守 —— 自动回滚会改资产，而「改资产」是这套系统里唯一不可无声发生的事。
  */
-export async function regress(ctx: CliContext, client?: ModelClient): Promise<number> {
+export async function regress(
+  ctx: CliContext,
+  client?: ModelClient,
+  remote?: RemoteStage,
+): Promise<number> {
   const asJson = boolFlag(ctx.flags, 'json');
   const report = await checkRegression({
     config: ctx.config,
     assets: assetsOf(ctx),
+    ...(remote !== undefined ? { runner: remote.runner } : {}),
     ...(client !== undefined ? { client } : {}),
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...tuningOf(ctx),

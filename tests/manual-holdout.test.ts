@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { scriptedClient } from '@migor/agentia';
 import { discoverAssets } from '../src/assets/discover.ts';
-import { acceptFrom } from '../src/cli/commands/rsi.ts';
+import { acceptFrom } from '../src/cli/commands/rsi-manual.ts';
 import { loadConfig } from '../src/config.ts';
 import { readJournal } from '../src/rsi/accept.ts';
 

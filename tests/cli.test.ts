@@ -499,6 +499,28 @@ describe('harness rsi --remote', () => {
     assert.match(r.out, /对外提供/, '要说清暴露面，而不是只说「没权限」');
   });
 
+  it('regress 是只读的，所以不被 allowStaging 挡住（那道门是给「写」签字的）', () => {
+    const dir = tmp();
+    run(['init'], dir);
+    const cfgPath = join(dir, 'harness.config.json');
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      cfgPath,
+      JSON.stringify(
+        {
+          ...cfg,
+          remote: { url: 'http://127.0.0.1:1', prompts: { 'agent:main': 'agents/main.md' } },
+        },
+        null,
+        2,
+      ),
+    );
+    // 没有采纳记录 ⇒ 会报「找不到基准」，但**不该**报 allowStaging：
+    // 它到那一步之前就已经证明自己越过了写门
+    const r = run(['rsi', 'regress', '--remote', 'http://127.0.0.1:1'], dir);
+    assert.doesNotMatch(r.out, /allowStaging/);
+  });
+
   it('子命令不能带 --remote（否则就是静默无视它）', () => {
     const dir = tmp();
     run(['init'], dir);
