@@ -47,7 +47,7 @@ function fakeRemote(file: string): {
   const state = {
     reloads: 0,
     failReloadAfter: undefined as number | undefined,
-    impl: async (url: string, init?: RequestInit): Promise<Response> => {
+    impl: async (_url: string, init?: RequestInit): Promise<Response> => {
       if ((init?.method ?? 'GET') === 'GET') {
         const digest = bodyDigest(readFileSync(file, 'utf8').split(/^---$/m).slice(2).join('---'));
         return new Response(JSON.stringify({ agents: [{ agent: 'main', prompt: { digest } }] }), {

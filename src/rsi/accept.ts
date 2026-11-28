@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { discoverAssets } from '../assets/discover.js';
 import { buildLock, writeLock } from '../assets/lockfile.js';
@@ -7,6 +6,7 @@ import { findAsset } from '../assets/types.js';
 import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { loadEvalCases } from '../evals/load.js';
+import { commitAccept } from './commit.js';
 import {
   appendJournal,
   atomicWrite,
@@ -92,8 +92,7 @@ export function acceptProposal(
     opts.reasonSuffix === undefined
       ? outcome.gate.reason
       : `${outcome.gate.reason}；${opts.reasonSuffix}`;
-  const { entry, assets: after } = writePatch(config, assets, proposal, reason);
-  appendJournal(config, entry);
+  const { entry, assets: after } = commitAccept(config, assets, proposal, reason);
   return { entry, assets: after };
 }
 
@@ -104,53 +103,7 @@ export function acceptManually(
   proposal: Proposal,
   reason: string,
 ): AcceptResult {
-  const { entry, assets: after } = writePatch(config, assets, proposal, reason);
-  appendJournal(config, entry);
-  return { entry, assets: after };
-}
-
-function writePatch(
-  config: WorkspacePaths,
-  assets: AssetSet,
-  proposal: Proposal,
-  reason: string,
-): { entry: JournalEntry; assets: AssetSet } {
-  const asset = findAsset(assets, proposal.patch.target);
-  if (asset === undefined) {
-    throw new HarnessError('asset.missing', `提案指向不存在的资产 "${proposal.patch.target}"`);
-  }
-  const expected = renderFile(asset.path, proposal.patch.before);
-  const current = readFileSync(asset.path, 'utf8');
-  if (current !== expected) {
-    throw new HarnessError(
-      'asset.invalid',
-      `${proposal.patch.target} 在验证之后被改动过（预期 ${expected.length} 字节，实际 ${current.length} 字节）` +
-        ' —— 拒绝覆盖，请重新跑一轮 RSI',
-    );
-  }
-
-  const nextText = renderFile(asset.path, proposal.patch.after);
-  atomicWrite(asset.path, nextText);
-
-  // 采纳后的资产集：重新发现一遍，让 lock 反映磁盘真相而不是内存推算
-  const after = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
-  writeLock(join(config.root, 'harness.lock.json'), buildLock(after));
-
-  return {
-    entry: {
-      at: Date.now(),
-      proposalId: proposal.id,
-      status: 'accepted',
-      target: proposal.patch.target,
-      before: proposal.patch.before,
-      after: proposal.patch.after,
-      reason,
-      ...(proposal.manifest !== undefined ? { manifest: proposal.manifest } : {}),
-      assetsBefore: assets.fingerprint,
-      assetsAfter: after.fingerprint,
-    },
-    assets: after,
-  };
+  return commitAccept(config, assets, proposal, reason);
 }
 
 export interface RevertResult {
@@ -196,6 +149,28 @@ export function revertLast(config: WorkspacePaths, id?: string): RevertResult {
 
   const current = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
   if (current.fingerprint !== last.assetsAfter) {
+    /**
+     * 「资产已经是采纳前」= 上一次回滚写完了文件、却没来得及记 journal。
+     *
+     * 不加这个分支，那次中断会把人锁死：再次回滚会撞上指纹校验（当前 ≠ 采纳后），
+     * 报「采纳之后资产又被改过」—— 而真相是「已经回过了」。补记一条回滚记录即可，
+     * 因为账面缺的正是这一条，资产内容已经完全正确。
+     *
+     * 只认**精确等于** `assetsBefore`：别的任何不一致都还是「有人手改过」，仍然拒绝。
+     */
+    if (last.assetsBefore !== '' && current.fingerprint === last.assetsBefore) {
+      const replayed: JournalEntry = {
+        ...last,
+        at: Date.now(),
+        status: 'rejected',
+        reverted: true,
+        reason: revertNoteOf(last.proposalId, last.reason),
+        assetsBefore: last.assetsAfter,
+        assetsAfter: current.fingerprint,
+      };
+      appendJournal(config, replayed);
+      return { entry: replayed, restored: last.before };
+    }
     throw new HarnessError(
       'asset.invalid',
       `采纳之后资产又被改过（当前 ${current.fingerprint} ≠ 采纳后 ${last.assetsAfter}），` +

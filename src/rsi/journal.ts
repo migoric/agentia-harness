@@ -1,4 +1,14 @@
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
@@ -158,7 +168,52 @@ export function repairJournal(config: WorkspacePaths): JournalRepair {
 export function appendJournal(config: WorkspacePaths, entry: JournalEntry): void {
   const path = journalPath(config);
   mkdirSync(dirname(path), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(entry)}\n`, 'utf8');
+  appendDurable(path, `${JSON.stringify(entry)}\n`);
+}
+
+/**
+ * 追加一行并 `fsync`。
+ *
+ * `appendFileSync` 把正确性交给了「进程正常退出」，而 RSI 的常态恰恰是**被 kill**：
+ * 常驻 worker 被 OOM 杀、容器重启、CI 超时。没 fsync 的追加在掉电/崩溃后可能整条消失，
+ * 而它记录的正是「我改了这个资产」—— 资产已经改了，账本却没有这一条，回滚与账本
+ * 从此对不上。一次采纳一条 fsync，成本可以忽略。
+ *
+ * 用 `O_APPEND` 而不是读改写：两个进程同时追加时，各自的整行不会互相截断
+ * （锁会挡住并发写，但 journal 是唯一线索，值得再独立成立一次）。
+ */
+function appendDurable(path: string, line: string): void {
+  const fd = openSync(path, 'a');
+  try {
+    writeSync(fd, line);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * 目录 `fsync` —— 让 rename 本身也落到盘上。
+ *
+ * 只在 POSIX 有意义（Windows 打不开目录），所以失败一律忽略：那里没有这个语义，
+ * 而不是出错了。
+ */
+function fsyncDir(dir: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dir, 'r');
+    fsyncSync(fd);
+  } catch {
+    // 见上：不是所有平台都允许对目录 fsync
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 关不掉一个只读目录句柄不影响已经落盘的 rename
+      }
+    }
+  }
 }
 
 /** 老记录没有 `kind`（2026-11-20 之前只有文本资产）—— 补上默认值，读侧不必到处判空 */
@@ -211,9 +266,31 @@ function keyOf(kind: 'asset' | 'code', e: JournalEntry): string {
   return `${kind}:${e.proposalId}`;
 }
 
-/** tmp + rename：写到一半崩了不会留下半个文件 */
+/**
+ * tmp + rename：写到一半崩了不会留下半个文件。
+ *
+ * 三个细节都踩过或差点踩过：
+ *
+ * 1. **tmp 名唯一**。此前是 `${path}.rsi-tmp` 固定名 —— 两个进程（常驻 worker 与
+ *    人手一次 `rsi accept`）同时写同一个目标时会共用同一个 tmp，A 的 rename 可能
+ *    搬走 B 还没写完的内容，或者 B 的写入在 A 的 rename 之后落地成一个孤儿。
+ *    唯一名让「同时写」退化成「后写的赢」，而不是「内容串台」。
+ * 2. **写完 fsync 文件本身**。rename 只保证目录项原子，不保证数据块已经落盘；
+ *    ext4 的延迟分配下，掉电后 rename 成功而内容全零是真实存在的。资产有 git 兜底，
+ *    但 journal / cycles 没有 —— 那恰好是 RSI 唯一的审计依据。
+ * 3. **rename 之后 fsync 目录**，否则「文件名指向新 inode」这件事本身可能没落盘。
+ *
+ * 代价是每个原子写多两次系统调用。RSI 的写入频率是「每轮几次」，不是热路径。
+ */
 export function atomicWrite(path: string, text: string): void {
-  const tmp = `${path}.rsi-tmp`;
-  writeFileSync(tmp, text, 'utf8');
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  const fd = openSync(tmp, 'w');
+  try {
+    writeSync(fd, text);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
   renameSync(tmp, path);
+  fsyncDir(dirname(path));
 }

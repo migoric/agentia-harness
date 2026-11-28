@@ -81,6 +81,7 @@ const HELP = `harness —— 基于 agentia 的 Agent harness 工程基座
     --max-rounds <n>      最多跑几轮
     --until <时间>        到这个时刻就停（ISO 或 2026-11-29T08:00）
     --timeout/--concurrency/--retries/--repeat   见 eval 节
+  rsi doctor              开跑前体检：锁/中间态/journal/轮次/留出集/预算（有阻塞项退出码 1）
   rsi revert [id]         回滚最近一次采纳（给 id 可防期间插入新采纳）
   rsi status              看采纳历史
   rsi ledger              决策账本：当初的预测 vs 实际验证结果（--json 机器可读）

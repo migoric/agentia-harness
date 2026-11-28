@@ -238,7 +238,7 @@ describe('只读面', () => {
         reason: string;
       };
       assert.equal(idle.running, false);
-      assert.match(idle.reason, /没有 worker/);
+      assert.match(idle.reason, /没有进程/);
 
       writeFileSync(
         join(root, '.workspace', 'rsi', 'worker.lock'),

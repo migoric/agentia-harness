@@ -25,6 +25,7 @@ import { boolFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import type { RemoteStage } from '../remote-stage.js';
+import { announceRecovery } from './rsi-recover.js';
 import { tuningOf } from './run.js';
 
 function fromFlag(ctx: CliContext, sub: string): string {
@@ -55,6 +56,9 @@ export async function acceptFrom(
   client?: ModelClient,
   remote?: RemoteStage,
 ): Promise<number> {
+  // 手写采纳也是写入口：上一次中断的中间态要先补齐，否则这次的「最近一条采纳」
+  // 基准会落在一条不存在的记录上
+  announceRecovery(ctx.config);
   const proposal = readProposal(fromFlag(ctx, 'accept'));
   // 轮次 id 先生成：留出集消耗账要用它，而记账发生在 `writeCycle` **之前** ——
   // 反过来的话，写记录失败会让这一批在账上"看起来没用过"，下一轮白送一次复用
@@ -189,6 +193,7 @@ export async function acceptFrom(
 }
 
 export function revert(ctx: CliContext, id: string | undefined): number {
+  announceRecovery(ctx.config);
   const r = revertLast(ctx.config, id);
   say(`已回滚 ${r.entry.proposalId}：${r.entry.target}`);
   // 回滚只改本地文件。配了 remote 的工程如果不说这一句，远端会继续跑被回滚掉的版本，

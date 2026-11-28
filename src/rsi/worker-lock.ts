@@ -1,41 +1,69 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from 'node:fs';
 import { hostname } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { atomicWrite } from './journal.js';
 
 /**
- * 常驻 worker 的**单实例锁**。
+ * 工作区写锁 —— **所有会推进 RSI 状态的进程共用一把**。
  *
- * 抽成独立模块的理由是它有两个使用者，而这两者对「活着」的定义必须一致：
- * `rsi --watch` 用它决定能不能开跑，只读看板用它回答「谁在跑、还活着吗」。
- * 两边各写一份判定，最典型的后果是看板显示「有 worker 在跑」而实际早就死了
- * （或者反过来，看板说空着、新 worker 却启动失败）—— 这种矛盾会让人直接怀疑工具坏了。
+ * 抽成独立模块的理由是它有多个使用者，而它们对「活着」的定义必须一致：
+ * `rsi --watch`（常驻）、`rsi`（一次跑完）、`rsi accept`、`rsi regress --revert`、
+ * `rsi journal --repair`，以及只读看板（它只读锁、回答「谁在跑」）。各写一份判定，
+ * 最典型的后果是看板显示「有 worker 在跑」而实际早就死了（或者反过来，看板说空着、
+ * 新进程却启动失败）—— 这种矛盾会让人直接怀疑工具坏了。
  *
  * 三条设计取舍：
  *
- * 1. **pid + 心跳，缺一不可**。只看 pid 会把「进程号被复用」当成活着；只看心跳会把
- *    「进程被 SIGKILL 而锁文件无害地留在盘上」当成一直在跑。两者同时判，误判窗口
- *    就是心跳间隔（60s）。
- * 2. **陈旧锁自动回收，不要求人手删文件**。这条是踩出来的：容器/CI 里被 SIGKILL
- *    是常态，而「删个文件再启动」在自动化里没人做，结果就是监控显示 worker 一直在
- *    但轮次永远不推进。回收时把旧锁**改名留存**（`.stale-<ts>`），事后还能查是谁卡住的。
- * 3. **判定不做跨机推断**。锁里记了 `host`，但发现是另一台机器时不假装知道它还活着：
- *    心跳新鲜就当作活着（同一工作区被两台机器挂载是用户自己的配置问题），
- *    心跳过期就回收。跨主机探测（SSH、租约）不属于这个工具的职责。
+ * 1. **pid + 心跳 + 归属凭证，缺一不可**。只看 pid 会把「进程号被复用」当成活着；
+ *    只看心跳会把「被 SIGKILL 而锁文件留在盘上」当成一直在跑；没有凭证，
+ *    `release` 可能删掉**别人刚抢到**的锁。三者同时判，误判窗口就是心跳间隔（60s）。
+ * 2. **抢锁必须原子**。旧实现是「读 → 判 → 改名 → 写」，两个进程同时启动会双双
+ *    读到「没有锁」，然后互相覆盖 —— 两个进程同时推进轮次，报告却看起来正常。
+ *    现在用 `O_CREAT|O_EXCL`（`wx`）独占创建作为唯一入口：创建成功即持有，
+ *    失败才去判陈旧，陈旧则改名让路后重试。这是 POSIX 上最便宜的互斥原语。
+ * 3. **陈旧锁自动回收，不要求人手删文件**。容器/CI 里被 SIGKILL 是常态，而
+ *    「删个文件再启动」在自动化里没人做，结果就是监控显示 worker 一直在跑但轮次
+ *    永远不推进。回收时把旧锁**改名留存**（`.stale-<ts>`），事后还能查是谁卡住的。
+ *
+ * 刻意**不**做的：跨主机探测（SSH、租约）。锁里记了 `host`，但发现是另一台机器时
+ * 不假装知道它还活着：心跳新鲜就当作活着（同一工作区被两台机器挂载是用户自己的
+ * 配置问题），心跳过期就回收。
  */
 export interface WorkerLock {
   readonly pid: number;
   readonly host: string;
   /** ISO 8601 */
   readonly startedAt: string;
-  /** ISO 8601；worker 每轮开始/结束与心跳定时器都会刷新 */
+  /** ISO 8601；持有者每轮开始/结束与心跳定时器都会刷新 */
   readonly heartbeatAt: string;
   /** 这个进程已经跑完几轮 */
   readonly rounds: number;
   /** 当前在跑的那一轮（没跑就是 undefined）—— 看板用它说「正在跑第 N 轮」 */
   readonly currentRound?: number | undefined;
+  /**
+   * 归属凭证（随机串）。`release` 只删 token 相同的那份。
+   *
+   * 加它不是洁癖：旧实现按 pid 判归属，而 pid 会被复用 —— 进程 A 被 kill、锁被
+   * 判定陈旧、进程 B 抢到，此时 A 迟到的 `release` 若按 pid 判据会删掉 B 的锁。
+   * token 让「这是不是我那把锁」变成一个确定的事实。老锁没有这个字段，读侧回退到 pid。
+   */
+  readonly token?: string | undefined;
+  /** 是谁拿的（`worker` / `rsi` / `rsi accept` …）—— 抢锁失败时要能说清对手是谁 */
+  readonly command?: string | undefined;
 }
 
 export interface LockState {
@@ -56,20 +84,23 @@ export const HEARTBEAT_MS = 60_000;
  */
 export const STALE_MS = 10 * 60_000;
 
+/** 陈旧锁最多留几份归档（再多就没人看了，只是占目录条目） */
+const STALE_KEEP = 5;
+
 export function workerLockPath(p: WorkspacePaths): string {
   return join(p.workspaceDir, 'rsi', 'worker.lock');
 }
 
-/** 读锁文件。不存在 ⇒ null；存在但读不动/不是对象 ⇒ `corrupt` 的判定结果（不抛） */
-export function readWorkerLock(p: WorkspacePaths): LockState | null {
+/** 读锁文件。不存在 ⇒ null；存在但读不动/不是对象 ⇒ 按陈旧锁判定（不抛） */
+export function readWorkerLock(p: WorkspacePaths, staleMs = STALE_MS): LockState | null {
   const path = workerLockPath(p);
   if (!existsSync(path)) return null;
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    // 半截写入（被 kill 在写锁的瞬间）不该让看板 500：返回一个「活着但说不清」的
-    // 判定，让新 worker 走正常回收路径，而不是让人先手删文件
+    // 半截写入（被 kill 在写锁的瞬间）不该让看板 500：返回一个「说不清」的判定，
+    // 让新进程走正常回收路径，而不是让人先手删文件
     return {
       lock: { pid: -1, host: '?', startedAt: '', heartbeatAt: '', rounds: 0 },
       alive: false,
@@ -91,19 +122,21 @@ export function readWorkerLock(p: WorkspacePaths): LockState | null {
     heartbeatAt: o.heartbeatAt,
     rounds: typeof o.rounds === 'number' ? o.rounds : 0,
     ...(typeof o.currentRound === 'number' ? { currentRound: o.currentRound } : {}),
+    ...(typeof o.token === 'string' ? { token: o.token } : {}),
+    ...(typeof o.command === 'string' ? { command: o.command } : {}),
   };
-  return { lock, ...judge(lock) };
+  return { lock, ...judge(lock, staleMs) };
 }
 
 /** 心跳新鲜度 + 进程是否存在 */
-function judge(lock: WorkerLock): { alive: boolean; reason: string } {
+function judge(lock: WorkerLock, staleMs: number): { alive: boolean; reason: string } {
   const beat = Date.parse(lock.heartbeatAt);
   if (Number.isNaN(beat)) return { alive: false, reason: '心跳时间解析不了' };
   const age = Date.now() - beat;
-  if (age > STALE_MS) {
+  if (age > staleMs) {
     return {
       alive: false,
-      reason: `心跳已过期 ${Math.round(age / 1000)}s（上限 ${STALE_MS / 1000}s）`,
+      reason: `心跳已过期 ${Math.round(age / 1000)}s（上限 ${staleMs / 1000}s）`,
     };
   }
   if (lock.pid <= 0) return { alive: false, reason: '没有有效 pid' };
@@ -134,63 +167,150 @@ export interface AcquiredLock {
   release(): void;
 }
 
+export interface AcquireOptions {
+  /** 锁里记的命令名，供抢锁失败时说明对手（`worker` / `rsi` / `rsi accept` …） */
+  readonly command?: string | undefined;
+  /** 判陈旧的阈值；测试注入（默认 `STALE_MS`） */
+  readonly staleMs?: number | undefined;
+}
+
 /**
  * 拿锁。
  *
- * 活着 ⇒ 抛 `rsi.gate_blocked`（**不是**静默排队：两个 worker 同时推进轮次会毁掉
+ * 活着 ⇒ 抛 `rsi.gate_blocked`（**不是**静默排队：两个进程同时推进轮次会毁掉
  * 归因，而它毁得很安静 —— 报告看起来仍然正常）。
+ *
+ * 独占创建 + 陈旧回收最多尝试 5 轮：每一轮要么抢到，要么确认「有活人」，
+ * 要么把一个陈旧锁改名让路。5 次仍失败说明锁文件在被高频创建（配置错、或
+ * 同一个工作区有两个 supervisor 在抢），此时报错比继续空转有用。
  */
-export function acquireWorkerLock(p: WorkspacePaths): AcquiredLock {
+export function acquireWorkerLock(p: WorkspacePaths, opts: AcquireOptions = {}): AcquiredLock {
   const path = workerLockPath(p);
-  const existing = readWorkerLock(p);
-  if (existing?.alive === true) {
-    throw new HarnessError(
-      'rsi.gate_blocked',
-      `已经有一个 worker 在推进轮次（pid ${existing.lock.pid}@${existing.lock.host}，` +
-        `${existing.reason}）。同一工作区同时跑两个 worker 会让轮次并发、归因失效。\n` +
-        '如果确认那个进程已经不在了，删掉 ' +
-        `${path} 再启动；或等到心跳过期（${STALE_MS / 60_000} 分钟）自动回收。`,
-    );
-  }
-  // 陈旧锁改名留存：事后要能查「上一次是谁卡住的」
-  if (existing !== null) {
-    try {
-      renameSync(path, `${path}.stale-${Date.now()}`);
-    } catch {
-      // 改名失败（权限/竞态）不影响正确性：下一次写入会覆盖它
-    }
-  }
   mkdirSync(dirname(path), { recursive: true });
-  let lock: WorkerLock = {
+  const staleMs = opts.staleMs ?? STALE_MS;
+  const mine: WorkerLock = {
     pid: process.pid,
     host: hostname(),
     startedAt: new Date().toISOString(),
     heartbeatAt: new Date().toISOString(),
     rounds: 0,
+    token: randomBytes(6).toString('hex'),
+    ...(opts.command !== undefined ? { command: opts.command } : {}),
   };
-  const write = (): void => {
-    atomicWrite(path, `${JSON.stringify(lock)}\n`);
-  };
-  write();
+
+  let reclaimed: LockState | null = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (claim(path, mine)) return handle(p, mine, reclaimed);
+    const existing = readWorkerLock(p, staleMs);
+    if (existing === null) continue; // 上一轮刚被删掉：直接重试独占创建
+    if (existing.alive) throw blocked(path, existing);
+    reclaimed ??= existing;
+    // 陈旧锁改名留存：事后要能查「上一次是谁卡住的」。改名失败（权限/竞态）不阻塞，
+    // 但此时不能 assume 自己拿到了锁 —— 循环会再试一次独占创建。
+    try {
+      renameSync(path, `${path}.stale-${Date.now()}`);
+      sweepStaleLocks(path);
+    } catch {
+      // 别人同时改名/删除了它，重试即可
+    }
+  }
+  throw new HarnessError(
+    'rsi.gate_blocked',
+    `拿不到工作区锁：${path} 连续 5 次都被抢占 —— ` +
+      '通常意味着同一个工作区有多个 supervisor 在反复启动 RSI。' +
+      '确认只有一个调度器在敲 `harness rsi`（或 `--watch`），再试一次。',
+  );
+}
+
+/** 抢锁失败时说清「对手是谁、怎么处理」—— 这句话决定人是等还是去杀进程 */
+function blocked(path: string, existing: LockState): HarnessError {
+  const who = existing.lock.command ?? '未知命令';
+  return new HarnessError(
+    'rsi.gate_blocked',
+    `已经有一个 RSI 进程在改这个工作区（${who}，pid ${existing.lock.pid}@${existing.lock.host}，` +
+      `${existing.reason}）。两边同时写资产会让归因失效，而报告看起来仍然正常。\n` +
+      `如果确认那个进程已经不在了，删掉 ${path} 再试；或等到心跳过期` +
+      `（${STALE_MS / 60_000} 分钟）自动回收。`,
+  );
+}
+
+/**
+ * `O_CREAT|O_EXCL` 独占创建 —— 整个互斥的**唯一**判定点。
+ *
+ * 不能用「临时文件 + rename」代替：rename 会覆盖已存在的目标，两个进程都能成功，
+ * 于是两个都以为自己持锁。`wx` 的失败是原子的、由内核仲裁的。
+ */
+function claim(path: string, lock: WorkerLock): boolean {
+  let fd: number;
+  try {
+    fd = openSync(path, 'wx', 0o600);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw e;
+  }
+  try {
+    writeSync(fd, `${JSON.stringify(lock)}\n`);
+    // 落盘：抢到锁之后立刻被 kill 时，盘上必须已经有这把锁，否则下一个进程
+    // 会认为「没人持有」并再抢一次 —— 那正是这个文件要防的事
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  return true;
+}
+
+/** 只留最近几份 `.stale-*`：它们是给人查的，不是账本 */
+function sweepStaleLocks(path: string): void {
+  const dir = dirname(path);
+  const prefix = `${basename(path)}.stale-`;
+  let names: string[];
+  try {
+    names = readdirSync(dir)
+      .filter((n) => n.startsWith(prefix))
+      .sort();
+  } catch {
+    return;
+  }
+  for (const name of names.slice(0, Math.max(0, names.length - STALE_KEEP))) {
+    try {
+      rmSync(join(dir, name), { force: true });
+    } catch {
+      // 清理失败不影响正确性
+    }
+  }
+}
+
+function handle(p: WorkspacePaths, initial: WorkerLock, reclaimed: LockState | null): AcquiredLock {
+  const path = workerLockPath(p);
+  let lock = initial;
   return {
     path,
-    reclaimed: existing,
+    reclaimed,
     heartbeat(rounds: number, currentRound?: number): void {
+      // 显式重建而不是展开：`currentRound` 传 undefined 时必须**清掉**旧值，
+      // 否则看板会一直显示「正在跑第 N 轮」而那一轮早已结束
       lock = {
         pid: lock.pid,
         host: lock.host,
         startedAt: lock.startedAt,
         heartbeatAt: new Date().toISOString(),
         rounds,
+        ...(lock.token !== undefined ? { token: lock.token } : {}),
+        ...(lock.command !== undefined ? { command: lock.command } : {}),
         ...(currentRound !== undefined ? { currentRound } : {}),
       };
-      write();
+      atomicWrite(path, `${JSON.stringify(lock)}\n`);
     },
     release(): void {
       // 只删自己的锁：期间若被判定陈旧并由另一个进程接手，删掉别人的锁会让
-      // 「单实例」这个保证在交接窗口里失效
+      // 「单实例」这个保证在交接窗口里失效。老锁没有 token，回退到 pid+host 比较。
       const now = readWorkerLock(p);
-      if (now !== null && now.lock.pid !== process.pid) return;
+      if (now === null) return;
+      const mine =
+        initial.token !== undefined
+          ? now.lock.token === initial.token
+          : now.lock.pid === process.pid && now.lock.host === initial.host;
+      if (!mine) return;
       rmSync(path, { force: true });
     },
   };
@@ -208,7 +328,7 @@ export function describeWorker(p: WorkspacePaths): {
   if (state === null) {
     return {
       running: false,
-      reason: '没有 worker 在跑',
+      reason: '没有进程在跑',
       lock: null,
       staleMs: STALE_MS,
       heartbeatMs: HEARTBEAT_MS,

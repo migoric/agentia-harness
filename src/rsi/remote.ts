@@ -20,6 +20,7 @@ import type { HarnessConfig, RemoteConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { atomicWrite } from './journal.js';
 import { beginPending, finishPending, readPending, restoreFromPending } from './pending.js';
+import { callRemote, type FetchLike } from './remote-call.js';
 import type { Proposal } from './types.js';
 import { renderFile } from './verify.js';
 
@@ -43,8 +44,6 @@ export function remoteToken(remote: RemoteConfig, env: NodeJS.ProcessEnv = proce
   }
   return token.trim();
 }
-
-type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 /** 服务侧 `/admin/prompts` 的响应（只取用得到的字段） */
 interface PromptsResponse {
@@ -79,19 +78,36 @@ export interface RemoteStagerOptions {
   readonly fetchImpl?: FetchLike;
   /** 测试注入（避免真起服务） */
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * 单次请求的超时（毫秒，默认 15s）。
+   *
+   * 必须有：`fetch` 在没有 signal 时不会自己放弃一个「连上了但永远不回」的连接
+   * （TCP 层的 keepalive 可能挂几十分钟）。而远程 stage 一旦挂住，锁定、心跳、
+   * 用户看到的都只是「卡住了」—— 比报错难查得多。
+   */
+  readonly timeoutMs?: number | undefined;
+  /** 取消信号（SIGINT 时由调用方传） */
+  readonly signal?: AbortSignal | undefined;
 }
+
+const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_RETRIES = 2;
 
 export class RemoteStager {
   readonly #config: HarnessConfig;
   readonly #remote: RemoteConfig;
   readonly #fetch: FetchLike;
   readonly #env: NodeJS.ProcessEnv;
+  readonly #timeoutMs: number;
+  readonly #signal: AbortSignal | undefined;
 
   constructor(opts: RemoteStagerOptions) {
     this.#config = opts.config;
     this.#remote = opts.remote;
     this.#fetch = opts.fetchImpl ?? ((url, init) => fetch(url, init));
     this.#env = opts.env ?? process.env;
+    this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#signal = opts.signal;
     // 凭据**惰性取**：构造时就要 token 的话，「allowStaging 没开」的用户会先看到
     // 「缺少凭据」—— 于是他去配 token，配完才被告知这条路本来就不许走
   }
@@ -107,7 +123,11 @@ export class RemoteStager {
    * 是个谎：提案是通过率变化算出来的，而基线不是当前资产跑出来的。
    */
   async preflight(): Promise<PreflightResult> {
-    const res = await this.#call<PromptsResponse>(this.#remote.promptsPath, { method: 'GET' });
+    // GET 是幂等的：一次 502 / 连接重置不该让整轮 RSI 直接失败
+    const res = await this.#call<PromptsResponse>(this.#remote.promptsPath, {
+      method: 'GET',
+      retries: DEFAULT_RETRIES,
+    });
     const remoteDigests = new Map<string, string | undefined>();
     for (const item of res.agents ?? []) {
       if (item.agent !== undefined) remoteDigests.set(item.agent, item.prompt?.digest);
@@ -173,17 +193,45 @@ export class RemoteStager {
     };
   }
 
-  /** 把当前资产推到远端（采纳之后 / 预检发现漂移且用户要求对齐时） */
+  /**
+   * 把当前资产推到远端（采纳之后 / 预检发现漂移且用户要求对齐时）。
+   *
+   * **全或全不**：先把要写的内容全部算出来，再统一写；中途有一次失败就把已经写过的
+   * 文件回滚成原内容，并重载一次让服务与盘一致。留下「一半新、一半旧」比整体失败更糟：
+   * 服务跑着一份谁也没验证过、也不会被任何账本记录的组合。
+   */
   async push(assets: AssetSet): Promise<void> {
-    let wrote = false;
+    const plans: { file: string; next: string; prev: string }[] = [];
     for (const [target, file] of Object.entries(this.#remote.prompts)) {
-      const body = bodyOf(assets, target);
-      const next = renderFile(file, body);
-      if (next === readFileSync(file, 'utf8')) continue;
-      atomicWrite(file, next);
-      wrote = true;
+      const next = renderFile(file, bodyOf(assets, target));
+      const prev = readFileSync(file, 'utf8');
+      if (next !== prev) plans.push({ file, next, prev });
     }
-    if (wrote) await this.#reload();
+    if (plans.length === 0) return;
+
+    const written: typeof plans = [];
+    try {
+      for (const plan of plans) {
+        atomicWrite(plan.file, plan.next);
+        written.push(plan);
+      }
+    } catch (err) {
+      for (const plan of written.reverse()) {
+        try {
+          atomicWrite(plan.file, plan.prev);
+        } catch {
+          // 回滚失败只可能让情况更接近「全旧」，继续尝试剩下的
+        }
+      }
+      await this.#reload().catch(() => undefined);
+      throw new HarnessError(
+        'config.invalid',
+        `推送资产到远端时第 ${written.length + 1}/${plans.length} 个文件写失败：` +
+          `${err instanceof Error ? err.message : String(err)}。` +
+          '已把写过的文件回滚并重载 —— 远端仍是推送前那一份',
+      );
+    }
+    await this.#reload();
   }
 
   /**
@@ -222,53 +270,28 @@ export class RemoteStager {
   }
 
   async #reload(): Promise<void> {
+    // POST 不重试：第一次可能已经生效、只是响应丢了。重试成功与「第一次就成功」
+    // 在服务端看起来一样（重载是幂等的），但**报错**的语义完全不同 —— 宁可让它
+    // 报一次「重载失败」，也不要让调用方以为「重试之后才成功」而去做第二次写盘。
     const res = await this.#call<ReloadResponse>(this.#remote.reloadPath, { method: 'POST' });
     if (res.ok !== true) {
       throw new HarnessError('rsi.no_signal', `远端拒绝重载：${res.error ?? '（没有给出原因）'}`);
     }
   }
 
-  async #call<T>(path: string, init: { method: string }): Promise<T> {
-    const url = `${this.#remote.url}${path}`;
-    let res: Response;
-    try {
-      // 带 content-type 却不给 body，Fastify 会直接 400
-      // （"Body cannot be empty when content-type is set to 'application/json'"）——
-      // 重载端点不需要请求体，所以只有 POST 补一个 `{}`
-      res = await this.#fetch(url, {
-        method: init.method,
-        headers: {
-          authorization: `Bearer ${remoteToken(this.#remote, this.#env)}`,
-          'content-type': 'application/json',
-        },
-        ...(init.method === 'POST' ? { body: '{}' } : {}),
-      });
-    } catch (err) {
-      throw new HarnessError(
-        'config.invalid',
-        `连不上 ${url}：${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-    const text = await res.text();
-    if (!res.ok) {
-      // 服务侧 400 会带 `{error}`（文件坏了）；401/403 是凭据问题（角色不是 admin）
-      let reason = text.slice(0, 300);
-      try {
-        const parsed = JSON.parse(text) as { error?: string };
-        if (typeof parsed.error === 'string') reason = parsed.error;
-      } catch {
-        // 非 JSON：原样截断
-      }
-      throw new HarnessError(
-        'config.invalid',
-        `${init.method} ${path} 返回 ${res.status}：${reason}`,
-      );
-    }
-    try {
-      return JSON.parse(text) as T;
-    } catch {
-      throw new HarnessError('config.invalid', `${init.method} ${path} 的响应不是 JSON`);
-    }
+  /** 所有远程调用都走 `remote-call.ts`：超时/取消/按幂等性重试的判据只有一处 */
+  #call<T>(path: string, init: { method: string; retries?: number }): Promise<T> {
+    return callRemote<T>(
+      {
+        fetch: this.#fetch,
+        token: () => remoteToken(this.#remote, this.#env),
+        timeoutMs: this.#timeoutMs,
+        ...(this.#signal !== undefined ? { signal: this.#signal } : {}),
+      },
+      this.#remote.url,
+      path,
+      init,
+    );
   }
 }
 

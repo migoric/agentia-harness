@@ -1,6 +1,6 @@
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
-import { acquireWorkerLock, HEARTBEAT_MS } from './worker-lock.js';
+import { type AcquiredLock, acquireWorkerLock, HEARTBEAT_MS } from './worker-lock.js';
 
 /**
  * 常驻 worker：`rsi --watch`。
@@ -42,7 +42,9 @@ export type WatchStopReason =
   | 'no_failures'
   | 'shrink_stalled'
   | 'budget'
-  | 'signal';
+  | 'signal'
+  /** 连续失败到上限 —— 不是「这一轮没变好」，是「每一轮都跑不起来」 */
+  | 'error';
 
 export interface WatchOptions {
   readonly config: HarnessConfig;
@@ -65,6 +67,28 @@ export interface WatchOptions {
   readonly sleep?: ((ms: number, signal: AbortSignal) => Promise<void>) | undefined;
   readonly onRound?: ((tick: RoundTick, round: number) => void) | undefined;
   readonly onReclaim?: ((reason: string) => void) | undefined;
+  /**
+   * 某一轮抛错时的回调 —— 用来把原因说出来（否则只有「退避重试」一行，人不知道
+   * 为什么慢）。不传也可以，失败会记进报告的 `failures`。
+   */
+  readonly onRoundError?: ((err: unknown, round: number) => void) | undefined;
+  /**
+   * 连续失败几次后放弃（默认 3）。
+   *
+   * 常驻进程**不能因为一次网络抖动就退出**：那是无人值守场景最常见的死法，而
+   * 「它死了」只有看板能看出来。但也不能永远重试——配置错误（key 失效、用例路径
+   * 写错）会变成永不停止的烧钱循环。三次是「足以排除瞬时故障，又不至于让人等太久」。
+   */
+  readonly maxConsecutiveFailures?: number | undefined;
+  /**
+   * 已经拿到的锁 —— 调用方在**装配远端之前**就拿了锁时传进来（`rsi --watch` 就是
+   * 这样：`recoverPending` / `push` 都会写文件，把它们留在锁外等于留一个并发窗口）。
+   *
+   * 传了它，本函数不释放锁（谁拿谁还）；不传就自己拿、自己还。
+   */
+  readonly lock?: AcquiredLock | undefined;
+  /** 锁里记的命令名，抢锁失败时说明对手用 */
+  readonly command?: string | undefined;
 }
 
 export interface WatchReport {
@@ -74,9 +98,14 @@ export interface WatchReport {
   readonly stopReason: WatchStopReason;
   readonly costUsd: number;
   readonly costKnown: boolean;
+  /** 抛错的轮次数（不计入 `rounds` —— 那一轮没有完成） */
+  readonly failures: number;
 }
 
 const DEFAULT_EVERY_SEC = 900;
+const DEFAULT_MAX_FAILURES = 3;
+/** 退避上限：15 分钟。再长就等于「悄悄停了」，而人还在等它自己好 */
+const MAX_BACKOFF_MS = 15 * 60_000;
 
 export async function runWatch(opts: WatchOptions): Promise<WatchReport> {
   const everySec = opts.everySec ?? DEFAULT_EVERY_SEC;
@@ -86,14 +115,26 @@ export async function runWatch(opts: WatchOptions): Promise<WatchReport> {
   if (opts.maxRounds !== undefined && (!Number.isInteger(opts.maxRounds) || opts.maxRounds < 1)) {
     throw new HarnessError('config.invalid', `--max-rounds 必须是正整数（收到 ${opts.maxRounds}）`);
   }
+  const maxFailures = opts.maxConsecutiveFailures ?? DEFAULT_MAX_FAILURES;
+  if (!Number.isInteger(maxFailures) || maxFailures < 1) {
+    throw new HarnessError(
+      'config.invalid',
+      `maxConsecutiveFailures 必须是正整数（收到 ${maxFailures}）`,
+    );
+  }
 
   const controller = new AbortController();
   const signal =
     opts.signal === undefined
       ? controller.signal
       : AbortSignal.any([controller.signal, opts.signal]);
-  const lock = acquireWorkerLock(opts.config);
-  if (lock.reclaimed !== null) opts.onReclaim?.(lock.reclaimed.reason);
+  const lock =
+    opts.lock ??
+    acquireWorkerLock(opts.config, {
+      ...(opts.command !== undefined ? { command: opts.command } : { command: 'rsi --watch' }),
+    });
+  const ownsLock = opts.lock === undefined;
+  if (ownsLock && lock.reclaimed !== null) opts.onReclaim?.(lock.reclaimed.reason);
 
   const state: { rounds: number; current: number | undefined } = { rounds: 0, current: undefined };
 
@@ -106,6 +147,10 @@ export async function runWatch(opts: WatchOptions): Promise<WatchReport> {
   let accepted = 0;
   let costUsd = 0;
   let costKnown = true;
+  let failures = 0;
+  let consecutive = 0;
+  let attempts = 0;
+  let waitMs = everySec * 1000;
   let stopReason: WatchStopReason = 'max_rounds';
 
   try {
@@ -115,9 +160,10 @@ export async function runWatch(opts: WatchOptions): Promise<WatchReport> {
         stopReason = pre;
         break;
       }
-      // 间隔只在**轮与轮之间**生效：第一轮立刻开跑，否则 cron 敲一下还要干等 15 分钟
-      if (state.rounds > 0 && everySec > 0) {
-        await sleep(everySec * 1000, signal);
+      // 间隔只在**轮与轮之间**生效：第一轮立刻开跑，否则 cron 敲一下还要干等 15 分钟。
+      // 失败后 `waitMs` 会退避变大，走的是同一个睡眠点。
+      if (attempts > 0 && waitMs > 0) {
+        await sleep(waitMs, signal);
         if (signal.aborted) {
           stopReason = 'signal';
           break;
@@ -132,34 +178,58 @@ export async function runWatch(opts: WatchOptions): Promise<WatchReport> {
       }
       state.current = state.rounds + 1;
       lock.heartbeat(state.rounds, state.current);
-      const tick = await opts.runRound(signal, state.current);
-      state.rounds += 1;
-      state.current = undefined;
-      accepted += tick.accepted > 0 ? 1 : 0;
-      costUsd += tick.costUsd;
-      costKnown = costKnown && tick.costKnown;
-      lock.heartbeat(state.rounds);
-      opts.onRound?.(tick, state.rounds);
-      if (signal.aborted) {
-        stopReason = 'signal';
-        break;
-      }
-      if (tick.stop !== undefined) {
-        stopReason = tick.stop;
-        break;
-      }
-      if (tick.accepted === 0) {
-        // 和 `runRounds` 同一个口径：没有推进就不再开下一轮。继续跑只会更贵，不会更聪明
-        stopReason = 'no_progress';
-        break;
+      attempts += 1;
+      try {
+        const tick = await opts.runRound(signal, state.current);
+        state.rounds += 1;
+        state.current = undefined;
+        consecutive = 0;
+        waitMs = everySec * 1000;
+        accepted += tick.accepted > 0 ? 1 : 0;
+        costUsd += tick.costUsd;
+        costKnown = costKnown && tick.costKnown;
+        lock.heartbeat(state.rounds);
+        opts.onRound?.(tick, state.rounds);
+        if (signal.aborted) {
+          stopReason = 'signal';
+          break;
+        }
+        if (tick.stop !== undefined) {
+          stopReason = tick.stop;
+          break;
+        }
+        if (tick.accepted === 0) {
+          // 和 `runRounds` 同一个口径：没有推进就不再开下一轮。继续跑只会更贵，不会更聪明
+          stopReason = 'no_progress';
+          break;
+        }
+      } catch (err) {
+        // 信号打断不算失败：那一轮是被要求停的，不是跑不起来
+        if (signal.aborted) {
+          stopReason = 'signal';
+          break;
+        }
+        failures += 1;
+        consecutive += 1;
+        state.current = undefined;
+        // 心跳要跟上：否则一轮 10 分钟的失败会让人以为整个 worker 卡死了
+        lock.heartbeat(state.rounds);
+        opts.onRoundError?.(err, state.rounds + 1);
+        if (consecutive >= maxFailures) {
+          stopReason = 'error';
+          break;
+        }
+        const base = Math.min(Math.max(everySec * 1000, 1000), 60_000);
+        waitMs = Math.min(base * 2 ** consecutive, MAX_BACKOFF_MS);
       }
     }
   } finally {
     clearInterval(beat);
-    lock.release();
+    // 谁拿谁还：外部传进来的锁由外部释放（它还要包住后面的远端装配）
+    if (ownsLock) lock.release();
   }
 
-  return { rounds: state.rounds, accepted, stopReason, costUsd, costKnown };
+  return { rounds: state.rounds, accepted, stopReason, costUsd, costKnown, failures };
 }
 
 /** 开新一轮之前的几道闸；返 non-null 就是该停的理由 */

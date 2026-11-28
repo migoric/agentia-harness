@@ -11,7 +11,16 @@
  * 之间时，下次启动会再还原一遍，这是对的。
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import type { WorkspacePaths } from '../config.js';
 import { HarnessError } from '../errors.js';
@@ -69,8 +78,21 @@ export function beginPending(
   p: WorkspacePaths,
   info: { proposalId: string; target: string; file: string },
 ): PendingStage {
+  // 已有一条未回收的记录 ⇒ 拒绝覆盖。覆盖的后果不是「多写一份备份」，而是
+  // **上一份备份的路径从此没有任何引用**：那个文件停在一个没被验证过的版本上，
+  // 而新记录声称该还原的是另一个文件。恢复协议只能处理一条记录，所以这里必须停。
+  const existing = readPending(p);
+  if (existing !== undefined) {
+    throw new HarnessError(
+      'rsi.bad_record',
+      `上一次远程验证没有收尾：提案 ${existing.proposalId} 的候选还留在 ${existing.file}，` +
+        `备份在 ${existing.backup}。先让它自动回收（再跑一次 rsi / rsi accept 即可），` +
+        '或人工确认该文件内容后删掉 pending.json —— 不要直接开始新一轮覆盖它。',
+    );
+  }
   const { record, dir } = pendingPaths(p);
   mkdirSync(dir, { recursive: true });
+  sweepOrphanBackups(p);
   const backup = join(dir, `${info.proposalId.replace(/[^\w.-]/g, '_')}-${Date.now()}.bak`);
   const original = readFileSync(info.file, 'utf8');
   writeFileSync(backup, original, 'utf8');
@@ -107,8 +129,48 @@ export function restoreFromPending(stage: PendingStage): void {
   atomicWrite(stage.file, readFileSync(stage.backup, 'utf8'));
 }
 
-/** 收尾：删备份目录里的这一份 + 删记录 */
+/**
+ * 收尾：**先删记录，再删备份**。
+ *
+ * 顺序反过来（旧实现）会造出一个不可恢复的死锁：删完备份、还没来得及删记录时被
+ * kill，下次启动 `recoverPending` → `restoreFromPending` 发现「备份不见了」→ 抛
+ * `rsi.bad_record`，于是每次启动都失败，而文件其实早就还原过了。人只能手动删
+ * pending.json 才能继续 —— 一个纯由清理顺序造成的、要求人工介入的故障。
+ *
+ * 现在崩在这个窗口里只会留下一个**孤儿备份**（无害，`sweepOrphanBackups` 会清），
+ * 而「记录指向不存在的备份」这个状态不再可能产生。
+ */
 export function finishPending(p: WorkspacePaths, stage: PendingStage): void {
-  rmSync(stage.backup, { force: true });
   clearPending(p);
+  rmSync(stage.backup, { force: true });
+}
+
+/**
+ * 清掉过期的备份文件 —— 让「先删记录」的安全代价不累积。
+ *
+ * 只删 `.bak`，只删超过一天的：一天之内还有可能是正在用、只是记录被手删了的那种，
+ * 留给人一点反应时间。清不掉不报错：孤儿备份占的是磁盘，不是正确性。
+ */
+export function sweepOrphanBackups(p: WorkspacePaths, keepMs = 24 * 60 * 60_000): number {
+  const { dir } = pendingPaths(p);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  const cutoff = Date.now() - keepMs;
+  let removed = 0;
+  for (const name of names) {
+    if (!name.endsWith('.bak')) continue;
+    const file = join(dir, name);
+    try {
+      if (statSync(file).mtimeMs > cutoff) continue;
+      unlinkSync(file);
+      removed += 1;
+    } catch {
+      // 并发删除/权限问题都不该让一次正常的 RSI 启动失败
+    }
+  }
+  return removed;
 }

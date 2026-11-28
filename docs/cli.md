@@ -54,6 +54,8 @@ harness rsi             跑一轮闭环
   --max-cost <usd>      整次运行的总预算（含提案、基线、候选；--rounds 下跨轮共享）
   --shrink-every <n>    连续 n 条改动没让资产变小，就强制下一轮只接受净简化提案（缺省 5）
   --timeout/--concurrency/--retries   见 evals.md 的三个旋钮
+harness rsi doctor      开跑前体检：锁 / 采纳中间态 / 远程候选 / journal / 轮次 / 留出集 / 预算
+                        （有阻塞项退出码 1；不花一分钱、不需要模型凭据）
 harness rsi status      采纳历史
 harness rsi ledger      决策账本：预测 vs 实际结果（--json 输出）
 harness rsi journal     采纳日志（--json 输出）；中途崩过留下的半截末行会指出
@@ -62,6 +64,8 @@ harness rsi --watch     常驻推进轮次（单实例锁 + 心跳 + 节流；�
   --every <s>           轮与轮之间的间隔秒数（缺省 900）
   --max-rounds <n>      最多跑几轮
   --until <时间>        到这个时刻就停（ISO 或 2026-11-29T08:00）
+  单轮失败不退出：退避重试，连续 3 次才停（`stopReason: error`，退出码 1）
+  预算跨进程连续：累计落在 `.workspace/rsi/spend.json`（24h 滚动窗口）
 harness rsi regress     采纳之后那些用例还通过吗（有回归退出码 1）
   --remote <url>        对**服务**做回归检查（远程模式下必须带：否则测的是本地那份，
                         而线上到底怎么样没人知道，报告却是一份绿）

@@ -195,23 +195,24 @@ expect_max_tokens: 20000 # 挡住「靠堆循环混过去」
 
 ## 命令
 
-| 命令                     | 作用                                                   |
-| ------------------------ | ------------------------------------------------------ |
-| `harness init [目录]`    | 生成最小工程（含锁文件）                               |
-| `harness run <任务>`     | 跑一次；打印结果、token、命中技能、traceId             |
-| `harness eval`           | 跑评测集；有失败退出码 1                               |
-| `harness report <A> <B>` | 两份报告比一次并过门；门不过退出码 1                   |
-| `harness trace <id>`     | 那次运行的 span 树（人查问题读链路）                   |
-| `harness diff <A> <B>`   | 两份 trace 差在哪一步（门只说得出哪条用例退步了）      |
-| `harness harvest <id>`   | 把一条 trace 回流成回归用例                            |
-| `harness evidence`       | 把报告导出成三层证据语料（经验 / 决策 / 对账）         |
-| `harness lock [--check]` | 重写资产锁 / 校验与锁一致                              |
-| `harness history`        | 每条用例的走向与抖动判定（`--check` 有抖动就退出码 1） |
-| `harness rsi`            | 跑一轮闭环（`--rounds` / `--dry-run` / `--max-cost`）  |
-| `harness rsi --watch`    | 常驻推进（单实例锁 + 心跳 + 节流，写权限只在进程里）   |
-| `harness rsi regress`    | 采纳之后那些用例还通过吗（`--revert` 才动手）          |
-| `harness patch <diff>`   | 在 worktree 沙箱里验证一个代码补丁（`--yes` 才落盘）   |
-| `harness serve`          | HTTP 面：POST /v1/run + 只读看板 `/` 与 `/api/*`       |
+| 命令                     | 作用                                                    |
+| ------------------------ | ------------------------------------------------------- |
+| `harness init [目录]`    | 生成最小工程（含锁文件）                                |
+| `harness run <任务>`     | 跑一次；打印结果、token、命中技能、traceId              |
+| `harness eval`           | 跑评测集；有失败退出码 1                                |
+| `harness report <A> <B>` | 两份报告比一次并过门；门不过退出码 1                    |
+| `harness trace <id>`     | 那次运行的 span 树（人查问题读链路）                    |
+| `harness diff <A> <B>`   | 两份 trace 差在哪一步（门只说得出哪条用例退步了）       |
+| `harness harvest <id>`   | 把一条 trace 回流成回归用例                             |
+| `harness evidence`       | 把报告导出成三层证据语料（经验 / 决策 / 对账）          |
+| `harness lock [--check]` | 重写资产锁 / 校验与锁一致                               |
+| `harness history`        | 每条用例的走向与抖动判定（`--check` 有抖动就退出码 1）  |
+| `harness rsi`            | 跑一轮闭环（`--rounds` / `--dry-run` / `--max-cost`）   |
+| `harness rsi --watch`    | 常驻推进（单实例锁 + 心跳 + 节流，写权限只在进程里）    |
+| `harness rsi doctor`     | 开跑前体检（锁 / 中间态 / 账本 / 预算），有阻塞项退出 1 |
+| `harness rsi regress`    | 采纳之后那些用例还通过吗（`--revert` 才动手）           |
+| `harness patch <diff>`   | 在 worktree 沙箱里验证一个代码补丁（`--yes` 才落盘）    |
+| `harness serve`          | HTTP 面：POST /v1/run + 只读看板 `/` 与 `/api/*`        |
 
 退出码是接口的一部分：`0` 正常、`1` 跑了但没达标、`2` 配置/资产/用法错。**拼错字段一律退出码 2** —— 这些错此前都表现为「配了但没生效」，症状却出现在成本和通过率上。
 

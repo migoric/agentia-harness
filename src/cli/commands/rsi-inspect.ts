@@ -10,6 +10,7 @@ import {
 } from '../../rsi/holdout-batch.js';
 import { readJournal, repairJournal } from '../../rsi/journal.js';
 import { readLedger, revertNote } from '../../rsi/ledger.js';
+import { withRsiLock } from '../../rsi/lock-guard.js';
 import { checkRegression } from '../../rsi/regress.js';
 import { boolFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
@@ -72,7 +73,9 @@ function progressOf(ctx: CliContext): HoldoutProgress | undefined {
 export function journal(ctx: CliContext): number {
   const asJson = boolFlag(ctx.flags, 'json');
   if (boolFlag(ctx.flags, 'repair')) {
-    const r = repairJournal(ctx.config);
+    // 截断是写历史文件：与正在跑的 worker 并发时，worker 可能刚追加了一条，
+    // 而我们基于旧文本算出的「保留到哪」会把它截掉。锁很便宜，别省。
+    const r = withRsiLock(ctx.config, 'rsi journal --repair', () => repairJournal(ctx.config));
     if (asJson) {
       json(r);
       return 0;

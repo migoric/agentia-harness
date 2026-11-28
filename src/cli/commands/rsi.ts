@@ -2,6 +2,7 @@ import { DEFAULT_PER_USD } from '../../config-balance.js';
 import { HarnessError } from '../../errors.js';
 import { lowBalanceWarning } from '../../rsi/billing.js';
 import { assertBudgetEnforceable } from '../../rsi/budget-guard.js';
+import { withRsiLock, withRsiLockAsync } from '../../rsi/lock-guard.js';
 import { LlmProposer } from '../../rsi/propose.js';
 import { type RoundStopReason, runRounds } from '../../rsi/rounds.js';
 import type { CycleReport, VerifyOutcome } from '../../rsi/types.js';
@@ -12,8 +13,10 @@ import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { maybeRemoteStage, type RemoteStage } from '../remote-stage.js';
 import { requireModel } from '../require-model.js';
+import { doctor } from './rsi-doctor.js';
 import { journal, ledger, regress, status } from './rsi-inspect.js';
 import { acceptFrom, proposeFrom, revert } from './rsi-manual.js';
+import { announceRecovery } from './rsi-recover.js';
 import { watchCommand } from './rsi-watch.js';
 import { tuningOf } from './run.js';
 
@@ -35,7 +38,10 @@ export async function rsiCommand(
         `不能与 "${sub}" 一起用`,
     );
   }
-  if (sub === 'revert') return revert(ctx, argsId);
+  if (sub === 'revert') return withRsiLock(ctx.config, 'rsi revert', () => revert(ctx, argsId));
+  // 体检不需要模型凭据：它回答的正是「为什么现在跑不起来」，而最常见的原因之一
+  // 就是凭据没配 —— 让它卡在同一道闸后面，等于把诊断工具锁在故障里
+  if (sub === 'doctor') return doctor(ctx);
   // 用法错误先于凭据错误。`--rounds 0` 与「没配 key」都是退出码 2，但先看到哪个
   // 决定人下一步去改什么：报凭据 ⇒ 他去配一个用完才发现参数还是错的 key。
   // 这三条与 `runRounds` 内部那份一致（那里是库 API 直调时的兜底），只是提前一次。
@@ -44,24 +50,53 @@ export async function rsiCommand(
   if (sub === 'status') return status(ctx);
   if (sub === 'ledger') return ledger(ctx);
   if (sub === 'regress') {
-    // 只读：不写候选，所以不需要 allowStaging 那道签字
-    return regress(ctx, undefined, await maybeRemoteStage(ctx, { needsStaging: false }));
+    // 只读：不写候选，所以不需要 allowStaging 那道签字。但 `--revert` 会写资产，
+    // 所以整条命令还是进锁 —— 与常驻 worker 并发回滚会把它的归因基础拆掉
+    return withRsiLockAsync(ctx.config, 'rsi regress', async () =>
+      regress(ctx, undefined, await maybeRemoteStage(ctx, { needsStaging: false })),
+    );
   }
   if (sub === 'journal') return journal(ctx);
   if (sub === 'propose') return proposeFrom(ctx);
-  if (sub === 'accept') return acceptFrom(ctx, undefined, await maybeRemoteStage(ctx));
-  // `--watch` 是「跑很多轮」的常驻形态，与 `--rounds` 互斥（后者是一次性跑完就退）
-  if (boolFlag(ctx.flags, 'watch')) return watchCommand(ctx, await maybeRemoteStage(ctx));
+  if (sub === 'accept') {
+    // 手写采纳同样改资产与 journal：与常驻 worker 并发时，两边都会以为自己是
+    // 「最近一条采纳」，回滚基准随即错位。锁在远端装配之前拿 —— 那一步也会写文件。
+    return withRsiLockAsync(ctx.config, 'rsi accept', async () =>
+      acceptFrom(ctx, undefined, await maybeRemoteStage(ctx)),
+    );
+  }
+  // `--watch` 自己拿锁（在装配远端之前），所以这条分支不再进 `withRsiLock`
+  if (boolFlag(ctx.flags, 'watch')) return watchCommand(ctx, () => maybeRemoteStage(ctx));
   if (sub !== undefined) {
     throw new HarnessError(
       'config.invalid',
-      `rsi 没有子命令 "${sub}"（可用: revert, status, ledger, regress, journal, propose, accept）`,
+      `rsi 没有子命令 "${sub}"（可用: doctor, revert, status, ledger, regress, journal, propose, accept）`,
     );
   }
-  return cycle(ctx, await maybeRemoteStage(ctx));
+  return cycle(ctx, () => maybeRemoteStage(ctx));
 }
 
-async function cycle(ctx: CliContext, remote?: RemoteStage): Promise<number> {
+/**
+ * 一次跑完的轮次 —— **先拿锁再装配远端**。
+ *
+ * 锁的位置有讲究：`maybeRemoteStage` 会做「回收上次崩溃留下的候选」「对齐远端」
+ * 两个写动作，把它们留在锁外，等于在最容易出事的窗口里让两个进程同时写。
+ * 而 `--watch` 不走这里（它自己持锁并刷心跳，见 `runWatch`）。
+ */
+async function cycle(
+  ctx: CliContext,
+  makeRemote: () => Promise<RemoteStage | undefined>,
+): Promise<number> {
+  return withRsiLockAsync(ctx.config, 'rsi', () => runCycleCommand(ctx, makeRemote));
+}
+
+async function runCycleCommand(
+  ctx: CliContext,
+  makeRemote: () => Promise<RemoteStage | undefined>,
+): Promise<number> {
+  // 锁在手上、还没开始花钱：先修上一次的中间态（资产已改但账本缺条目）
+  announceRecovery(ctx.config);
+  const remote = await makeRemote();
   const rounds = roundsFlag(ctx);
   const maxModes = numFlag(ctx.flags, 'max-modes');
   const maxVerify = numFlag(ctx.flags, 'max-verify');

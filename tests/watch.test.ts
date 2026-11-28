@@ -165,7 +165,7 @@ describe('rsi --watch', () => {
 
     await assert.rejects(
       () => runWatch({ config, maxRounds: 1, sleep: noSleep, runRound: async () => ok() }),
-      /已经有一个 worker 在推进轮次/,
+      /已经有一个 RSI 进程在改这个工作区/,
       '第二个实例必须被拒绝，而不是排队或并行',
     );
 
