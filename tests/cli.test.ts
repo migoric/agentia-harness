@@ -478,6 +478,19 @@ describe('harness rsi --remote', () => {
     // 凭据闸必须排在它后面：否则用户先被叫去配 key，配完才被告知「这个组合不支持」
     assert.doesNotMatch(r.out, /缺少模型凭据/);
   });
+
+  it('--watch 与子命令都不能绕过它（否则就是「静默无视 --remote」）', () => {
+    const dir = tmp();
+    run(['init'], dir);
+    for (const argv of [
+      ['rsi', '--watch', '--remote', 'http://127.0.0.1:18080'],
+      ['rsi', 'status', '--remote', 'http://127.0.0.1:18080'],
+    ]) {
+      const r = run(argv, dir);
+      assert.equal(r.code, 2, `${argv.join(' ')} 应被拒`);
+      assert.match(r.out, /不能用 --remote/, `${argv.join(' ')} 的报错要指明是结构性问题`);
+    }
+  });
 });
 
 describe('--remote 与本地凭据闸', () => {
@@ -497,5 +510,18 @@ describe('--remote 与本地凭据闸', () => {
       },
     );
     assert.doesNotMatch(r.out, /缺少模型凭据/);
+  });
+
+  it('--watch 与子命令都不能绕过它（否则就是「静默无视 --remote」）', () => {
+    const dir = tmp();
+    run(['init'], dir);
+    for (const argv of [
+      ['rsi', '--watch', '--remote', 'http://127.0.0.1:18080'],
+      ['rsi', 'status', '--remote', 'http://127.0.0.1:18080'],
+    ]) {
+      const r = run(argv, dir);
+      assert.equal(r.code, 2, `${argv.join(' ')} 应被拒`);
+      assert.match(r.out, /不能用 --remote/, `${argv.join(' ')} 的报错要指明是结构性问题`);
+    }
   });
 });
