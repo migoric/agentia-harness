@@ -99,7 +99,7 @@ const GLOBAL_FLAGS = ['root', 'agent', 'json'] as const;
 const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
   init: [],
   run: [],
-  eval: ['save', 'only', 'keep-traces', 'timeout', 'concurrency', 'retries'],
+  eval: ['save', 'only', 'keep-traces', 'timeout', 'concurrency', 'retries', 'remote', 'token-env'],
   report: ['max-token-growth', 'max-cost-growth', 'allow-case-set-change'],
   trace: ['tail'],
   diff: ['tail'],
@@ -157,7 +157,10 @@ async function main(): Promise<number> {
 
   // 端点与凭据只在**真会调模型**的命令上校验：`lock` / `trace` / `report` /
   // `rsi status|revert` 一个模型都不调，没 key 时拦它们只会让人以为工具坏了
-  if (needsModel(cmd, args._[0])) {
+  // `--remote` 的评测把活交给服务，本地一次模型都不调 —— 这时要求本地有 key
+  // 是纯误伤（远程那边有自己的凭据）。
+  const remoteEval = cmd === 'eval' && args.flags.remote !== undefined;
+  if (needsModel(cmd, args._[0]) && !remoteEval) {
     ensureEndpointEnv(ctx.config);
     assertEndpointKey(ctx.config);
   }

@@ -1,8 +1,9 @@
 import { InMemoryMemoryStore, type ModelClient } from '@migor/agentia';
+import type { CaseRunner } from '../run/case-runner.js';
 import { costOf } from '../run/cost.js';
 import { menuFacts } from '../run/menu-read.js';
 import { modelUsage } from '../run/model-read.js';
-import type { Runner, RunOutcome } from '../run/runner.js';
+import type { RunOutcome } from '../run/runner.js';
 import { mergeTraces } from '../run/trace-merge.js';
 import { combineAbort } from '../util/abort.js';
 import { check } from './check.js';
@@ -38,8 +39,15 @@ export interface OneShotOptions {
   readonly signal?: AbortSignal | undefined;
 }
 
+/** 没有 `runTurns` 的 runner（远程）遇到多轮用例时必须炸，不能只跑第一轮 */
+function missingRunTurns(): Promise<never> {
+  return Promise.reject(
+    new Error('这个 runner 不支持多轮用例（`<!-- turn -->` 分隔的），不能只跑第一轮'),
+  );
+}
+
 export async function runOne(
-  runner: Runner,
+  runner: CaseRunner,
   c: EvalCase,
   opts: OneShotOptions,
 ): Promise<CaseResult> {
@@ -76,7 +84,10 @@ export async function runOne(
       const work =
         c.followUps === undefined || c.followUps.length === 0
           ? runner.run(c.task, runOpts)
-          : runner.runTurns([c.task, ...c.followUps], runOpts);
+          : // 保留方法调用形态（不把 runTurns 摘出来再调，那样 this 会丢）
+            runner.runTurns === undefined
+            ? missingRunTurns()
+            : runner.runTurns([c.task, ...c.followUps], runOpts);
       // race 输掉之后 work 仍可能 reject（abort 常常正好让下游抛）—— 挂个空 catch，
       // 否则会变成 unhandled rejection 把进程带崩
       work.catch(() => undefined);

@@ -3,6 +3,7 @@ import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { effectiveModel } from '../run/app.js';
+import type { CaseRunner } from '../run/case-runner.js';
 import { createRunner } from '../run/runner.js';
 import { harnessVersion } from '../version.js';
 import { loadEvalCases } from './load.js';
@@ -65,6 +66,13 @@ export interface RunSuiteOptions extends SuiteTuning {
   readonly config: HarnessConfig;
   readonly assets: AssetSet;
   readonly agent?: string | undefined;
+  /**
+   * 换一个「跑用例」的实现（远程服务）。
+   *
+   * 给了它就跳过本地装配 —— 断言、报告、回归门全部复用，只有「谁来跑」变了。
+   * 这是跨服务评测**不长出第二套判据**的唯一做法。
+   */
+  readonly runner?: CaseRunner | undefined;
   /** 注入模型客户端（测试与重放用）；不传走真实模型 */
   readonly client?: ModelClient | undefined;
   /**
@@ -93,7 +101,17 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
     throw new HarnessError('eval.invalid', `--only 没有匹配到任何用例: ${opts.only?.join(', ')}`);
   }
 
-  const runner = createRunner(opts.config, opts.assets, opts.agent, opts.keepTraces === true);
+  // `as CaseRunner` 不是偷懒：本地 `Runner` 的 `model` 是非可选 `string`，而接口里
+  // 是可选的（远程可能报不出来）。exactOptionalPropertyTypes 下这个方向需要显式窄化，
+  // 反方向才是危险的那个（可选 → 必填），而这里恰好是安全方向。
+  const runner: CaseRunner =
+    opts.runner ??
+    (createRunner(
+      opts.config,
+      opts.assets,
+      opts.agent,
+      opts.keepTraces === true,
+    ) as unknown as CaseRunner);
   const limit = Math.max(1, opts.concurrency ?? 1);
   // 有界并发 + 保序直接用上游实现（agentia 公共面导出，边界处理更细）——
   // 结果顺序决定两次跑分的 diff 是不是噪声；本地曾有过一份逐行等价的实现，
@@ -106,7 +124,12 @@ export async function runSuite(opts: RunSuiteOptions): Promise<EvalReport> {
     {
       // 可比性靠这几个事实判断，缺一条就会把「换了模型 / 改了断言 / 升级了 harness」
       // 读成 agent 的进退步（见 gate.ts 的 case_set_changed 与 model 提示）
-      model: effectiveModel(opts.config, runner.agent),
+      // 远程 runner 报什么模型就写什么；它没报就是 unknown ——
+      // 绝不能填本地配置里的模型名（那会让「远程换了模型」在报告里看不出来）
+      model:
+        opts.runner !== undefined
+          ? (opts.runner.model ?? 'unknown')
+          : effectiveModel(opts.config, runner.agent as never),
       harnessVersion: harnessVersion(),
       finishedAt: new Date().toISOString(),
       caseFingerprint: caseSetFingerprint(cases),

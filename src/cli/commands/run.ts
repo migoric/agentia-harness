@@ -3,9 +3,11 @@ import { dirname, join as joinPath, relative as relativePath, resolve } from 'no
 import { type HarnessConfig, reportsDir } from '../../config.js';
 import { HarnessError } from '../../errors.js';
 import { runSuite, type SuiteTuning } from '../../evals/run.js';
+import type { CaseRunner } from '../../run/case-runner.js';
 import { unpricedHint } from '../../run/endpoint.js';
+import { createRemoteRunner } from '../../run/remote.js';
 import { type CostNote, createRunner } from '../../run/runner.js';
-import { boolFlag, csvFlag, numFlag } from '../args.js';
+import { boolFlag, csvFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { renderReport } from '../render.js';
@@ -80,12 +82,14 @@ function costSuffix(usd: number | undefined): string {
 export async function evalCommand(ctx: CliContext): Promise<number> {
   const tuning = tuningOf(ctx);
   const only = csvFlag(ctx.flags, 'only');
+  const remote = remoteRunnerOf(ctx);
   const report = await runSuite({
     config: ctx.config,
     assets: assetsOf(ctx),
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...(only !== undefined ? { only } : {}),
     ...(boolFlag(ctx.flags, 'keep-traces') ? { keepTraces: true } : {}),
+    ...(remote !== undefined ? { runner: remote } : {}),
     ...tuning,
   });
 
@@ -109,6 +113,36 @@ export async function evalCommand(ctx: CliContext): Promise<number> {
     say(renderReport(report));
   }
   return report.passed === report.total ? 0 : 1;
+}
+
+/**
+ * `--remote <url>`：把评测打到**服务**上（A2A），断言与报告完全复用本地那套。
+ *
+ * token 只从环境变量取（`--token-env`，缺省 `HARNESS_REMOTE_TOKEN`）：
+ * 令牌出现在命令行里会进 shell history 与进程列表，那是最常见的泄漏方式。
+ */
+function remoteRunnerOf(ctx: CliContext): CaseRunner | undefined {
+  const baseUrl = strFlag(ctx.flags, 'remote');
+  if (baseUrl === undefined) {
+    // 给了 token-env 却没给 remote 是「以为自己在测远程」的典型形态，必须响亮
+    if (strFlag(ctx.flags, 'token-env') !== undefined) {
+      throw new HarnessError('config.invalid', '--token-env 只与 --remote 一起用');
+    }
+    return undefined;
+  }
+  const envName = strFlag(ctx.flags, 'token-env') ?? 'HARNESS_REMOTE_TOKEN';
+  const token = process.env[envName];
+  if (token === undefined || token.trim() === '') {
+    throw new HarnessError(
+      'config.invalid',
+      `远程评测需要凭据：设置环境变量 ${envName}（服务端的 api key），或用 --token-env 指定别的变量名`,
+    );
+  }
+  return createRemoteRunner({
+    baseUrl,
+    token: token.trim(),
+    ...(ctx.agent !== undefined ? { agentId: ctx.agent } : {}),
+  });
 }
 
 export function tuningOf(ctx: CliContext): SuiteTuning {
