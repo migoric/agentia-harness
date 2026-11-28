@@ -40,6 +40,14 @@ export interface WorkspacePaths {
   readonly tracesPath: string;
 }
 
+/**
+ * 报告目录（`<workspace>/reports`）。写侧 `eval --save` 与读侧看板共用这一个函数 ——
+ * 两侧各拼一次路径的结果是「刚跑完评测，看板 0 份报告」，且两边都不报错。
+ */
+export function reportsDir(p: WorkspacePaths): string {
+  return join(p.workspaceDir, 'reports');
+}
+
 /** 「用哪个模型、花多少钱」—— 与路径无关的另一组旋钮 */
 export interface ModelSettings {
   readonly model: string | undefined;

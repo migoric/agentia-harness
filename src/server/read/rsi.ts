@@ -37,8 +37,18 @@ export function listCycles(p: WorkspacePaths): CycleList {
   const records = readCycles(p);
   const cycles = records
     .map((r) => toSummary(r))
-    // 新的在前：与报告列表同一个口径
-    .sort((a, b) => ((a.at ?? '' < (b.at ?? '')) ? 1 : -1));
+    // 新的在前：与报告列表同一个口径。
+    //
+    // 这里的比较器必须**整段**比较，不能写成 `a.at ?? '' < b.at` —— `??` 的优先级
+    // 低于 `<`，那样写出来的表达式实际是 `a.at ?? ('' < b.at)`，两边都有 `at` 时
+    // 返回值是那个字符串本身（真值），比较器退化成「一切大于一切」，顺序等于没排。
+    // 症状极其安静：概览的「最近一轮 RSI」一直显示最早的那一轮。
+    .sort((a, b) => {
+      const x = a.at ?? '';
+      const y = b.at ?? '';
+      if (x === y) return 0;
+      return x < y ? 1 : -1;
+    });
   return { dir: p.workspaceDir, cycles };
 }
 

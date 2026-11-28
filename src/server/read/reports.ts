@@ -1,7 +1,11 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { WorkspacePaths } from '../../config.js';
+import { reportsDir, type WorkspacePaths } from '../../config.js';
 import { reportSchemaVersion } from '../../evals/report.js';
+
+// 目录归属只有一处（`config.reportsDir`）：写侧 `eval --save` 与这里必须是同一个
+// 字符串，否则「跑完看不到报告」。这里重导出是为了让只读面内部的调用点照旧。
+export { reportsDir };
 
 /**
  * 读评测报告（`.workspace/reports/*.json`）。
@@ -20,10 +24,6 @@ import { reportSchemaVersion } from '../../evals/report.js';
  *    这些目录规模是几十份级别，每次全读的代价可以忽略。
  * 3. **只读**。整条调用链上没有一次 write/mkdir（`existsSync` 不算）。
  */
-export function reportsDir(p: WorkspacePaths): string {
-  return join(p.workspaceDir, 'reports');
-}
-
 export interface ReportSummary {
   readonly name: string;
   readonly mtime: string;

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { discoverAssets } from '../src/assets/discover.ts';
 import { loadConfig } from '../src/config.ts';
+import { listCycles } from '../src/server/read/rsi.ts';
 import { ROUTES } from '../src/server/routes.ts';
 import { startServer } from '../src/server/serve.ts';
 
@@ -298,5 +299,29 @@ describe('只读面', () => {
       assert.equal(get.status, 405);
       assert.equal(get.headers.get('allow'), 'POST');
     });
+  });
+});
+
+describe('轮次排序 —— 最近的必须排在最前', () => {
+  it('两轮按时间倒序（比较器里 `??` 与 `<` 的优先级曾让它等于没排序）', () => {
+    const root = project();
+    writeFileSync(
+      join(root, '.workspace', 'rsi', 'cycles', '2026-11-28T01-00-00-000Z.json'),
+      JSON.stringify({
+        schema: 3,
+        cycleId: '2026-11-28T01-00-00-000Z',
+        at: '2026-11-28T01:00:00.000Z',
+        dryRun: false,
+        verified: [],
+        accepted: [],
+      }),
+      'utf8',
+    );
+    const { cycles } = listCycles(loadConfig(root));
+    assert.deepEqual(
+      cycles.map((c) => c.at),
+      ['2026-11-28T01:00:00.000Z', '2026-11-28T00:00:00.000Z'],
+      '概览的「最近一轮 RSI」直接读 cycles[0]，排错就等于显示最旧的那一轮',
+    );
   });
 });

@@ -153,6 +153,9 @@ export async function runOne(
       // 期望路由随结果落盘（见 `CaseResult.expectRoute`）：基线报告可能是上一版用例写的，
       // 那时 `route` 已不在手里，只有报告自己能把它带回来
       ...(c.route === undefined ? {} : { expectRoute: c.route }),
+      // 崩之前跑完的那几轮已经承接过了；拿最后一轮的承接者当这条用例的实际路由。
+      // 一轮都没跑完（首轮就抛）时恒缺席 —— 那时确实不知道派给了谁
+      ...(spent === undefined ? {} : { routedTo: partial[partial.length - 1]?.agent }),
     };
   }
 
@@ -175,6 +178,10 @@ export async function runOne(
     skills: out.skills,
     subagents: out.subagents,
     ...(c.route === undefined ? {} : { expectRoute: c.route }),
+    // 实际路由：只在 runner 明确报出承接者时才写（见 `RunOutcome.agent`）。
+    // 崩在半路的那条也写 —— 路由发生在第一轮之前，崩了不等于没派给人；
+    // 漏掉它会让「派错了人，然后崩了」在报告里长成「没派」，两种病治法不同。
+    ...(out.agent === undefined ? {} : { routedTo: out.agent }),
     // 条件展开：外部构造的 outcome 可能没这两个字段（见 `RunOutcome.models`），
     // 写 `[]` 会让「没记」与「一个回合都没跑」在报告里长成一样
     ...(out.models === undefined ? {} : { models: out.models, fallbackUsed: out.fallbacks ?? 0 }),

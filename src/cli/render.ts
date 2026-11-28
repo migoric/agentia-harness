@@ -97,6 +97,17 @@ export function renderReport(report: EvalReport): string {
     `\n${report.passed}/${report.total} 通过（${(report.passRate * 100).toFixed(1)}%）· ` +
       `${report.tokens} token${report.costKnown ? fmtCost(report.costUsd) : ''} · 资产 ${report.assetFingerprint}`,
   );
+  /*
+   * 路由单独一行，不与通过率挤在一起：两者读的是不同的失败模式。
+   * 「全部通过、但所有请求都派给了同一个 agent」在通过率上看不出任何异常，
+   * 而那正是意图层塌缩的形状（ADR 判据 27）。
+   */
+  if (report.routeAccuracy !== undefined) {
+    lines.push(
+      `路由：${(report.routeAccuracy * 100).toFixed(1)}%` +
+        `（${report.routeCases ?? 0} 条用例声明了 route）`,
+    );
+  }
   if (!report.costKnown) {
     // 条件刻意**不是** `costUsd > 0`：模型不在价格表里时总成本恰好是 0，而那正是
     // 「这轮根本没有读数」的常态 —— 按 >0 判会让最该看到这句话的人看不到它。

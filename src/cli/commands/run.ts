@@ -1,11 +1,11 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import type { HarnessConfig } from '../../config.js';
+import { dirname, join as joinPath, relative as relativePath, resolve } from 'node:path';
+import { type HarnessConfig, reportsDir } from '../../config.js';
 import { HarnessError } from '../../errors.js';
 import { runSuite, type SuiteTuning } from '../../evals/run.js';
 import { unpricedHint } from '../../run/endpoint.js';
 import { type CostNote, createRunner } from '../../run/runner.js';
-import { boolFlag, csvFlag, numFlag, strFlag } from '../args.js';
+import { boolFlag, csvFlag, numFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
 import { renderReport } from '../render.js';
@@ -89,10 +89,18 @@ export async function evalCommand(ctx: CliContext): Promise<number> {
     ...tuning,
   });
 
-  const savePath = strFlag(ctx.flags, 'save');
-  if (savePath !== undefined) {
-    writeJson(resolve(ctx.root, savePath), report);
-    say(`报告已写入 ${savePath}`);
+  // `--save` 不带值 ⇒ 写约定目录（看板读的那一个）；带值 ⇒ 用户说了算。
+  //
+  // 这是这段话存在的理由：约定目录若只写在看板里、而 CLI 要求人肉给出完整路径，
+  // 「刚跑完评测，看板里 0 份报告」就是默认体验，且两侧都不报错。
+  const saveArg = ctx.flags.save;
+  if (saveArg !== undefined) {
+    const target =
+      saveArg === true
+        ? joinPath(reportsDir(ctx.config), reportFileName())
+        : resolve(ctx.root, saveArg);
+    writeJson(target, report);
+    say(`报告已写入 ${relativePath(ctx.root, target)}`);
   }
 
   if (boolFlag(ctx.flags, 'json')) {
@@ -117,6 +125,17 @@ export function tuningOf(ctx: CliContext): SuiteTuning {
 function positive(n: number, flag: string): number {
   if (n <= 0) throw new HarnessError('config.invalid', `${flag} 必须是正数（收到 ${n}）`);
   return n;
+}
+
+/**
+ * 默认报告文件名：UTC 时间戳，冒号与点换成 `-`。
+ *
+ * 不用 `:` 是因为它在 Windows 上非法、在 URL 里要转义；不用 `T` 分隔日期与时间
+ * 是因为看板把那串当文件名显示，人第一眼要能读出「这是哪天」。
+ * 带毫秒：同一秒里连跑两次（脚本里很常见）不该互相覆盖。
+ */
+function reportFileName(): string {
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
 }
 
 export function writeJson(path: string, value: unknown): void {

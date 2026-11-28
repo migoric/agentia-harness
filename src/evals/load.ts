@@ -9,6 +9,7 @@ const CASE_KEYS: readonly string[] = [
   'name',
   'split',
   'phase',
+  'route',
   'memory_keys',
   'expect_contains',
   'expect_not_contains',
@@ -139,6 +140,7 @@ function parseCase(path: string): EvalCase {
   const skills = list(fm, 'expect_skills');
   const matches = scalar(fm, 'expect_matches', path);
   const ok = scalar(fm, 'expect_ok', path);
+  const route = routeOf(scalar(fm, 'route', path), path);
   const maxTokens = scalar(fm, 'expect_max_tokens', path);
   const maxIterations = scalar(fm, 'expect_max_iterations', path);
 
@@ -196,9 +198,33 @@ function parseCase(path: string): EvalCase {
     expect,
     ...(split !== undefined ? { split } : {}),
     ...(phase !== undefined ? { phase } : {}),
+    ...(route !== undefined ? { route } : {}),
     ...(memoryKeys.length > 0 ? { memoryKeys } : {}),
     path,
   };
+}
+
+/**
+ * 期望派遣目标（frontmatter `route`）。
+ *
+ * 只做两件事：去掉首尾空白、拒绝多值。**刻意不校验「这个 agent 存不存在」** ——
+ * 加载期只拿到用例，资产集合是另一条装配线（`discoverAssets`），在这里再读一遍
+ * 磁盘会让「用例集」与「资产集」互相绑死，而 RSI 恰恰要在资产变化后重跑同一批
+ * 用例。写错名字的表现是 `routeAccuracy` 掉到 0 并在报告里给出「期望 X 实到 Y」，
+ * 那比 eval.invalid 更有信息量：它说明**路由真的错了**，而不是文件名写错。
+ */
+function routeOf(raw: string | undefined, path: string): string | undefined {
+  if (raw === undefined) return undefined;
+  const v = raw.trim();
+  // 逗号/空白分隔的多值没有确定语义：算 0.5 个命中还是算失败？两种都能自圆其说，
+  // 所以直接拒绝，逼调用方拆成两条用例（一条一个期望）
+  if (v === '' || /[\s,]/.test(v)) {
+    throw new HarnessError(
+      'eval.invalid',
+      `${path}: route 只能是一个 agent 名（收到 "${raw}"）—— 要测两条路由请拆成两条用例`,
+    );
+  }
+  return v;
 }
 
 /**

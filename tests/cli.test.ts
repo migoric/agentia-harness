@@ -1,12 +1,22 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { discoverAssets } from '../src/assets/discover.ts';
 import { loadConfig } from '../src/config.ts';
+import { listReports } from '../src/server/read/reports.ts';
 import { runCli as run } from './support/cli.ts';
+import { startFakeEndpoint } from './support/fake-endpoint.ts';
 
 /**
  * CLI 端到端：用真实子进程跑，断言**退出码**。
@@ -77,6 +87,50 @@ describe('harness eval', () => {
     assert.equal(r.code, 2);
     assert.match(r.out, /没有用例/);
     assert.doesNotMatch(r.out, /at Object\.<anonymous>/);
+  });
+
+  it('--save 不带值 ⇒ 写进看板读的那个目录（两侧不再靠人肉对齐）', async () => {
+    const dir = tmp();
+    run(['init'], dir);
+    const fake = await startFakeEndpoint();
+    try {
+      const r = run(['eval', '--save'], dir, {
+        ANTHROPIC_BASE_URL: fake.url,
+        ANTHROPIC_API_KEY: 'fake',
+      });
+      assert.equal(r.code, 0, r.out);
+      assert.match(r.out, /报告已写入 \.workspace\/reports\//, r.out);
+
+      const files = readdirSync(join(dir, '.workspace', 'reports')).filter((f) =>
+        f.endsWith('.json'),
+      );
+      assert.equal(files.length, 1, `目录里应只有一份报告，实际 ${files.join(',')}`);
+
+      // 真正的判据是**读侧也看得见**：写侧自说自话写到别处，症状正是「看板 0 份报告」
+      const listed = listReports(loadConfig(dir));
+      assert.equal(listed.reports.length, 1, JSON.stringify(listed));
+      assert.equal(listed.invalid.length, 0);
+      assert.ok((listed.reports[0]?.total ?? 0) > 0);
+    } finally {
+      fake.stop();
+    }
+  });
+
+  it('--save 带值 ⇒ 用户给的路径说了算（默认目录不掺和）', async () => {
+    const dir = tmp();
+    run(['init'], dir);
+    const fake = await startFakeEndpoint();
+    try {
+      const r = run(['eval', '--save', 'out/mine.json'], dir, {
+        ANTHROPIC_BASE_URL: fake.url,
+        ANTHROPIC_API_KEY: 'fake',
+      });
+      assert.equal(r.code, 0, r.out);
+      assert.ok(existsSync(join(dir, 'out/mine.json')), r.out);
+      assert.equal(existsSync(join(dir, '.workspace', 'reports')), false, '不该顺手写两份');
+    } finally {
+      fake.stop();
+    }
   });
 });
 

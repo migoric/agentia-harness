@@ -53,6 +53,16 @@ export interface RunOutcome {
   /** 本次实际委派过的子 agent（去重） */
   readonly subagents: readonly string[];
   /**
+   * 本次**实际**承接任务的 agent 名（`assets.agents[].name`，不带版本）。
+   *
+   * 为什么用名字而不是 `name@version`：`routeAccuracy` 判的是「派对人没有」，
+   * 而提示词改一版不该把一条派对了的用例算成派错。版本变化由资产指纹负责表达，
+   * 两件事混在一个字符串里会让路由准确率跟着版本抖动 —— 那种抖动无法归因。
+   *
+   * 可选的理由同 `models`：外部构造的 outcome 没跑过装配，写死一个名字等于伪造读数。
+   */
+  readonly agent?: string | undefined;
+  /**
    * 本次**实际尝试过**的模型（去重、按首次出现序）。
    *
    * 与 `Runner.model`（生效模型）不是一件事：那个是「配了哪个」，这个是「真用了哪些」。
@@ -168,6 +178,7 @@ export class Runner {
           : { type: result.error.type, message: result.error.message },
       skills: [...new Set(hits.skills)],
       subagents: [...new Set(hits.subagents)],
+      agent: this.agent.name,
       models: mu.models,
       fallbacks: mu.fallbacks,
     };
@@ -244,6 +255,7 @@ export class Runner {
       error: thrown ?? parts.find((p) => p.error !== undefined)?.error,
       skills: [...new Set(hits.skills)],
       subagents: [...new Set(hits.subagents)],
+      agent: this.agent.name,
       models: mu.models,
       fallbacks: mu.fallbacks,
       turns: turns.length,

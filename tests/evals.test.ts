@@ -921,3 +921,71 @@ describe('新断言的加载期校验', () => {
     assert.deepEqual(loaded[0]?.expect.toolArgs, [{ tool: 'search', substring: 'foo.c' }]);
   });
 });
+
+describe('route —— 期望派遣写进用例，实际承接写进报告', () => {
+  it('frontmatter 的 route 读进用例；不写就是真的没有', () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'evals/e2.md'),
+      '---\nname: e2\nroute: reviewer\nexpect_contains: 结论\n---\n看看这段\n',
+      'utf8',
+    );
+    const cases = loadEvalCases(join(root, 'evals'));
+    assert.equal(
+      cases.find((c) => c.name === 'e2')?.route,
+      'reviewer',
+      'route 在类型里存在却读不进来，是「数据面缺席」而不是「没测」',
+    );
+    // 缺席与「派给默认 agent」是两件事：前者让这条用例不进 routeAccuracy 的分母
+    assert.equal(cases.find((c) => c.name === 'e1')?.route, undefined);
+  });
+
+  it('route 写多值直接拒绝 —— 「算半分」和「算失败」都能自圆其说，所以都不选', () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'evals/bad.md'),
+      '---\nname: bad\nroute: a, b\nexpect_contains: x\n---\nhi\n',
+      'utf8',
+    );
+    assert.throws(() => loadEvalCases(join(root, 'evals')), /route 只能是一个 agent 名/);
+  });
+
+  it('runSuite 把实际承接者写进 routedTo，并算出 routeAccuracy', async () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'evals/e1.md'),
+      '---\nname: e1\nroute: main\nexpect_contains: 结论\n---\n压一下这段文字\n',
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const r = await runSuite({
+      config,
+      assets,
+      client: scriptedClient([endTurn('结论：合格')]),
+    });
+    assert.equal(r.cases[0]?.routedTo, 'main');
+    assert.equal(r.routeAccuracy, 1);
+    assert.equal(r.routeCases, 1);
+  });
+
+  it('派错人时通过率照样 100%，但 routeAccuracy 掉到 0 —— 这正是分开两个读数的理由', async () => {
+    const root = project();
+    writeFileSync(
+      join(root, 'evals/e1.md'),
+      '---\nname: e1\nroute: reviewer\nexpect_contains: 结论\n---\n压一下这段文字\n',
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const r = await runSuite({
+      config,
+      assets,
+      client: scriptedClient([endTurn('结论：合格')]),
+    });
+    assert.equal(r.passRate, 1, '回答是对的');
+    assert.equal(r.cases[0]?.routedTo, 'main', '但接活的是 main');
+    assert.equal(r.routeAccuracy, 0, '路由塌缩只有这个读数看得见');
+    assert.equal(r.routeCases, 1);
+  });
+});
