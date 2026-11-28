@@ -1,0 +1,54 @@
+name: nightly
+
+# 真模型冒烟：三条最便宜的用例，把「外部世界还在不在」变成每天一次的事实。
+#
+# 为什么不进 ci.yml：它要花钱（一次约 $0.006）、要真 key、偶尔会因为对端网络失败而红。
+# 这三件事都不该挡住一次 PR 合并，但它们**恰恰**是「上线才发现」的那类病
+# （端点改 usage 字段、价格表过期、模型行为漂移）。所以合成一条独立的、可以红的流水线。
+#
+# 跳过是「出声的跳过」：secret 没配时脚本打 `::warning::` 并退出 0。理由是
+# 一条永远红的 nightly 没人看，而一条永远绿、却从没真跑过的 nightly 更危险 ——
+# 那个 warning 注解就是用来把后者变成前者的。
+
+on:
+  schedule:
+    # UTC 18:00 = 北京 02:00。挑凌晨是为了拿到 DeepSeek 的 off-peak 价，
+    # 让成本上限不必为 peak 的 2 倍留太多余量
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  real-model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: 真模型三用例（成本上限 $0.05）
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: node scripts/nightly.mjs --allow-missing-key
+
+      # 失败时报告是唯一能说明「哪条挂了、花了多少」的东西 —— 一定留下来
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-report
+          path: .tmp/nightly/
+          if-no-files-found: ignore
+          retention-days: 14
