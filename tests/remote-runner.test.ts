@@ -173,13 +173,77 @@ test('意图层：派单三态才是成败依据（done 才算通过，needs_inp
   assert.match(failed.error?.message ?? '', /r/, '失败原因要带出来');
 });
 
-test('多轮直接拒绝 —— 静默只跑第一轮是最危险的那种「绿」', async () => {
+test('多轮共用同一个 contextId（换 id 就是换会话，历史接不上）', async () => {
+  const ctxIds: string[] = [];
+  let call = 0;
   const runner = createRemoteRunner({
     baseUrl: 'http://svc',
     token: 'k',
-    fetchImpl: fakeFetch({ result: { status: { state: 'completed' } } }),
+    fetchImpl: (async (_url: string, opts: RequestInit) => {
+      const body = JSON.parse(String(opts.body)) as {
+        params: { message: { contextId: string } };
+      };
+      ctxIds.push(body.params.message.contextId);
+      call += 1;
+      const text = call === 1 ? '第一轮' : '第二轮';
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            result: {
+              kind: 'message',
+              parts: [{ text }],
+              metadata: {
+                dispatch: { status: 'done', agentId: 'report' },
+                usage: { totalTokens: 10 },
+              },
+            },
+          }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch,
   });
-  await assert.rejects(() => runner.runTurns?.(['a', 'b']) ?? Promise.resolve(), /暂不支持多轮/);
+  const runTurns = runner.runTurns?.bind(runner);
+  assert.ok(runTurns !== undefined, '远程 runner 必须支持多轮');
+  const out = await runTurns(['先看 A', '那 B 呢']);
+  assert.equal(ctxIds.length, 2);
+  assert.equal(ctxIds[0], ctxIds[1], '两轮必须是同一个 contextId');
+  assert.equal(out.text, '第二轮', '文本取最后一轮');
+  assert.equal(out.tokens, 20, 'tokens 是两轮之和');
+  assert.equal(out.turns, 2);
+  assert.equal(out.ok, true);
+  assert.equal(out.agent, 'report');
+});
+
+test('多轮：中间轮非正常收尾就中止，后续轮不执行', async () => {
+  let call = 0;
+  const runner = createRemoteRunner({
+    baseUrl: 'http://svc',
+    token: 'k',
+    fetchImpl: (async () => {
+      call += 1;
+      const state = call === 1 ? 'done' : 'failed';
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            result: {
+              kind: 'message',
+              parts: [{ text: `r${call}` }],
+              metadata: { dispatch: { status: state }, usage: { totalTokens: 7 } },
+            },
+          }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch,
+  });
+  const runTurns = runner.runTurns?.bind(runner);
+  assert.ok(runTurns !== undefined);
+  const out = await runTurns(['一', '二', '三']);
+  assert.equal(call, 2, '第二轮失败后不该发第三轮');
+  assert.equal(out.turns, 3, '计划轮数仍是 3');
+  assert.equal(out.failedTurn, 2, '失败轮次要指出是第几轮');
+  assert.equal(out.ok, false);
 });
 
 test('非 completed 一律按非正常收尾（input-required 是挂起，不是通过）', async () => {

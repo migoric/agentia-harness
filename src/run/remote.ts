@@ -1,7 +1,9 @@
 import type { Trace } from '@migor/agentia';
 import { HarnessError } from '../errors.js';
 import type { CaseRunner } from './case-runner.js';
-import type { CostNote } from './runner.js';
+import { costOf } from './cost.js';
+import type { CostNote, RunOutcome } from './runner.js';
+import { mergeTraces } from './trace-merge.js';
 
 /**
  * 把 **远程服务** 当一个 runner 用：`harness eval --remote <url>` 的实现。
@@ -82,6 +84,11 @@ const EMPTY_TRACE: Trace = {
   totalUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
 };
 
+/** 每轮一个派生 id：单轮用它当 contextId，多轮共用一个（见 runTurns 的注释） */
+function newContextId(): string {
+  return `eval-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function textOf(r: A2AResult): string {
   let text = '';
   for (const p of r.parts ?? []) text += p.text ?? '';
@@ -149,12 +156,90 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
     get model() {
       return seen.model;
     },
-    async run(task, runOpts) {
+    run(task, runOpts) {
+      return sendOnce(task, newContextId(), runOpts?.signal);
+    },
+    /**
+     * 多轮：**同一个 contextId** 连续发。
+     *
+     * 这是 A2A 的会话语义 —— 换 contextId 就是换会话，历史接不上；而多轮用例测的
+     * 恰恰是「它记不记得上一轮」。中途某轮非正常收尾就中止：后面几轮会在一个真实
+     * 会话里不会出现的上下文上作答，那种结果既不能当失败证据（病根在前面），
+     * 也不能当通过（它测的不是用户会遇到的事）。
+     */
+    async runTurns(turns, runOpts) {
+      if (turns.length === 0) {
+        throw new HarnessError('config.invalid', 'runTurns 至少需要一轮');
+      }
+      const blank = turns.findIndex((t) => t.trim() === '');
+      if (blank !== -1) {
+        throw new HarnessError('config.invalid', `第 ${blank + 1} 轮是空的`);
+      }
+      const contextId = newContextId();
+      const parts: RunOutcome[] = [];
+      let threwAt: number | undefined;
+      let thrown: RunOutcome['error'];
+      for (const [i, task] of turns.entries()) {
+        let out: RunOutcome;
+        try {
+          out = await sendOnce(task, contextId, runOpts?.signal);
+        } catch (e) {
+          threwAt = i;
+          thrown = { type: 'remote', message: e instanceof Error ? e.message : String(e) };
+          break;
+        }
+        parts.push(out);
+        if (!out.ok && i < turns.length - 1) break;
+      }
+
+      const failedAt = parts.findIndex((p) => !p.ok);
+      const failedIndex = failedAt === -1 ? (threwAt ?? -1) : failedAt;
+      // 一轮都没跑成时给一条 error 状态的空 trace：下游断言与成本口径照常工作，
+      // 而「status: error」让「什么都没跑」与「跑完了但没内容」在报告里能分开
+      const merged =
+        parts.length === 0
+          ? ({ ...EMPTY_TRACE, status: 'error' } as Trace)
+          : mergeTraces(parts.map((p) => p.trace));
+      // 用每轮自报的 tokens 累加，而不是从合并后的 trace 重算：
+      // 对方只给 `totalTokens`（不给四项拆分）时，trace 的四项是 0，重算会把钱算没
+      const tokens = parts.reduce((sum, p) => sum + p.tokens, 0);
+      const cost = costOf(merged);
+      const last = parts[parts.length - 1];
+      return {
+        text: last?.text ?? '',
+        ok: failedIndex === -1,
+        stopReason:
+          parts[failedIndex]?.stopReason ??
+          (failedIndex === -1 ? (last?.stopReason ?? 'end_turn') : 'error'),
+        iterations: parts.reduce((sum, p) => sum + p.iterations, 0),
+        trace: merged,
+        tokens,
+        costUsd: cost,
+        costNote: parts.length === 0 ? 'unreported' : (last?.costNote ?? undefined),
+        durationMs: parts.reduce((sum, p) => sum + p.durationMs, 0),
+        error: thrown ?? parts.find((p) => p.error !== undefined)?.error,
+        skills: [],
+        subagents: [],
+        ...(seen.model !== undefined ? { model: seen.model } : {}),
+        ...(last?.agent !== undefined ? { agent: last.agent } : {}),
+        turns: turns.length,
+        ...(failedIndex === -1 ? {} : { failedTurn: failedIndex + 1 }),
+      };
+    },
+  };
+
+  /** 发一轮。多轮靠 `contextId` 串成一段会话，单轮每次新起一个 */
+  async function sendOnce(
+    task: string,
+    contextId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<RunOutcome> {
+    {
       const started = Date.now();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       const onAbort = (): void => controller.abort();
-      runOpts?.signal?.addEventListener('abort', onAbort, { once: true });
+      signal?.addEventListener('abort', onAbort, { once: true });
       let body: { result?: A2AResult; error?: { code?: number; message?: string } };
       try {
         const res = await fetchImpl(url, {
@@ -170,7 +255,7 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
               message: {
                 role: 'user',
                 parts: [{ kind: 'text', text: task }],
-                contextId: `eval-${started.toString(36)}`,
+                contextId,
               },
             },
           }),
@@ -186,7 +271,7 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
         body = JSON.parse(text) as typeof body;
       } finally {
         clearTimeout(timer);
-        runOpts?.signal?.removeEventListener('abort', onAbort);
+        signal?.removeEventListener('abort', onAbort);
       }
 
       if (body.error !== undefined) {
@@ -250,17 +335,8 @@ export function createRemoteRunner(opts: RemoteRunnerOptions): CaseRunner {
         skills: [],
         subagents: [],
       };
-    },
-    runTurns() {
-      return Promise.reject(
-        new HarnessError(
-          'config.invalid',
-          '远程评测暂不支持多轮用例（`<!-- turn -->` 分隔的那些）—— ' +
-            '静默按单轮跑会让它只测了第一轮，而报告里看不出来。请先用 --only 排除它们，' +
-            '或改用本地评测跑多轮。',
-        ),
-      );
-    },
-  };
+    }
+  }
+
   return runner;
 }
