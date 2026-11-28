@@ -8,6 +8,7 @@ import {
 import type { AgentAsset, AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
+import { buildPolicyFields } from './policy-fields.js';
 import { buildTools } from './tools.js';
 
 /**
@@ -52,10 +53,14 @@ export function buildApp(opts: BuildAppOptions): BuiltApp {
   const maxIterations = opts.config.maxIterations ?? agent.maxIterations;
   const maxCostUsd = opts.config.maxCostUsd ?? agent.maxCostUsd;
   const pricing = opts.config.pricing;
+  // 声明式策略字段转成 agentia 策略对象；没写就返回空，AgentApp 用自己的缺省。
+  const policy = buildPolicyFields(agent.policyFields, agent.path);
 
   const app = new AgentApp({
     name: opts.config.appName,
     system,
+    ...(policy.contextPolicy !== undefined ? { contextPolicy: policy.contextPolicy } : {}),
+    ...(policy.retry !== undefined ? { retry: policy.retry } : {}),
     // 生效模型必须一路传到技能 / 子 agent 的子循环：上游的 capability loop 只继承
     // client（端点），刻意不继承 model —— 不在这里补上就会拿 opus 的名字打 DeepSeek，
     // 成本也按 opus 单价记（见 tools.ts 的 SubloopDefaults）

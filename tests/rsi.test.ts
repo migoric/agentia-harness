@@ -16,9 +16,9 @@ import { readLock } from '../src/assets/lockfile.ts';
 import { loadConfig } from '../src/config.ts';
 import { runSuite } from '../src/evals/run.ts';
 import { acceptManually, acceptProposal, readJournal, revertLast } from '../src/rsi/accept.ts';
-import { attribute, classify } from '../src/rsi/attribute.ts';
+import { attribute, classify, collectFailures } from '../src/rsi/attribute.ts';
 import { runCycle } from '../src/rsi/loop.ts';
-import { LlmProposer } from '../src/rsi/propose.ts';
+import { LlmProposer, settingFacts } from '../src/rsi/propose.ts';
 import { lastAccepted } from '../src/rsi/regress.ts';
 import type { FailureMode, FailureSample, Proposal } from '../src/rsi/types.ts';
 import { applyPatch, renderFile, verifyProposal } from '../src/rsi/verify.ts';
@@ -61,6 +61,9 @@ function sample(
   c = 'e1',
   skills: string[] = [],
   subagents: string[] = [],
+  behavior: Partial<
+    Pick<FailureSample, 'peakContextTokens' | 'compactions' | 'toolCalls' | 'iterations'>
+  > = {},
 ): FailureSample {
   return {
     case: c,
@@ -71,6 +74,7 @@ function sample(
     excerpt: '输出',
     skills,
     subagents,
+    ...behavior,
   };
 }
 
@@ -110,6 +114,89 @@ describe('归因', () => {
     assert.equal(modes.length, 1);
     // 空样本不产出模式
     assert.deepEqual(attribute([]), []);
+  });
+
+  it('四维归因：反复压缩 / 峰值上下文远超输出 → context_overflow', () => {
+    // 修法不同：这类要改上下文策略，不是继续加「结论要写全」的措辞
+    assert.equal(
+      classify(sample(['正文缺少 "结论"'], 'end_turn', 'e1', [], [], { compactions: 3 })).kind,
+      'context_overflow',
+    );
+    assert.equal(
+      classify(sample(['正文缺少 "结论"'], 'end_turn', 'e1', [], [], { peakContextTokens: 5000 }))
+        .kind,
+      'context_overflow',
+      '峰值 5000 > 8×tokens(10) 且输出小 → 上下文撑爆',
+    );
+  });
+
+  it('四维归因不抢硬分类：工具错 / 绕圈 / 超预算即使带压缩读数也不改 kind', () => {
+    assert.equal(
+      classify(sample(['工具序列不符：a→b'], 'end_turn', 'e1', [], [], { compactions: 5 })).kind,
+      'tool_misuse',
+    );
+    assert.equal(
+      classify(sample([], 'max_iterations', 'e1', [], [], { compactions: 5 })).kind,
+      'loop',
+    );
+    assert.equal(
+      classify(sample(['token 超预算：3>1'], 'end_turn', 'e1', [], [], { compactions: 5 })).kind,
+      'budget',
+    );
+  });
+
+  it('四维缺席（老报告 / 无 trace）不误判为上下文撑爆', () => {
+    // compactions / peakContextTokens 都缺席时，即使输出很小也保持 wrong_answer
+    assert.equal(classify(sample(['正文缺少 "结论"'])).kind, 'wrong_answer');
+  });
+
+  it('签名带行为档位：同样答错但绕圈/压缩不同 → 分成两个模式', () => {
+    const fast = classify(sample(['正文缺少 "结论"']));
+    const spiraling = classify(
+      sample(['正文缺少 "结论"'], 'end_turn', 'e1', [], [], {
+        iterations: 20,
+        compactions: 2,
+        toolCalls: 15,
+      }),
+    );
+    assert.equal(fast.kind, 'wrong_answer');
+    assert.equal(spiraling.kind, 'context_overflow', 'compactions=2 触发升级');
+    assert.notEqual(fast.signature, spiraling.signature, '行为档位进了签名');
+    assert.match(spiraling.signature, /iter/);
+    assert.match(spiraling.signature, /compact/);
+    assert.match(spiraling.signature, /tools/);
+    // 缺席维度不进签名：两条都没有读数的同形失败仍聚成一个模式
+    const a = classify(sample(['正文缺少 "结论"']));
+    const b = classify(sample(['正文缺少 "P1"']));
+    assert.equal(a.signature, b.signature);
+  });
+
+  it('collectFailures 透传四维读数到 FailureSample', () => {
+    const report = {
+      cases: [
+        {
+          name: 'e1',
+          task: 't',
+          passed: false,
+          failures: ['正文缺少 "结论"'],
+          tokens: 10,
+          iterations: 12,
+          durationMs: 0,
+          stopReason: 'end_turn',
+          excerpt: '',
+          skills: [],
+          subagents: [],
+          peakContextTokens: 4321,
+          compactions: 3,
+          toolCalls: 9,
+        },
+      ],
+    } as unknown as Parameters<typeof collectFailures>[0];
+    const [f] = collectFailures(report);
+    assert.equal(f?.peakContextTokens, 4321);
+    assert.equal(f?.compactions, 3);
+    assert.equal(f?.toolCalls, 9);
+    assert.equal(f?.iterations, 12);
   });
 });
 
@@ -720,6 +807,79 @@ describe('LlmProposer —— 按数据选目标、坏提案不拖垮整轮', () 
     });
 
     assert.equal(calls, 1, `取消后不该继续提第二个模式，实际调用 ${calls} 次`);
+  });
+
+  it('策略字段当前值各取各的来源，不把 maxCostUsd 当成上下文预算', () => {
+    const root = mkdtempSync(join(tmpdir(), 'harness-facts-'));
+    mkdirSync(join(root, 'skills'), { recursive: true });
+    mkdirSync(join(root, 'agents'), { recursive: true });
+    writeFileSync(
+      join(root, 'agents', 'main.md'),
+      '---\nname: main\ndescription: 主\nmaxIterations: 8\nmaxCostUsd: 0.6\n' +
+        'contextBudgetTokens: 64000\nretryMaxAttempts: 4\n---\n你是执行者。\n',
+      'utf8',
+    );
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const agent = assets.agents[0];
+    assert.ok(agent !== undefined);
+    const byKey = new Map(settingFacts(agent).map((f) => [f.key, f]));
+
+    assert.equal(byKey.get('maxIterations')?.current, '8');
+    assert.equal(byKey.get('maxCostUsd')?.current, '0.6');
+    assert.equal(byKey.get('contextBudgetTokens')?.current, '64000');
+    assert.equal(byKey.get('retryMaxAttempts')?.current, '4');
+    assert.match(byKey.get('contextBudgetTokens')?.hint ?? '', /上下文|压缩/);
+    assert.match(byKey.get('retryMaxAttempts')?.hint ?? '', /重试/);
+  });
+
+  it('模型交出白名单 frontmatter 头 ⇒ patch.settings 带上它，正文拆干净', async () => {
+    const root = skillProject();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const { proposals } = await new LlmProposer(config).propose({
+      modes: [modeWith('skill:review')],
+      assets,
+      config,
+      client: scriptedClient([
+        endTurn(
+          '---\nmaxIterations: 12\ncontextBudgetTokens: 32000\n---\n' +
+            '你审稿，只给结论，输出必须以「结论：」开头。',
+        ),
+      ]),
+    });
+    assert.equal(proposals.length, 1);
+    assert.deepEqual(proposals[0]?.patch.settings, {
+      maxIterations: '12',
+      contextBudgetTokens: '32000',
+    });
+    assert.ok(
+      !proposals[0]?.patch.after.trimStart().startsWith('---'),
+      'frontmatter 已拆进 settings，正文不该残留',
+    );
+    assert.match(proposals[0]?.patch.after ?? '', /结论/);
+  });
+
+  it('模型交出非白名单字段 ⇒ 整份拒，不静默采纳白名单那一半', async () => {
+    const root = skillProject();
+    const config = loadConfig(root);
+    const assets = discoverAssets({ skills: config.skillsDir, agents: config.agentsDir });
+    const skips: string[] = [];
+    const { proposals } = await new LlmProposer(config, {
+      onSkip: (id, why) => skips.push(`${id}|${why}`),
+    }).propose({
+      modes: [modeWith('skill:review')],
+      assets,
+      config,
+      client: scriptedClient([
+        endTurn(
+          '---\nmaxIterations: 12\nname: evil\n---\n你审稿，只给结论，输出必须以「结论：」开头。',
+        ),
+      ]),
+    });
+    assert.deepEqual(proposals, []);
+    assert.equal(skips.length, 1);
+    assert.match(skips[0] ?? '', /非白名单字段|整份提案已拒/);
   });
 });
 

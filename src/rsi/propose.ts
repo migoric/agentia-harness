@@ -5,7 +5,7 @@ import {
   resolveDefaultModel,
   SystemPrompt,
 } from '@migor/agentia';
-import type { AssetSet } from '../assets/types.js';
+import { type Asset, type AssetSet, findAsset } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import { effectiveModel } from '../run/app.js';
@@ -18,8 +18,10 @@ import {
   maxAfterChars,
   PROPOSER_SYSTEM,
   renderPrompt,
+  type SettingFact,
   tightenPrompt,
 } from './propose-prompt.js';
+import { allowedSettings, parseProposalBody, type Settings } from './settings.js';
 import { targetCandidates } from './targets.js';
 import type { FailureMode, LessonEntry, Proposal } from './types.js';
 
@@ -159,17 +161,18 @@ export class LlmProposer implements Proposer {
           lessons,
           audience: ctx.audience?.(target.key),
         };
-        let after = await this.ask(ask);
-        if (after === null) continue; // 模型明确说改不出
+        let parsed = await this.ask(ask, target.asset);
+        if (parsed === null) continue; // 模型明确说改不出
         // 超长不该一次机会都不给。真机实测（2026-11-28）：提示词里已明确写了上限，
         // 模型仍有 2/5 次写到上限的 1.2–1.8 倍 —— 直接丢弃等于白花一次调用，
         // 而它往往只差「把三段合并成一段」。给一次带着具体数字的压缩机会，
-        // 机器判据不动（上限还是那个上限），只是让失败可恢复。
-        if (after.trim().length > maxAfterChars(target.body)) {
-          const tighter = await this.ask({ ...ask, prev: after });
-          if (tighter !== null) after = tighter;
+        // 机器判据不动（上限还是那个上限），只是让失败可恢复。压缩只针对正文，
+        // settings 在第一次就定下来了。
+        if (parsed.body.trim().length > maxAfterChars(target.body)) {
+          const tighter = await this.ask({ ...ask, prev: parsed.body }, target.asset);
+          if (tighter !== null) parsed = { ...parsed, body: tighter.body };
         }
-        this.assertSane(mode, target.body, after, target.key);
+        this.assertSane(mode, target.body, parsed.body, target.key);
 
         out.push({
           id: `p-${Date.now()}-${seq++}`,
@@ -178,7 +181,12 @@ export class LlmProposer implements Proposer {
           rationale: `${mode.signature}（${mode.count} 例：${mode.cases.join(', ')}）；目标 ${target.key}（${target.why}）`,
           // 清单在调模型之后、跑验证之前生成 —— 假设不能由验证结果倒推
           manifest: manifestFor(mode, target.key),
-          patch: { target: target.key, before: target.body, after },
+          patch: {
+            target: target.key,
+            before: target.body,
+            after: parsed.body,
+            ...(Object.keys(parsed.settings).length > 0 ? { settings: parsed.settings } : {}),
+          },
           layer: 'L1',
         });
       } catch (e) {
@@ -201,7 +209,7 @@ export class LlmProposer implements Proposer {
   private pickTarget(
     ctx: ProposeContext,
     mode: FailureMode,
-  ): { key: string; body: string; why: string } {
+  ): { key: string; body: string; why: string; asset: Asset } {
     const avoid = new Set(ctx.avoidTargets ?? []);
     const candidates = targetCandidates({
       mode,
@@ -209,7 +217,11 @@ export class LlmProposer implements Proposer {
       ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     });
     const hit = candidates.find((c) => !avoid.has(c.key));
-    if (hit !== undefined) return { key: hit.key, body: hit.body, why: hit.why };
+    if (hit !== undefined) {
+      const asset = findAsset(ctx.assets, hit.key);
+      if (asset === undefined) throw new HarnessError('asset.missing', `找不到资产 ${hit.key}`);
+      return { key: hit.key, body: hit.body, why: hit.why, asset };
+    }
     if (candidates.length === 0) {
       throw new HarnessError('asset.missing', '没有任何 agent 资产可改');
     }
@@ -242,15 +254,18 @@ export class LlmProposer implements Proposer {
    * `prev` 有值时不是「重来一遍」，而是让模型**看着自己上一稿**改：多一轮对话比
    * 重新发一遍原提示便宜，也更可能真的压缩（它知道要删哪几段，不用重新推理）。
    */
-  private async ask(req: {
-    mode: FailureMode;
-    current: string;
-    ctx: ProposeContext;
-    model: string;
-    lessons: readonly LessonEntry[];
-    audience?: Audience | undefined;
-    prev?: string | undefined;
-  }): Promise<string | null> {
+  private async ask(
+    req: {
+      mode: FailureMode;
+      current: string;
+      ctx: ProposeContext;
+      model: string;
+      lessons: readonly LessonEntry[];
+      audience?: Audience | undefined;
+      prev?: string | undefined;
+    },
+    asset: Asset,
+  ): Promise<{ body: string; settings: Settings } | null> {
     const { mode, current, ctx, model, lessons, prev, audience } = req;
     const app = new AgentApp({
       name: 'harness-proposer',
@@ -267,6 +282,7 @@ export class LlmProposer implements Proposer {
       lessons,
       shrink: ctx.shrink,
       ...(audience !== undefined ? { audience } : {}),
+      settings: settingFacts(asset),
     });
     const messages: MessageParam[] =
       prev === undefined
@@ -285,7 +301,14 @@ export class LlmProposer implements Proposer {
     else this.spentUsd += c;
     const text = result.finalText.trim();
     if (text === 'NONE' || text === '') return null;
-    return stripFence(text);
+    // 提案可带白名单 frontmatter 头（改策略）—— 在这里拆出 settings 与正文，
+    // 非白名单字段会整份拒。机器校验在 parseProposalBody，提示词约束在 PROPOSER_SYSTEM。
+    const parsed = parseProposalBody(
+      stripFence(text),
+      asset,
+      `proposal:${asset.name} (${mode.id})`,
+    );
+    return { body: parsed.body, settings: parsed.settings };
   }
 
   /** 机器能查的合理性检查 —— 省掉一轮「提案本身就坏了」的昂贵评测 */
@@ -308,6 +331,47 @@ export class LlmProposer implements Proposer {
       throw new HarnessError('rsi.no_signal', `提案把 frontmatter 一起输出了（${target}）`);
     }
   }
+}
+
+/**
+ * 当前资产可改的策略字段（给提案提示词用）。值从资产的解析字段取 —— 与
+ * `parseProposalBody` 的白名单同源（allowedSettings），不在这里另列一份字段名。
+ *
+ * 每个字段必须从**自己的**来源取当前值：maxIterations / maxCostUsd 是 AgentApp 的
+ * 顶层参数，contextBudgetTokens / retryMaxAttempts 在 policyFields 里。曾把后两者
+ * 落到 maxCostUsd 分支，提示词于是把「当前 0.6 美元」当成上下文预算告诉模型 ——
+ * 模型自然不会去改一个看起来已经很小、且名叫美元上限的旋钮。
+ */
+export function settingFacts(asset: Asset): SettingFact[] {
+  return allowedSettings(asset).map((key) => {
+    if (key === 'maxIterations') {
+      return {
+        key,
+        current: asset.maxIterations === undefined ? '（未设置）' : String(asset.maxIterations),
+        hint: '主循环最大迭代次数，正整数；绕圈/超步数时可考虑下调，让 agent 更早收敛。',
+      };
+    }
+    if (key === 'maxCostUsd') {
+      const v = asset.kind === 'agent' ? asset.maxCostUsd : undefined;
+      return {
+        key,
+        current: v === undefined ? '（未设置）' : String(v),
+        hint: '整条 run 的美元硬上限，正数；成本失控时可考虑下调。',
+      };
+    }
+    if (key === 'contextBudgetTokens') {
+      return {
+        key,
+        current: asset.policyFields[key] ?? '（未设置）',
+        hint: '单轮上下文预算 token 数，正整数；反复压缩 / 上下文撑爆时可考虑下调。',
+      };
+    }
+    return {
+      key,
+      current: asset.policyFields[key] ?? '（未设置）',
+      hint: '失败重试次数上限，正整数；工具偶发失败可上调，绕圈重试可下调。',
+    };
+  });
 }
 
 /** 模型习惯包 ``` 围栏；剥掉它，否则正文里会混进 Markdown 代码块标记 */

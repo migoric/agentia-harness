@@ -11,6 +11,7 @@ import type { EvalReport } from '../evals/types.js';
 import type { CaseRunner } from '../run/case-runner.js';
 import { parseFrontmatter } from '../util/frontmatter.js';
 import { fingerprint } from '../util/hash.js';
+import { allowedSettings, applySettings } from './settings.js';
 import { isShrinkPatch } from './shrink.js';
 import { withStage } from './stage.js';
 import type { AssetPatch, Proposal, StageHook, VerifyOutcome } from './types.js';
@@ -154,11 +155,24 @@ export function applyPatch(assets: AssetSet, patch: AssetPatch): AssetSet {
     throw new HarnessError('asset.invalid', `补丁把 ${patch.target} 改成了空正文`);
   }
 
-  const nextFingerprint = fingerprint(renderFile(asset.path, patch.after));
+  // 白名单守卫：settings 里的键必须都属于这个资产、值必须合法。任何非法字段 ⇒ 整份拒。
+  // 外部提案（手写 JSON）也走这里，没有绕过口。
+  const settings = patch.settings ?? {};
+  for (const key of Object.keys(settings)) {
+    if (!allowedSettings(asset).includes(key)) {
+      throw new HarnessError(
+        'asset.invalid',
+        `补丁给 ${patch.target} 塞了非白名单字段 "${key}"（只能是 ${allowedSettings(asset).join(' / ')}）—— 整份拒`,
+      );
+    }
+  }
+
+  const nextFingerprint = fingerprint(renderFile(asset.path, patch.after, settings));
+  const replaced = applySettings(asset, settings);
   const replace = <T extends { name: string; kind: string }>(list: readonly T[]): T[] =>
     list.map((a) =>
       assetKey({ kind: a.kind as 'skill' | 'agent', name: a.name }) === patch.target
-        ? ({ ...a, body: patch.after, fingerprint: nextFingerprint } as T)
+        ? ({ ...replaced, body: patch.after, fingerprint: nextFingerprint } as unknown as T)
         : a,
     );
 
@@ -176,18 +190,32 @@ export function applyPatch(assets: AssetSet, patch: AssetPatch): AssetSet {
 
 /**
  * 生成「落盘后的文件内容」：frontmatter 头与正文之间的**空行、结尾换行风格**逐字保留，
- * 只替换正文段。
+ * 默认只替换正文段。
+ *
+ * `settings`（已校验的白名单字段）有值时，额外覆盖/追加对应的 frontmatter 行 —— 这是
+ * RSI 改「策略」而非「措辞」的落盘点。它来自 `parseProposalBody`，到这里已经过了
+ * 白名单校验，renderFile 不重复校验（单一职责：渲染，不判定）。
  *
  * 这里踩过一次坑：早先的实现是 `head + '\n' + body + '\n'`，当原文件在 `---` 之后
  * 有空行时，渲染结果会比磁盘少一个字节 —— 于是 `acceptProposal` 的「验证后是否被改动」
  * 校验把**自己**渲染的差异当成了「有人手改」，采纳被误拒。修法不是放宽容差
- * （那会真的漏掉手改），而是让渲染对原排版透明。
+ * （那会真的漏掉手改），而是让渲染对原排版透明。settings 覆盖也守同一条：只动值那一行，
+ * 其余行（含注释、顺序）逐字保留。
  */
-export function renderFile(path: string, body: string): string {
+export function renderFile(
+  path: string,
+  body: string,
+  settings?: Readonly<Record<string, string>> | undefined,
+  removeKeys?: readonly string[] | undefined,
+): string {
   const text = readFileSync(path, 'utf8');
   const fm = parseFrontmatter(text, path);
   const lines = text.split(/\r?\n/);
-  const head = lines.slice(0, fm.headerLines);
+  let head = lines.slice(0, fm.headerLines);
+
+  if (head.length >= 2 && ((settings && Object.keys(settings).length > 0) || removeKeys)) {
+    head = applySettingsToHead(head, settings ?? {}, removeKeys ?? []);
+  }
   const tail = lines.slice(fm.headerLines);
 
   // frontmatter 之后的前导空行原样保留
@@ -197,4 +225,48 @@ export function renderFile(path: string, body: string): string {
   const hadTrailingNewline = tail.length > 0 && tail[tail.length - 1] === '';
 
   return [...head, ...leading, body.trim(), ...(hadTrailingNewline ? [''] : [])].join('\n');
+}
+
+/**
+ * 覆盖 frontmatter 头里的白名单字段：已存在的行只换值（保留缩进与行尾注释的位置），
+ * 不存在的字段在 `---` 收尾行之前追加。`removeKeys` 里的字段整行删掉（回滚「原来没写」
+ * 的字段时用）。head[0] 与末行 `---` 不动。
+ */
+function applySettingsToHead(
+  head: string[],
+  settings: Readonly<Record<string, string>>,
+  removeKeys: readonly string[],
+): string[] {
+  const remove = new Set(removeKeys);
+  // 先删（倒序遍历，避免删行后索引错位）
+  for (let i = head.length - 2; i >= 1; i--) {
+    const line = head[i] ?? '';
+    const colon = line.indexOf(':');
+    if (colon === -1) continue;
+    if (remove.has(line.slice(0, colon).trim())) head.splice(i, 1);
+  }
+  const close = head.length - 1; // 末行是收尾的 '---'
+  const out = [...head];
+  const seen = new Set<string>();
+  for (let i = 1; i < close; i++) {
+    const line = out[i] ?? '';
+    const colon = line.indexOf(':');
+    if (colon === -1) continue;
+    const key = line.slice(0, colon).trim();
+    if (!(key in settings)) continue;
+    const comment = stripTrailingComment(line.slice(colon + 1));
+    out[i] = `${line.slice(0, colon)}: ${settings[key]}${comment}`;
+    seen.add(key);
+  }
+  const toAppend = Object.entries(settings)
+    .filter(([k]) => !seen.has(k))
+    .map(([k, v]) => `${k}: ${v}`);
+  if (toAppend.length > 0) out.splice(close, 0, ...toAppend);
+  return out;
+}
+
+/** 保留行尾注释（' #…'），只去掉值部分 —— 与 frontmatter.ts 的注释口径一致 */
+function stripTrailingComment(value: string): string {
+  const m = /\s+#.*$/.exec(value);
+  return m?.[0] ?? '';
 }

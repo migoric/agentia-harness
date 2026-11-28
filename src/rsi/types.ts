@@ -46,6 +46,8 @@ export type FailureKind =
   | 'loop'
   /** 超 token 预算 */
   | 'budget'
+  /** 上下文撑爆：峰值上下文远超输出、或反复压缩（修法是管上下文，不是改结论措辞） */
+  | 'context_overflow'
   /** 非正常收尾（max_tokens / aborted 等） */
   | 'stop_abnormal'
   | 'unknown';
@@ -57,6 +59,7 @@ export const FAILURE_KINDS = [
   'tool_error',
   'loop',
   'budget',
+  'context_overflow',
   'stop_abnormal',
   'unknown',
 ] as const satisfies readonly FailureKind[];
@@ -68,6 +71,10 @@ export interface FailureSample {
   readonly stopReason: string;
   readonly tokens: number;
   readonly iterations: number;
+  /** 行为摘要（agentia `runSummary`）+ iterations = 归因四维。缺席=没 trace；0=确认 0 次；peak=undefined=没报 usage */
+  readonly peakContextTokens?: number | undefined;
+  readonly compactions?: number | undefined;
+  readonly toolCalls?: number | undefined;
   readonly excerpt: string;
   /**
    * 这次运行的 traceId（有 `--keep-traces` 时才有）。
@@ -135,11 +142,17 @@ export interface LessonEntry {
   readonly outcome: 'not_realized' | 'reverted';
 }
 
-/** 一次资产改写：只允许改**正文**（frontmatter 由 harness 维护） */ export interface AssetPatch {
+/**
+ * 一次资产改写：正文 + 可选的白名单 frontmatter 覆盖（见 settings.ts）。
+ * 非白名单字段由 harness 维护，提案里出现即整份拒。
+ */
+export interface AssetPatch {
   /** `skill:repo-triage` 或 `agent:triage` */
   readonly target: string;
   readonly before: string;
   readonly after: string;
+  /** 白名单字段的新值（已校验）；缺席 = 不改 frontmatter */
+  readonly settings?: Readonly<Record<string, string>> | undefined;
 }
 
 /**
@@ -197,18 +210,16 @@ export interface JournalEntry {
   readonly target: string;
   readonly before: string;
   readonly after: string;
+  /** 白名单 frontmatter：采纳后新值 / 采纳前原值（回滚据此恢复）。缺席=没有策略改动 */
+  readonly settings?: Readonly<Record<string, string>> | undefined;
+  readonly settingsBefore?: Readonly<Record<string, string>> | undefined;
   readonly reason: string;
   /** 当初写下的预测与依据，随采纳一起进审计线索 */
   readonly manifest?: ChangeManifest | undefined;
   /** 采纳前后的资产指纹（回滚时校验：中间被手改过就不许自动回退） */
   readonly assetsBefore: string;
   readonly assetsAfter: string;
-  /**
-   * `asset` = 文本资产补丁（L1）；`code` = 代码补丁（L2）。
-   *
-   * 可选是因为**老记录没有这个字段**（2026-11-20 之前只有 L1）。读取侧统一补成
-   * `asset`，这样「回滚哪一条」的判定不必到处写 `=== undefined` 的分支。
-   */
+  /** `asset`=文本补丁(L1) / `code`=代码补丁(L2)；可选只为兼容老记录，读取侧补成 asset */
   readonly kind?: 'asset' | 'code';
   /** 这条记录是回滚产生的（复用原 proposalId，但语义不是「又被拒了一次提案」） */
   readonly reverted?: boolean | undefined;
@@ -217,15 +228,9 @@ export interface JournalEntry {
 }
 
 /**
- * 预算闸 —— 一轮 RSI 最多花多少钱。
- *
- * 存在理由很具体：一轮闭环要跑**两遍以上**评测（基线 + 每个候选各一遍），而在真模型
- * 上这是最贵的一步。没有上限时，「这轮花了 $12 结果什么都没采纳」是很容易发生的。
- *
- * `spentUsd` 只累加**已知**成本：模型没定价时它是偏低的。旧实现因此让美元闸在
- * `costKnown=false` 时**不生效**，结果是「给未定价模型设 `--max-cost`」看起来有保护、
- * 实际一分钱也没拦住。现在这条路被堵成两种明确结局（见 `stoppedBy`）：
- * token 闸接管，或者 `blind` 停下来。
+ * 预算闸 —— 一轮 RSI 最多花多少钱（一轮要跑两遍以上评测，真模型上最贵的一步）。
+ * `spentUsd` 只累加已知成本；成本读不出时美元闸不生效，由 token 闸接管或按 `blind`
+ * 停下（见 `stoppedBy`）—— 不能让「设了 max-cost」看起来有保护却一分没拦。
  */
 export interface CycleBudget {
   /** 美元上限；只设了 token 上限时缺席（旧记录一定有它） */

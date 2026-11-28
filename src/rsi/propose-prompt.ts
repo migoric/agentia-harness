@@ -1,4 +1,4 @@
-import type { FailureMode, LessonEntry } from './types.js';
+import type { FailureKind, FailureMode, LessonEntry } from './types.js';
 
 /**
  * 提案提示词 —— 提案器里「读与写」的那一半。
@@ -38,13 +38,18 @@ export type AudienceOf = (target: string) => Audience | undefined;
 export const PROPOSER_SYSTEM = `你是一个 agent 提示词工程师。你的唯一工作：读失败证据，改写**一个** Markdown 资产的正文，让失败消失，同时不破坏它已经做对的事。
 
 硬约束（违反任意一条，你的输出会被直接丢弃）：
-1. 只输出**正文全文**。不要输出 frontmatter（--- 之间那段），不要输出 diff，不要输出解释性前后缀。
-2. 不许假设有新的工具、新的技能、新的文件可读。你只能改措辞、结构、检查清单、输出格式要求。
+1. 默认只输出**正文全文**。不要输出 diff，不要输出解释性前后缀。
+   唯一的例外：当下面有「可改的策略字段」一节、且你确信改它能修好这类失败时，
+   可以在正文前加一个 frontmatter 头（用 --- 包裹），**只写**那一节列出的字段。
+   写任何其它字段（name / version / description / tools / model / subagents 等）
+   会让**整份提案被拒** —— 不会只采纳你写对的那部分。
+2. 不许假设有新的工具、新的技能、新的文件可读。你只能改措辞、结构、检查清单、输出格式要求，
+   以及上面那一节明确列出的策略字段。
 3. 不许删掉原文里已有的关键要求。默认的改动方向是**增补或收紧**，而不是缩减。
    唯一的例外是「简化轮」：那时正文里会明确写出来，按那一节的指令做。
 4. 正文必须自包含：它会被单独当作一次子运行的 system prompt 使用，看不到对话历史。
 
-判断依据：如果失败是「该调的工具没调」，就在正文里写清触发条件与调用顺序；如果是「结论不对」，就在正文里固定输出格式与必须覆盖的要点；如果是「太贵/太长」，就收紧步骤数与输出长度。
+判断依据：如果失败是「该调的工具没调」，就在正文里写清触发条件与调用顺序；如果是「结论不对」，就在正文里固定输出格式与必须覆盖的要点；如果是「太贵/太长」，就收紧步骤数与输出长度。唯独「反复压缩 / 上下文撑爆」这类失败：正文里写「少调几次、压缩输出」只是**软约束**，模型下一次仍可能把长原文塞回去 —— 真正的硬门是运行时预算，所以**优先改那一节提供的上下文预算字段**，正文改动只作为辅助。
 
 先想清楚「这条改动为什么能让这条用例从失败变通过」，再动笔。改不出有把握的方案时，输出单个词 NONE。`;
 
@@ -83,6 +88,14 @@ export function tightenPrompt(current: string, prev: string): string {
 目标：不超过 ${limit} 字。`;
 }
 
+/** 一个可改的策略字段（由编排层按资产类型给，不在这里硬编码） */
+export interface SettingFact {
+  readonly key: string;
+  /** 当前值；'（未设置）' 表示磁盘上没写 */
+  readonly current: string;
+  readonly hint: string;
+}
+
 export interface PromptFacts {
   readonly mode: FailureMode;
   readonly current: string;
@@ -90,6 +103,28 @@ export interface PromptFacts {
   readonly shrink: ShrinkPrompt | undefined;
   /** 缺省 = 不知道这个资产还被谁用着，那一节就不出现（不要编） */
   readonly audience?: Audience | undefined;
+  /** 可改的白名单策略字段；缺省/空 = 这一类资产没有可改策略，那一节不出现 */
+  readonly settings?: readonly SettingFact[] | undefined;
+}
+
+/**
+ * 可改的策略字段 —— 让提案器知道「除了措辞，还能改旋钮」。
+ *
+ * 只列编排层给的字段（它按资产类型与白名单筛过），这里不自己造字段名 —— 造出来的
+ * 名字会被 parseProposalBody 整份拒，等于白烧一次调用。给出当前值与用途，它才知道
+ * 「现在是多少、往哪个方向拧」。
+ */
+function renderSettings(settings: readonly SettingFact[] | undefined, kind: FailureKind): string {
+  if (settings === undefined || settings.length === 0) return '';
+  const lines = settings.map((s) => `- \`${s.key}\`：当前 ${s.current}。${s.hint}`);
+  const runtime = kind === 'context_overflow' || kind === 'budget' || kind === 'loop';
+  return `
+## 可改的策略字段（只有这些能写进 frontmatter）
+${lines.join('\n')}
+${runtime ? '本轮失败就是运行时行为问题（反复压缩 / 上下文撑爆 / 绕圈 / 成本失控）：正文里写「少调几次」是软约束，挡不住真实增长。**优先改这里**，正文只作辅助。' : '只在失败证据指向运行时行为（反复压缩 / 上下文撑爆 / 绕圈 / 成本失控）时才考虑改这里；结果类失败（结论不对 / 该调的工具没调）仍优先改正文。'}
+要改就在正文前加 \`---\` 头，只写上面列出的字段（整数 / 正数按提示写），其余 frontmatter 字段一个都不许出现。
+
+`;
 }
 
 export function renderPrompt(facts: PromptFacts): string {
@@ -97,7 +132,11 @@ export function renderPrompt(facts: PromptFacts): string {
   const evidence = mode.samples
     .map(
       (s, i) =>
-        `### 例 ${i + 1}（用例 ${s.case}，stopReason=${s.stopReason}，${s.iterations} 轮，${s.tokens} token）\n` +
+        `### 例 ${i + 1}（用例 ${s.case}，stopReason=${s.stopReason}，${s.iterations} 轮，${s.tokens} token` +
+        (s.peakContextTokens !== undefined ? `，峰值上下文 ${s.peakContextTokens}` : '') +
+        (s.compactions !== undefined ? `，压缩 ${s.compactions} 次` : '') +
+        (s.toolCalls !== undefined ? `，工具调用 ${s.toolCalls} 次` : '') +
+        `）\n` +
         `断言失败：\n${s.failures.map((f) => `- ${f}`).join('\n')}\n` +
         (s.excerpt === '' ? '' : `实际输出开头：\n"""\n${s.excerpt}\n"""\n`),
     )
@@ -110,7 +149,7 @@ export function renderPrompt(facts: PromptFacts): string {
 
 ## 失败证据
 ${evidence}
-${renderAudience(facts.audience)}${renderLessons(lessons)}${renderShrink(shrink, current)}
+${renderAudience(facts.audience)}${renderSettings(facts.settings, mode.kind)}${renderLessons(lessons)}${renderShrink(shrink, current)}
 ## 当前正文（你的输出将完整替换它）
 """
 ${current}

@@ -136,6 +136,14 @@ export interface CaseResult {
    */
   readonly costUsd: number | undefined;
   readonly iterations: number;
+  /**
+   * 行为摘要三读数（agentia `runSummary`）+ 上面的 iterations = 归因四维。
+   * 缺席 = 无 trace（不知道）；`peakContextTokens: undefined` = 有 trace 但 usage 没报（不是 0）；
+   * 0 = 确认 0 次。四维把「上下文撑爆 / 绕圈 / 工具选错」与「结果不对」分开。
+   */
+  readonly peakContextTokens?: number | undefined;
+  readonly compactions?: number | undefined;
+  readonly toolCalls?: number | undefined;
   readonly durationMs: number;
   readonly stopReason: string;
   /** 断言失败时给出最终文本，便于人眼看（裁剪到 400 字） */

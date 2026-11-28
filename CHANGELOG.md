@@ -4,9 +4,39 @@
 
 格式：`## [版本] - 日期`，每条都说清「改了什么」与「为什么」。
 
-## [Unreleased]
+## [0.4.1] - 2026-11-28
 
 ### 新增
+
+**RSI 从「改措辞」跨到「改策略」：四维归因 + frontmatter 白名单 + 声明式策略字段。**
+此前 RSI 只能重写 Markdown 正文，改不了真正决定运行时行为的旋钮；而失败归因只有
+`stopReason` 与断言文本，「上下文撑爆」「绕圈」「工具选错」「结果不对」长得一样。这次
+三段一起补上，让「改策略」成为一轮能被装配、能被评测、能被门验证的进化，而不是改了
+磁盘却没人读的空壳。
+
+- **L1 四维归因**：`evals/types.ts` 的 `CaseResult` 带上峰值上下文 / 压缩次数 / 工具调用数，
+  由 agentia 0.10.17 的 `runSummary(trace)` 派生（`usage.missing` 的 turn 不算峰值）。
+  归因据此把结果类失败中的「反复压缩或峰值远超输出」升级成 `context_overflow`，
+  失败签名带行为档位（`[ctx≥100 tools1]`），同类断言失败按运行行为细分。提示词的失败
+  证据同步显示四维读数；
+- **L2 frontmatter 白名单**：提案可带一个只含白名单字段的 `---` 头改策略，入选标准是
+  「harness 解析 → buildApp 装配 → agentia 真执行」。agent 可改 `maxIterations` /
+  `maxCostUsd` / `contextBudgetTokens` / `retryMaxAttempts`，skill 除 `maxCostUsd`。
+  非白名单字段一旦出现**整份提案拒**（不是忽略、不是只采纳一半）。`AssetPatch` /
+  `AcceptIntent` / `JournalEntry` 都记 `settings` 与 `settingsBefore`，采纳落盘、回滚
+  恢复 frontmatter；`renderFile` 按 settings 覆盖/追加、按 removeKeys 删除字段行，
+  保留排版与注释；
+- **L3 声明式策略字段**：`src/run/policy-fields.ts`（在 `run/` 层，不反依赖 `rsi/`）把
+  `contextBudgetTokens → createBudgetPolicy({ budgetTokens })`、
+  `retryMaxAttempts → retry: { maxAttempts }`，`buildApp` 装配进 `AgentApp`。坏值在
+  `createRunner()` 阶段就抛错（不是静默忽略）；文档点名但 agentia 运行时没有的字段
+  （`compactWhen` / `retryOn` / `stopWhen` / `maxDelegate`）不实现空壳；
+- **提示词**：策略字段节给出各字段当前值与用途（各自取自己的来源，不把 maxCostUsd
+  当成上下文预算）；运行时类失败（上下文撑爆 / 绕圈 / 成本失控）优先拧旋钮，结果类
+  失败仍优先改正文。真机验证：给 `context_overflow` + 峰值 128k + 压缩 5 次的证据，
+  提案器自发输出 `{"maxIterations":"6","contextBudgetTokens":"48000"}`。
+
+依赖下限抬到 `^0.10.17`（`runSummary` 在该版进公共导出面，须先于本包发布）。
 
 **`--repeat n`：把「单次观测」变成「测量」。**
 
