@@ -7,10 +7,12 @@ import { HarnessError } from '../errors.js';
 import { type GateOptions, gate } from '../evals/gate.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import type { EvalReport } from '../evals/types.js';
+import type { CaseRunner } from '../run/case-runner.js';
 import { parseFrontmatter } from '../util/frontmatter.js';
 import { fingerprint } from '../util/hash.js';
 import { isShrinkPatch } from './shrink.js';
-import type { AssetPatch, Proposal, VerifyOutcome } from './types.js';
+import { withStage } from './stage.js';
+import type { AssetPatch, Proposal, StageHook, VerifyOutcome } from './types.js';
 
 /**
  * 验证 —— RSI 里唯一有否决权的一步。
@@ -30,6 +32,13 @@ export interface VerifyOptions extends SuiteTuning {
   readonly assets: AssetSet;
   readonly baseline: EvalReport;
   readonly proposal: Proposal;
+  /**
+   * 远程 stage 钩子：跑之前把候选搬到被测环境，跑完撤台。
+   * 本地不传（资产在内存里，`assets: patched` 就够了）。
+   */
+  readonly stage?: StageHook | undefined;
+  /** 远程 runner（`harness eval --remote` 那个）。不传就是本地装配 */
+  readonly runner?: CaseRunner | undefined;
   readonly agent?: string | undefined;
   readonly client?: ModelClient | undefined;
   readonly signal?: AbortSignal | undefined;
@@ -90,18 +99,23 @@ export function isWorthAccepting(
 
 export async function verifyProposal(opts: VerifyOptions): Promise<VerifyOutcome> {
   const patched = applyPatch(opts.assets, opts.proposal.patch);
-  const candidate = await runSuite({
-    config: opts.config,
-    assets: patched,
-    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
-    ...(opts.client !== undefined ? { client: opts.client } : {}),
-    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-    // 与基线**同一套**调优：否则门比较的不是同一个东西
-    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
-    ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
-    ...(opts.only !== undefined ? { only: opts.only } : {}),
-  });
+  // 远程：候选必须先写进服务读的那个文件才可能被看见。`withStage` 保证撤台执行，
+  // 包括「跑评测抛错」与「预算中止」这两条非常规路径
+  const candidate = await withStage(opts.stage, { proposal: opts.proposal, patched }, () =>
+    runSuite({
+      config: opts.config,
+      assets: patched,
+      ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+      ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+      ...(opts.client !== undefined ? { client: opts.client } : {}),
+      ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      // 与基线**同一套**调优：否则门比较的不是同一个东西
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+      ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+      ...(opts.only !== undefined ? { only: opts.only } : {}),
+    }),
+  );
   return {
     proposal: opts.proposal,
     baseline: opts.baseline,

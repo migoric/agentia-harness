@@ -17,8 +17,8 @@ import { usd } from '../../util/usd.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { json, say, warn } from '../output.js';
+import { maybeRemoteStage, type RemoteStage } from '../remote-stage.js';
 import { journal, ledger, regress, status } from './rsi-inspect.js';
-import { rejectRemote } from './rsi-remote-guard.js';
 import { watchCommand } from './rsi-watch.js';
 import { tuningOf } from './run.js';
 
@@ -28,26 +28,30 @@ export async function rsiCommand(
   sub: string | undefined,
   argsId?: string,
 ): Promise<number> {
-  // 必须排在**所有**分支之前：`--watch` 与各子命令都会各自 return，
-  // 放到后面就等于 `rsi --watch --remote <url>` 静默无视 `--remote` ——
-  // 正是这个函数要防的那个失效模式（人以为在测远程，其实在测本地）
-  rejectRemote(ctx);
+  // `--remote` 只对「跑轮次」有意义：其余子命令各自只读/回滚，给它一个远程地址
+  // 要么被静默忽略（人以为在测远程，其实在测本地），要么得为每个子命令想一套语义
+  if (strFlag(ctx.flags, 'remote') !== undefined && !(sub === undefined || sub === 'accept')) {
+    throw new HarnessError(
+      'config.invalid',
+      `--remote 只用于跑轮次（rsi / rsi --watch / rsi accept），不能与 "${sub}" 一起用`,
+    );
+  }
   if (sub === 'revert') return revert(ctx, argsId);
   if (sub === 'status') return status(ctx);
   if (sub === 'ledger') return ledger(ctx);
   if (sub === 'regress') return regress(ctx);
   if (sub === 'journal') return journal(ctx);
   if (sub === 'propose') return proposeFrom(ctx);
-  if (sub === 'accept') return acceptFrom(ctx);
+  if (sub === 'accept') return acceptFrom(ctx, undefined, await maybeRemoteStage(ctx));
   // `--watch` 是「跑很多轮」的常驻形态，与 `--rounds` 互斥（后者是一次性跑完就退）
-  if (boolFlag(ctx.flags, 'watch')) return watchCommand(ctx);
+  if (boolFlag(ctx.flags, 'watch')) return watchCommand(ctx, await maybeRemoteStage(ctx));
   if (sub !== undefined) {
     throw new HarnessError(
       'config.invalid',
       `rsi 没有子命令 "${sub}"（可用: revert, status, ledger, regress, journal, propose, accept）`,
     );
   }
-  return cycle(ctx);
+  return cycle(ctx, await maybeRemoteStage(ctx));
 }
 
 function fromFlag(ctx: CliContext, sub: string): string {
@@ -73,7 +77,11 @@ function proposeFrom(ctx: CliContext): number {
  * 没有 `--yes` 之类的跳门开关是刻意的：`acceptManually` 作为库 API 存在，但把它
  * 暴露成 CLI 选项，等于给「评测门在 RSI 写权限之外」这条不变量开后门。
  */
-export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise<number> {
+export async function acceptFrom(
+  ctx: CliContext,
+  client?: ModelClient,
+  remote?: RemoteStage,
+): Promise<number> {
   const proposal = readProposal(fromFlag(ctx, 'accept'));
   // 轮次 id 先生成：留出集消耗账要用它，而记账发生在 `writeCycle` **之前** ——
   // 反过来的话，写记录失败会让这一批在账上"看起来没用过"，下一轮白送一次复用
@@ -82,6 +90,7 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
   const shared = {
     config: ctx.config,
     assets,
+    ...(remote !== undefined ? { stage: remote.stage, runner: remote.runner } : {}),
     ...(client !== undefined ? { client } : {}),
     ...(ctx.agent !== undefined ? { agent: ctx.agent } : {}),
     ...tuningOf(ctx),
@@ -165,6 +174,13 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
   } else {
     const { entry } = acceptProposal(ctx.config, assets, outcome);
     say(`已采纳 ${entry.proposalId} → ${entry.target}（${entry.reason}）`);
+    // 本地落盘完成之后才推远端：反过来的话「推送成功、采纳失败」会让远端跑着
+    // 一个账本里没有的版本。推送失败会抛出来 —— 本地已采纳而远端是旧的，下一轮
+    // 预检会报漂移，能修（--sync-remote）
+    if (remote !== undefined) {
+      await remote.push(assetsOf(ctx));
+      say('已推到远端并重载');
+    }
   }
   // 手工采纳也要落一份轮次记录：`rsi regress` 的基准取自 cycle JSON 的 candidate，
   // 没有记录就只能报「找不到基准」—— 而那意味着手工采纳的改动永远监测不到
@@ -194,7 +210,7 @@ export async function acceptFrom(ctx: CliContext, client?: ModelClient): Promise
   return 0;
 }
 
-async function cycle(ctx: CliContext): Promise<number> {
+async function cycle(ctx: CliContext, remote?: RemoteStage): Promise<number> {
   const rounds = roundsFlag(ctx);
   const maxModes = numFlag(ctx.flags, 'max-modes');
   const maxVerify = numFlag(ctx.flags, 'max-verify');
@@ -222,6 +238,16 @@ async function cycle(ctx: CliContext): Promise<number> {
     ...(maxCost !== undefined ? { maxCostUsd: maxCost } : {}),
     ...(shrinkEvery !== undefined ? { shrinkPolicy: { every: shrinkEvery } } : {}),
     ...(dryRun ? { dryRun: true } : {}),
+    ...(remote !== undefined
+      ? {
+          stage: remote.stage,
+          runner: remote.runner,
+          // 采纳后推远端：不推的话服务还跑旧提示词，而下一轮预检立刻报漂移
+          onAcceptedAssets: async (a: Parameters<RemoteStage['push']>[0]) => {
+            await remote.push(a);
+          },
+        }
+      : {}),
     ...tuningOf(ctx),
     ...(asJson
       ? {}

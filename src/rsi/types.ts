@@ -131,6 +131,17 @@ export interface LessonEntry {
   readonly after: string;
 }
 
+/**
+ * 「把候选搬到被测环境」的钩子。本地是恒等（资产在内存里就直接跑）；
+ * 远程要写盘 + 重载，返回的 `restore` 必须被调用（含异常路径）。
+ */
+export type StageHook = (args: {
+  proposal: Proposal;
+  patched: AssetSet;
+}) => Promise<() => Promise<void>>;
+
+import type { AssetSet } from '../assets/types.js';
+
 export interface Proposal {
   /** `p-<时间戳>-<序号>`，人可读、可排序 */
   readonly id: string;

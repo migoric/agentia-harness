@@ -3,10 +3,11 @@ import type { AssetSet } from '../assets/types.js';
 import type { HarnessConfig } from '../config.js';
 import { HarnessError } from '../errors.js';
 import type { GateOptions } from '../evals/gate.js';
+import type { CaseRunner } from '../run/case-runner.js';
 import { runCycle } from './loop.js';
 import type { Proposer } from './propose.js';
 import type { ShrinkPolicy } from './shrink.js';
-import type { CycleReport } from './types.js';
+import type { CycleReport, StageHook } from './types.js';
 
 /**
  * 连续跑 N 轮 RSI。
@@ -54,6 +55,16 @@ export interface RunRoundsOptions {
   readonly shrinkPolicy?: ShrinkPolicy | undefined;
   /** 每轮结束后的回调（CLI 用它打印） */
   readonly onRound?: ((report: CycleReport, index: number) => void) | undefined;
+  /** 远程 stage 钩子（本地不传），见 `CycleOptions.stage` */
+  readonly stage?: StageHook | undefined;
+  readonly runner?: CaseRunner | undefined;
+  /**
+   * 采纳之后把新资产交回调用方（远程模式用它把新提示词推到服务）。
+   *
+   * 与 `onAcceptedAssets` 的分工：那个是内部记账（更新本轮快照），这个是外部副作用
+   * （推到远端）。放在一起会让「快照更新失败」和「远端推送失败」分不清。
+   */
+  readonly onAcceptedAssets?: ((assets: AssetSet) => void | Promise<void>) | undefined;
 }
 
 export type RoundStopReason =
@@ -104,8 +115,11 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
       config: opts.config,
       assets: current,
       proposer: opts.makeProposer(i),
-      onAcceptedAssets: (next) => {
+      onAcceptedAssets: async (next) => {
         current = next;
+        // 推送失败必须冒出来：本地已经记「已采纳」而远端还是旧提示词，
+        // 下一轮预检会报漂移 —— 早报比晚报好
+        await opts.onAcceptedAssets?.(next);
       },
       ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
       ...(opts.client !== undefined ? { client: opts.client } : {}),
@@ -119,6 +133,8 @@ export async function runRounds(opts: RunRoundsOptions): Promise<RoundsReport> {
       ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
       ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
       ...(opts.shrinkPolicy !== undefined ? { shrinkPolicy: opts.shrinkPolicy } : {}),
+      ...(opts.stage !== undefined ? { stage: opts.stage } : {}),
+      ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
     });
     reports.push(report);
     priorSpent += report.costUsd;

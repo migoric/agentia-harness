@@ -123,10 +123,10 @@ const COMMAND_FLAGS: Readonly<Record<string, readonly string[]>> = {
     'every',
     'max-rounds',
     'until',
-    // 只为给出**明确理由**而收进来：`rsi` 不能用远程 runner（见 `rsiCommand`）。
-    // 放在白名单外会让它报「不认识 --remote」，而那读起来像「还没接线」——
-    // 实际是结构上不可能，两个结论对用户的下一步完全不同
+    // 远程验证：候选会写到服务读的那个文件里（`remote` 段给映射，`allowStaging` 签字）
     'remote',
+    // 预检发现「本地与远端不一致」时，显式用本地覆盖远端
+    'sync-remote',
   ],
   patch: ['yes', 'verify', 'timeout', 'revert'],
   serve: ['port', 'host', 'timeout'],

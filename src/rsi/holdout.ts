@@ -6,7 +6,9 @@ import { gate } from '../evals/gate.js';
 import { runSuite, type SuiteTuning } from '../evals/run.js';
 import { HOLDOUT_GATE_OPTIONS } from '../evals/split.js';
 import type { EvalReport } from '../evals/types.js';
-import type { HoldoutResult, Proposal } from './types.js';
+import type { CaseRunner } from '../run/case-runner.js';
+import { withStage } from './stage.js';
+import type { HoldoutResult, Proposal, StageHook } from './types.js';
 import { applyPatch } from './verify.js';
 
 /**
@@ -22,6 +24,9 @@ export interface HoldoutOptions extends SuiteTuning {
   readonly config: HarnessConfig;
   readonly assets: AssetSet;
   readonly proposal: Proposal;
+  /** 与 `verifyProposal` 同一个钩子：留出集跑的是同一个候选，必须同样搬上台 */
+  readonly stage?: StageHook | undefined;
+  readonly runner?: CaseRunner | undefined;
   /** 留出集视图（由 `splitReport(report).holdout` 得来） */
   readonly baseline: EvalReport;
   readonly cases: readonly string[];
@@ -35,17 +40,20 @@ export async function validateHoldout(opts: HoldoutOptions): Promise<HoldoutResu
     throw new HarnessError('rsi.no_signal', '留出集验证需要至少一条 holdout 用例');
   }
   const patched = applyPatch(opts.assets, opts.proposal.patch);
-  const candidate = await runSuite({
-    config: opts.config,
-    assets: patched,
-    ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
-    ...(opts.client !== undefined ? { client: opts.client } : {}),
-    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
-    ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
-    only: opts.cases,
-  });
+  const candidate = await withStage(opts.stage, { proposal: opts.proposal, patched }, () =>
+    runSuite({
+      config: opts.config,
+      assets: patched,
+      ...(opts.runner !== undefined ? { runner: opts.runner } : {}),
+      ...(opts.agent !== undefined ? { agent: opts.agent } : {}),
+      ...(opts.client !== undefined ? { client: opts.client } : {}),
+      ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.concurrency !== undefined ? { concurrency: opts.concurrency } : {}),
+      ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+      only: opts.cases,
+    }),
+  );
   return {
     baseline: opts.baseline,
     candidate,

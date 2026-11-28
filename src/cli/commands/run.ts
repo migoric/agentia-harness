@@ -130,7 +130,10 @@ function remoteRunnerOf(ctx: CliContext): CaseRunner | undefined {
     }
     return undefined;
   }
-  const envName = strFlag(ctx.flags, 'token-env') ?? 'HARNESS_REMOTE_TOKEN';
+  // 优先级：命令行 > 配置里的 `remote.tokenEnv` > 约定名。
+  // 配置里有 remote 段却不认它的 tokenEnv，等于同一个服务要配两个变量名 —— 迟早有人配错
+  const envName =
+    strFlag(ctx.flags, 'token-env') ?? ctx.config.remote?.tokenEnv ?? 'HARNESS_REMOTE_TOKEN';
   const token = process.env[envName];
   if (token === undefined || token.trim() === '') {
     throw new HarnessError(

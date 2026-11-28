@@ -450,7 +450,7 @@ describe('harness evidence', () => {
 });
 
 describe('harness rsi --remote', () => {
-  it('明确拒绝并说明理由（不是「不认识这个 flag」）', () => {
+  it('没有 remote 配置时报清楚缺什么（不是「不认识这个 flag」）', () => {
     const dir = tmp();
     run(['init'], dir);
     // 把 apiKeyEnv 指向一个没有值的变量：否则 `assertEndpointKey` 会在
@@ -470,26 +470,41 @@ describe('harness rsi --remote', () => {
       PROBE_MODEL_KEY: undefined,
     });
     assert.equal(r.code, 2);
-    // 「不认识 --remote」会让人以为只是没接线，去提 issue 或自己 hack；
-    // 真实原因是结构性的：改本地资产对远程零影响
     assert.doesNotMatch(r.out, /不认识 --remote/);
-    assert.match(r.out, /改资产/);
-    assert.match(r.out, /harness eval --remote/, '要给一条语义正确的替代路径');
-    // 凭据闸必须排在它后面：否则用户先被叫去配 key，配完才被告知「这个组合不支持」
+    assert.match(r.out, /配置里没有 "remote" 段/);
+    // 凭据闸必须排在它后面：否则用户先被叫去配 key，配完才被告知配置没写
     assert.doesNotMatch(r.out, /缺少模型凭据/);
   });
 
-  it('--watch 与子命令都不能绕过它（否则就是「静默无视 --remote」）', () => {
+  it('allowStaging 没开就不许动远端（验证期间服务会对外提供候选）', () => {
     const dir = tmp();
     run(['init'], dir);
-    for (const argv of [
-      ['rsi', '--watch', '--remote', 'http://127.0.0.1:18080'],
-      ['rsi', 'status', '--remote', 'http://127.0.0.1:18080'],
-    ]) {
-      const r = run(argv, dir);
-      assert.equal(r.code, 2, `${argv.join(' ')} 应被拒`);
-      assert.match(r.out, /不能用 --remote/, `${argv.join(' ')} 的报错要指明是结构性问题`);
-    }
+    const cfgPath = join(dir, 'harness.config.json');
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      cfgPath,
+      JSON.stringify(
+        {
+          ...cfg,
+          remote: { url: 'http://127.0.0.1:1', prompts: { 'agent:main': 'agents/main.md' } },
+        },
+        null,
+        2,
+      ),
+    );
+
+    const r = run(['rsi', '--remote', 'http://127.0.0.1:1'], dir);
+    assert.equal(r.code, 2);
+    assert.match(r.out, /allowStaging/);
+    assert.match(r.out, /对外提供/, '要说清暴露面，而不是只说「没权限」');
+  });
+
+  it('子命令不能带 --remote（否则就是静默无视它）', () => {
+    const dir = tmp();
+    run(['init'], dir);
+    const r = run(['rsi', 'status', '--remote', 'http://127.0.0.1:18080'], dir);
+    assert.equal(r.code, 2);
+    assert.match(r.out, /只用于跑轮次/);
   });
 });
 
@@ -512,16 +527,13 @@ describe('--remote 与本地凭据闸', () => {
     assert.doesNotMatch(r.out, /缺少模型凭据/);
   });
 
-  it('--watch 与子命令都不能绕过它（否则就是「静默无视 --remote」）', () => {
+  it('--watch 允许 --remote（常驻推进也要能推远端），但同样要求配置', () => {
     const dir = tmp();
     run(['init'], dir);
-    for (const argv of [
-      ['rsi', '--watch', '--remote', 'http://127.0.0.1:18080'],
-      ['rsi', 'status', '--remote', 'http://127.0.0.1:18080'],
-    ]) {
-      const r = run(argv, dir);
-      assert.equal(r.code, 2, `${argv.join(' ')} 应被拒`);
-      assert.match(r.out, /不能用 --remote/, `${argv.join(' ')} 的报错要指明是结构性问题`);
-    }
+    const r = run(['rsi', '--watch', '--remote', 'http://127.0.0.1:18080'], dir);
+    assert.equal(r.code, 2);
+    // 不是「不支持」，而是「配置没写」—— 两者对用户的下一步完全不同
+    assert.match(r.out, /配置里没有 "remote" 段/);
+    assert.doesNotMatch(r.out, /不认识 --remote/);
   });
 });

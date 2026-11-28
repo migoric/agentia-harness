@@ -1,7 +1,13 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
+import { type ModelPrice, readPricing } from './config-pricing.js';
+import type { RemoteConfig } from './config-remote.js';
+import { readRemote } from './config-remote.js';
 import { HarnessError } from './errors.js';
 import { type Fail, isPlainObject, objectAt, onlyKeys, readJsonObject } from './util/shape.js';
+
+export type { ModelPrice } from './config-pricing.js';
+export type { RemoteConfig } from './config-remote.js';
 
 // ⚠️ 必须**注解在变量上**（`const fail: Fail`）而不是只注解箭头函数的返回类型：
 // TS 的「never 返回 ⇒ 后续分支已收敛」只认「变量有显式类型」的那种声明，否则
@@ -88,6 +94,8 @@ export interface ModelSettings {
  * 是合理的，但代码里不再做第二次拼接。
  */
 export interface HarnessConfig extends WorkspacePaths, ModelSettings {
+  /** 远程服务接线；缺席 = 只能本地评测，`rsi --remote` 会被拒 */
+  readonly remote?: RemoteConfig;
   readonly appName: string;
   /**
    * L2（代码补丁）的验证命令，缺省 `['npm', 'test']`。
@@ -117,23 +125,6 @@ export interface HarnessConfig extends WorkspacePaths, ModelSettings {
 
 export const CONFIG_FILENAME = 'harness.config.json';
 
-/**
- * 一条单价（对齐 agentia 的 `ModelPricing`，但**不 import** 它：配置文件层不认识
- * 运行时）。字段含义逐条对齐，差一个都算配置错——
- *
- * - `in` / `out`：$/1M token，**绝对价**；
- * - `cacheRead` / `cacheWrite`：相对 `in` 的**乘数**（不是绝对价！），缺省 0.1 / 1.25。
- *   这条最容易配错：DeepSeek 缓存读 $0.003/1M、输入 $0.15/1M ⇒ 乘数是 `0.02`，不是 `0.003`。
- */
-export interface ModelPrice {
-  readonly in: number;
-  readonly out: number;
-  readonly cacheRead?: number;
-  readonly cacheWrite?: number;
-}
-
-const PRICE_KEYS: readonly string[] = ['in', 'out', 'cacheRead', 'cacheWrite'];
-
 const DEFAULTS = {
   skillsDir: 'skills',
   agentsDir: 'agents',
@@ -156,6 +147,7 @@ interface RawConfig {
   endpoint?: unknown;
   pricing?: unknown;
   server?: unknown;
+  remote?: unknown;
 }
 
 /** 顶层键白名单：拼错一个键（如 `modle`）静默吃缺省是最难查的一类错 */
@@ -172,6 +164,7 @@ const CONFIG_KEYS: readonly string[] = [
   'endpoint',
   'pricing',
   'server',
+  'remote',
 ];
 
 export function loadConfig(root: string): HarnessConfig {
@@ -201,6 +194,7 @@ export function loadConfig(root: string): HarnessConfig {
     ...readEndpoint(raw.endpoint),
     ...readCode(raw.code),
     ...readServer(raw.server),
+    ...readRemote(raw.remote, absRoot),
   };
 }
 
@@ -281,41 +275,6 @@ function readServer(v: unknown): { serverApiKeyEnv: string | undefined; serverMa
 }
 
 /** `pricing` 段：每条都要有 `in` / `out` 两个非负有限数，键名只认那四个 */
-function readPricing(v: unknown): Readonly<Record<string, ModelPrice>> {
-  if (v === undefined) return {};
-  if (!isPlainObject(v)) fail('配置字段 "pricing" 应为 { 模型名: { in, out } } 对象');
-  const out: Record<string, ModelPrice> = {};
-  for (const [model, raw] of Object.entries(v)) {
-    const where = `pricing["${model}"]`;
-    if (model.trim() === '') {
-      throw new HarnessError('config.invalid', '配置字段 "pricing" 里有空模型名');
-    }
-    if (!isPlainObject(raw)) fail(`${where} 应为 { in, out } 对象`);
-    onlyKeys(raw, where, PRICE_KEYS, fail);
-    const e = raw;
-    out[model] = {
-      in: priceOf(e.in, where, 'in'),
-      out: priceOf(e.out, where, 'out'),
-      ...(e.cacheRead === undefined ? {} : { cacheRead: priceOf(e.cacheRead, where, 'cacheRead') }),
-      ...(e.cacheWrite === undefined
-        ? {}
-        : { cacheWrite: priceOf(e.cacheWrite, where, 'cacheWrite') }),
-    };
-  }
-  return out;
-}
-
-function priceOf(v: unknown, where: string, key: string): number {
-  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
-    const detail =
-      key === 'cacheRead' || key === 'cacheWrite'
-        ? '（cacheRead / cacheWrite 是相对 in 的**乘数**，不是绝对价）'
-        : '（$/1M token）';
-    throw new HarnessError('config.invalid', `${where}.${key} 应为非负有限数${detail}`);
-  }
-  return v;
-}
-
 const CODE_DEFAULTS = {
   verify: ['npm', 'test'] as readonly string[],
   timeoutMs: 600_000,

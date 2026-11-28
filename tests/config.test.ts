@@ -236,3 +236,52 @@ describe('未定价提示', () => {
     assert.match(hint, /--max-cost/);
   });
 });
+
+describe('配置 —— remote 段', () => {
+  const base = {
+    remote: { url: 'http://127.0.0.1:18080', prompts: { 'agent:report': 'prompts/report.md' } },
+  };
+
+  it('缺省关掉；给了就解析出映射与两个默认路径', () => {
+    assert.equal(cfg({}).remote, undefined);
+    const r = cfg(base).remote;
+    assert.ok(r !== undefined);
+    assert.equal(r.url, 'http://127.0.0.1:18080');
+    assert.equal(r.tokenEnv, 'HARNESS_REMOTE_TOKEN');
+    assert.equal(r.reloadPath, '/admin/reload');
+    assert.equal(r.promptsPath, '/admin/prompts');
+    // 相对路径相对**工程根**补全：容器里的 cwd 不是契约，工程根是
+    assert.ok(r.prompts['agent:report']?.endsWith('prompts/report.md'));
+    assert.ok(r.prompts['agent:report']?.startsWith('/'));
+    // 不默认开：验证期间服务会对外提供候选，这得有人签字
+    assert.equal(r.allowStaging, false);
+  });
+
+  it('url 去掉结尾斜杠；非 http(s) 一律拒', () => {
+    assert.equal(cfg({ remote: { ...base.remote, url: 'http://x:1/' } }).remote?.url, 'http://x:1');
+    assertConfigError(() => cfg({ remote: { ...base.remote, url: 'ftp://x' } }), /http\(s\)/);
+  });
+
+  it('prompts 必填且只收 agent:<id>（skill 在远端没有对应文件）', () => {
+    assertConfigError(() => cfg({ remote: { url: 'http://x:1' } }), /remote\.prompts/);
+    assertConfigError(
+      () => cfg({ remote: { ...base.remote, prompts: { 'skill:sum': 'skills/sum/SKILL.md' } } }),
+      /agent:<id>/,
+    );
+    assertConfigError(() => cfg({ remote: { ...base.remote, prompts: {} } }), /不能是空对象/);
+  });
+
+  it('陌生键不静默忽略（`allowStagging` 拼错就等于没签字）', () => {
+    assertConfigError(
+      () => cfg({ remote: { ...base.remote, allowStagging: true } }),
+      /不认识的字段 "allowStagging"/,
+    );
+  });
+
+  it('tokenEnv 必须是环境变量名（不是 key 本身）', () => {
+    assertConfigError(
+      () => cfg({ remote: { ...base.remote, tokenEnv: 'sk-abc123' } }),
+      /环境变量名/,
+    );
+  });
+});

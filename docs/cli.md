@@ -69,8 +69,14 @@ harness rsi propose --from <json>  登记手写 L1 提案（不调模型）
 harness rsi accept --from <json>   手写提案也过完整验证门才采纳
 ```
 
-`rsi` **没有** `--remote`，而且是结构性的：一轮 RSI 的必要条件是「同一份被改过的资产被拿去跑」，
-远程服务的提示词属于它自己，补丁到不了那边。理由与打通前提见 [rsi.md](rsi.md#为什么-rsi-没有---remote2026-11-28-定)。
+`rsi --remote <url>` 把轮次打到**服务**上：候选会写进服务读的提示词文件并重载，跑完再还原。
+需要配置里写好 `remote` 段（`prompts` 映射 + `allowStaging`），见
+[rsi.md](rsi.md#rsi---remote为什么它要先写盘)。
+
+```
+  --remote <url>        远程跑轮次（覆盖配置里的 remote.url）
+  --sync-remote         预检发现「本地与远端不一致」时，用本地覆盖远端（写文件 + 重载）
+```
 
 ### 跨服务评测（`--remote`）
 

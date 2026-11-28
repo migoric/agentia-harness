@@ -35,6 +35,8 @@ export const STATUS_BY_CODE: Readonly<Record<HarnessErrorCode, number>> = {
   // —— 状态/流程不允许：同样的请求换个时刻可能就成
   'rsi.gate_blocked': 409,
   'rsi.no_baseline': 409,
+  // 记录坏了要先看一眼（盘上可能有个没被验证的提示词）—— 重试不会变好
+  'rsi.bad_record': 409,
   'code.unapproved': 409,
   'code.conflict': 409,
   // —— 执行了但结果不达标：改请求没用，得改代码/改用例

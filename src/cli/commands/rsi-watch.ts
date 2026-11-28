@@ -7,6 +7,7 @@ import { usd } from '../../util/usd.js';
 import { boolFlag, numFlag, strFlag } from '../args.js';
 import { assetsOf, type CliContext } from '../context.js';
 import { say, warn } from '../output.js';
+import type { RemoteStage } from '../remote-stage.js';
 import { tuningOf } from './run.js';
 
 /**
@@ -23,7 +24,7 @@ import { tuningOf } from './run.js';
  * 2. **它不做回滚**。回归检测与回滚是 `rsi regress --revert` 的事，且要过指纹校验。
  * 3. **停止条件比「一直跑」重要**。预算、到点、无进展、信号，四条都在开下一轮之前判。
  */
-export async function watchCommand(ctx: CliContext): Promise<number> {
+export async function watchCommand(ctx: CliContext, remote?: RemoteStage): Promise<number> {
   if (boolFlag(ctx.flags, 'dry-run')) {
     throw new HarnessError(
       'config.invalid',
@@ -64,6 +65,15 @@ export async function watchCommand(ctx: CliContext): Promise<number> {
     runRound: async (signal, round) => {
       say(`\n=== 第 ${round} 轮 ===`);
       const result = await runRounds({
+        ...(remote !== undefined
+          ? {
+              stage: remote.stage,
+              runner: remote.runner,
+              onAcceptedAssets: async (a: Parameters<RemoteStage['push']>[0]) => {
+                await remote.push(a);
+              },
+            }
+          : {}),
         config: ctx.config,
         // 每轮重扫资产：上一轮采纳之后磁盘变了，用旧快照会让这一轮基线仍在旧 prompt 上
         assets: assetsOf(ctx),
