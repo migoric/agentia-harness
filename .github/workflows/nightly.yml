@@ -46,7 +46,7 @@ jobs:
       # 失败时报告是唯一能说明「哪条挂了、花了多少」的东西 —— 一定留下来
       - name: 上传报告
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-report
           path: .tmp/nightly/
