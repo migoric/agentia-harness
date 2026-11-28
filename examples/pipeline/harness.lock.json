@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "assets": {
+    "agent:triage": {
+      "version": "1",
+      "fingerprint": "ac28e2b2a421"
+    },
+    "skill:draft-reply": {
+      "version": "1",
+      "fingerprint": "0e267321d05f"
+    },
+    "skill:queue-policy": {
+      "version": "1",
+      "fingerprint": "43bacae8eda8"
+    }
+  }
+}

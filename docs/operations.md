@@ -134,12 +134,47 @@ L1 改的是提示词，能修的是「模型理解错了」。有些失败改�
 ## 开发与测试
 
 ```bash
-npm run check        # typecheck + lint + test + build（CI 跑的就是这个）
-npm test             # 单跑测试
+npm run check        # 版本一致性 + typecheck + lint + test + build（CI 跑的就是这个）
+npm test             # 单跑测试（自带覆盖率阈值）
 npm run e2e:offline  # 真实 HTTP 客户端 + 本地假端点，含故障注入（需先 build）
+npm run nightly      # 真模型三用例冒烟（要 DEEPSEEK_API_KEY；一次约 $0.006）
 ```
 
 流程约定见 [`../CONTRIBUTING.md`](../CONTRIBUTING.md)，编码约定见 [`../AGENTS.md`](../AGENTS.md)。
+
+### nightly：真模型冒烟只值三条用例
+
+离线 e2e 验证的是**协议实现**，它用假端点，所以「DeepSeek 改了 `usage` 字段」「价格表过期」
+「模型侧行为漂移」这三件事一件也测不到 —— 而它们恰好是线上才会炸的那类。
+
+`scripts/nightly.mjs` 用真 key 跑 `examples/pipeline` 里三条最便宜的 train 用例（不含
+holdout —— 留出集是 RSI 的验收资源，不该被冒烟消耗），断言六件事：跑到了 3 条、全过、
+成本读数可用、成本在 `$0.05` 内、token 数正常、**隐含单价**在 `$0.1–$2.5 / 1M`。
+最后一条是价格表过期的探测器：DeepSeek 分时计价，但单价不可能离开这个区间。
+
+余额只提示不判定：一次冒烟约 `$0.007`，而余额保留两位小数、结算滞后约 20 秒，
+硬断言只会制造假失败。
+
+`.github/workflows/nightly.yml` 每天 UTC 18:00（北京 02:00，off-peak 价）跑一次。
+**secret 没配时脚本打 `::warning::` 并退出 0**：一条永远红的 nightly 没人看，而一条
+永远绿、从没真跑过的更危险 —— 那个 warning 就是用来把后者暴露出来的。
+
+### 版本与发版
+
+`package.json` 的版本与 `CHANGELOG.md` 最新版本节必须一致，这条检查在 `npm run check` 里
+（`scripts/version.mjs`）。它防的是两种事后才发现的错：升了包版本没写 CHANGELOG（发布页
+上是空的一节），或写了 `## [0.5.0]` 却没升包版本（发出去的还是旧版）。顺带检查版本号重复
+与「最新应在最上」的排序 —— 手工合并分支时这两件最容易错。
+
+```bash
+npm run bump minor   # package.json 升版 + 把 CHANGELOG 的 [Unreleased] 落成 [x.y.z] - 日期
+npm run check
+npm publish
+```
+
+没用 changesets：这个仓只有一个包、一份手写 CHANGELOG，而 CHANGELOG 写的是「为什么这么改」
+而不是「改了哪些 API」—— changesets 的核心价值（多包联动 + 从 fragments 拼 changelog）
+在这里都不成立，装它只是多一个要维护的东西。
 
 ### 离线 e2e：为什么有一条假端点
 

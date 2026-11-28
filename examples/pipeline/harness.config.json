@@ -1,0 +1,16 @@
+{
+  "appName": "pipeline",
+  "model": "deepseek-flash",
+  "endpoint": {
+    "baseURL": "https://api.deepseek.com/anthropic",
+    "apiKeyEnv": "DEEPSEEK_API_KEY"
+  },
+  "pricing": {
+    "deepseek-flash": { "in": 0.3, "out": 1.2, "cacheRead": 0.147 }
+  },
+  "balance": {
+    "warnBelowUsd": 0.5
+  },
+  "maxIterations": 8,
+  "maxCostUsd": 0.2
+}

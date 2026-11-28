@@ -27,7 +27,52 @@
 - `--repeat` 走 `tuningOf` 单点接线，`eval` / `rsi` / `rsi --watch` / `rsi regress` /
   留出集自动同值 —— 基线跑 1 次、候选跑 3 次会让门拿两种噪声水平的读数互比。
 
+**`harness history`：用例级时间维度，抖动用例不再有否决权。**
+
+报告是孤立文件：它能回答「这次比上次好不好」，回答不了「这条用例本来就是抖的还是这次
+真坏了」。没有后者，门的每一次否决都可能是在给一次坏运气发奖。
+
+- 每次 `harness eval` 往 `.workspace/evals/history.jsonl` 追加一行（`--no-history` 关掉）。
+  与 `--save` 无关：报告是某一次的快照，历史是所有次的走向；
+- `src/evals/history.ts`（新）：读侧坏行**计数跳过**、不抛错（它是旁证，不该挡住主流程），
+  但把 `skipped` 交回调用方，由 `harness history` 出声；
+- 抖动判据是**同条件矛盾**：同一 `(资产指纹, 用例集指纹)` 下既有全过又有全挂，或同一次
+  运行内 `0 < passedSamples < samples`。不是「历史通过率 < 100%」—— 那会把「修好过一次、
+  之后一直稳」的用例也算成不可信，而它恰恰是可靠的；
+- `error` / `threw` / `timeout` 这三类**运行失败**不参与判定（`recent` 里画成 `E`）。
+  这条是照真机误判加的：用错 key 跑了一轮 nightly，三条用例全 `stopReason=error`，
+  于是账本里成了「同样条件下既过又挂」，三条用例一起失去否决权；
+- `gate` 增 `GateOptions.flaky`：变失败的用例**全部**是抖动的才降级为
+  `case_regression_flaky`（`ok: true`，理由带依据）；混着一条稳的就照旧否决，并把被排除的
+  几条列进理由（读的人要能复核）。名单由 `verify` / `holdout` 自己读，不做四跳透传 ——
+  漏传一处的症状是「有时认抖动有时不认」，那是最难查的不一致；
+- `harness history [--tail n] [--check] [--json]`：表格 + 抖动依据，`--check` 有抖动即退出码 1。
+
+**nightly：真模型冒烟，三条最便宜的用例。**
+
+离线 e2e 验证的是协议实现，用假端点 ⇒「DeepSeek 改了 `usage` 字段」「价格表过期」
+「模型行为漂移」一件也测不到。`scripts/nightly.mjs` 用真 key 跑
+`examples/pipeline` 的三条 train 用例，断言：跑到 3 条、全过、成本读数可用、成本
+`< $0.05`、token 正常、**隐含单价在 `$0.1–$2.5 / 1M`**（价格表过期的探测器）。
+`.github/workflows/nightly.yml` 每天 UTC 18:00 跑；secret 缺失时打 `::warning::` 并退出 0。
+
 ### 变更
+
+**第二个示例 `examples/pipeline`**：两个技能 + 多轮 + 留出集（`phase: 1`）。`starter` 只证明
+「最小工程能跑通」，这个证明「换一种形态也能跑」—— `expect_skills`、多轮断言口径、留出集
+批次号这些机制才开始被走到。真机 5/5 通过，约 `$0.009`。
+
+**版本一致性检查进 `npm run check`**（`scripts/version.mjs`）。防两种事后才发现的错：
+升了包版本没写 CHANGELOG（发布页是空的一节），或写了新版本节却没升包版本。顺带查版本号
+重复与「最新应在最上」。`npm run bump patch|minor|major` 一键升版（把 `[Unreleased]` 落成
+版本节）。没用 changesets：单包 + 手写 CHANGELOG 的场景下它只带来维护面。
+
+**离线 e2e 增并发与账本两条**（31 条）：`--concurrency 2 --repeat 2` 的结果顺序必须与串行
+逐条一致（顺序变了，diff 就不再只是资产差异）、并发粒度是用例而不是采样；以及
+「每次 eval 自动记账」的 CLI 接线。
+
+**内部拆分**（都在 400 行守卫之内）：`evals/model-note.ts`（报告的模型事实）、
+`evals/verdict.ts`（「能指名到用例」那条判据，因为它会被历史改写）。
 
 **测试带上覆盖率门禁**（`npm test` 内建）。
 

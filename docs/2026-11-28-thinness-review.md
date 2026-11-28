@@ -164,6 +164,28 @@
 - **不要为了「厚」加依赖**。1 个运行时依赖是资产，不是缺点；自造轮子的成本已经付过了。
 - **不要放宽 holdout 阈值**。`SMALL_SAMPLE` 只加提示不放宽阈值，这个取舍是对的，别改。
 
+## 六、落地（同日）
+
+五处里动了四处，另一处（3.1 的采样参数）并进了 3.4 的账本 —— 因为「两次跑分可比吗」
+最终要靠事实回答，而不是靠记录一个 `temperature` 值。
+
+| 缺口 | 落了什么 | 入口 |
+| --- | --- | --- |
+| 3.1 无噪声模型 | `--repeat n` + Wilson 区间 + 两比例 z 检验；门只在显著时否决 | `docs/evals.md`「重复采样」 |
+| 3.2 覆盖率无门禁 | 阈值写进 `npm test`（只统计 `src/`，87/79/88） | `package.json` |
+| 3.3 真模型不在 CI | 三条最便宜用例 + 成本/单价/token 三道上限，每天一次 | `scripts/nightly.mjs`、`.github/workflows/nightly.yml` |
+| 3.4 没有时间维度 | JSONL 账本 + `harness history` + 抖动用例不再有否决权 | `docs/evals.md`「历史与抖动」 |
+| 3.5 工程外围 | 第二个示例（两技能 + 多轮 + 留出集）、版本一致性检查、并发顺序 e2e | `examples/pipeline`、`scripts/version.mjs` |
+
+**没做的两件，以及为什么：**
+
+- **changesets**。这仓只有一个包、一份手写 CHANGELOG，而 CHANGELOG 写的是「为什么这么改」。
+  changesets 的价值在多包联动与从 fragments 拼 changelog，这里都不成立。真正的风险是
+  「版本号与 CHANGELOG 错位」，一个 90 行的 `scripts/version.mjs` 就锁住了。
+- **per-case 绑定 agent**。多 agent 工程现在只能「整轮换 agent + `--only` 挑用例」。
+  改成本要动 `runSuite` 的 runner 装配、`report.agent` 的语义与门的 `sameAgent` 判据 ——
+  收益是省一个 flag，代价是把一条已经在跑的数据流拆开。记在这里，不当成疏忽。
+
 ## 附：复现
 
 ```bash
