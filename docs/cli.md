@@ -30,6 +30,10 @@ harness eval            跑评测集；有失败退出码 1
   --only <a,b>          只跑这些用例
   --timeout/--concurrency/--retries   见 evals.md 的三个旋钮
   --keep-traces         把 trace 落盘（默认不落；失败用例报告里带 traceId）
+  --remote <url>        把评测打到**服务**上（A2A），判据/报告/回归门完全复用；
+                        本地不调模型，所以不需要本地模型凭据
+  --token-env <NAME>    远程凭据所在的变量名（缺省 HARNESS_REMOTE_TOKEN）—— 只与环境变量配合，
+                        不接受命令行明文（那会进 shell history 与进程列表）
 harness report <基线.json> <候选.json>   两份报告比一次并过门；门不过退出码 1
   --max-token-growth <r> / --max-cost-growth <r>   两种门阈值
   --allow-case-set-change  用例集不同时不拒绝，只比对同名用例（缺省拒绝）
@@ -64,6 +68,21 @@ harness rsi revert [id] 回滚最近一次采纳；给 id 可防期间插入了�
 harness rsi propose --from <json>  登记手写 L1 提案（不调模型）
 harness rsi accept --from <json>   手写提案也过完整验证门才采纳
 ```
+
+### 跨服务评测（`--remote`）
+
+```bash
+HARNESS_REMOTE_TOKEN=<服务端 api key> harness eval --remote http://192.168.31.112:18080 --save
+harness eval --remote <url> --agent billing     # 直连某个 agent，不经意图层
+```
+
+同一套用例集、同一套断言、同一份报告结构，只是被测对象换成了**服务里那份装配**
+（鉴权、租户配额、意图层派单、真模型）。`tokens` / `costUsd` / `model` / `iterations` /
+实际承接的 agent 全部只从对方 A2A 响应的 `metadata` 读 —— 读不到就如实未知，不补本地估算。
+`routedTo` 因此是服务侧的真值，`routeAccuracy` 在跨服务评测里才有意义。
+
+两条边界：**多轮用例会直接报错**（静默只跑第一轮是最危险的那种"绿"）；
+`iterations` 读服务报的值，服务不报就是 0（报告里能看到这个缺失信号）。
 
 ## 服务与代码补丁
 
